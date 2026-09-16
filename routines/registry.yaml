@@ -1,0 +1,7 @@
+routines:
+  - id: cs-folder-check
+    name: CS 폴더 새 서류 확인
+    schedule: "30 9,14 * * 1-5 Asia/Seoul"
+    owner: CS
+    status: ACTIVE
+    notes: Desktop\\CS watched folders; stay quiet if empty

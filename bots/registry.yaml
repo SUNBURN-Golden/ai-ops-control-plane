@@ -1,0 +1,255 @@
+# Bot Registry — cross-audit 2026-09-17
+# status: ACTIVE | CREATED_NOT_VALIDATED | PLANNED | DISABLED | DEPRECATED
+# audit: 정상 | 수정필요 | 통합후보 | 오류
+
+bots:
+  - bot_id: "c43890b3-75b4-4b8a-853a-dca64ed77840"
+    name: "대장Bot"
+    parent: null
+    role: COO
+    domain: orchestration
+    status: ACTIVE
+    audit: 정상
+    sot: [control-plane, task-board]
+    handoff_targets: [법무총괄, 고객응대, 마케팅총괄, 개발총괄, 운영, 품질지식]
+    approval_level: L0-L1-route
+    onedrive: READ_ONLY
+    notes: Orchestrates only; not universal doer
+
+  - bot_id: "3615903"
+    name: "법무총괄"
+    parent: 대장Bot
+    role: LEGAL Director
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    sot: [case-ledger, oneDrive-read]
+    handoff_targets: [민사, 형사, 강제집행, 품질지식]
+    approval_level: L1
+    onedrive: READ_ONLY
+
+  - bot_id: "3105696"
+    name: "강제집행"
+    parent: 법무총괄
+    role: Enforcement
+    status: ACTIVE
+    audit: 통합후보
+    sot: [case-ledger, oneDrive-read]
+    handoff_targets: [채권압류, 유체동산, 부동산집행]
+    approval_level: L1
+    onedrive: READ_ONLY
+    notes: Overlaps 법무총괄 leaf routing; keep until JunTae consolidates
+
+  - bot_id: "3615959"
+    name: "민사"
+    parent: 법무총괄
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    handoff_targets: [본안소송, 보전처분]
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3615963"
+    name: "본안소송"
+    parent: 민사
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3615965"
+    name: "보전처분"
+    parent: 민사
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3615967"
+    name: "형사"
+    parent: 법무총괄
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3615970"
+    name: "채권압류"
+    parent: 강제집행
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3615973"
+    name: "유체동산"
+    parent: 강제집행
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3615976"
+    name: "부동산집행"
+    parent: 강제집행
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3615911"
+    name: "고객응대"
+    parent: 대장Bot
+    role: Customer Ops Lead
+    status: CREATED_NOT_VALIDATED
+    audit: 통합후보
+    sot: [case-ledger, crm-xlsx]
+    handoff_targets: [CS, CRM, 법무총괄]
+    onedrive: READ_ONLY
+    approval_level: L1-L2
+    notes: Overlaps CS/CRM leads; keep all three until JunTae picks merge shape
+
+  - bot_id: "3105707"
+    name: "CS"
+    parent: 고객응대
+    status: ACTIVE
+    audit: 통합후보
+    onedrive: READ_ONLY
+    approval_level: L1-L2
+
+  - bot_id: "3105708"
+    name: "CRM"
+    parent: 고객응대
+    status: ACTIVE
+    audit: 통합후보
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3105711"
+    name: "마케팅총괄"
+    parent: 대장Bot
+    status: ACTIVE
+    audit: 정상
+    handoff_targets: [블로그, 검색마케팅, 한국웹마케팅, 영문웹마케팅, 애널리틱스, 브랜드AIEO, 개발총괄]
+    onedrive: READ_ONLY
+    approval_level: L1-L3-ads
+
+  - bot_id: "3615980"
+    name: "블로그"
+    parent: 마케팅총괄
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3615979"
+    name: "검색마케팅"
+    parent: 마케팅총괄
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3616019"
+    name: "한국웹마케팅"
+    parent: 검색마케팅
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3616020"
+    name: "영문웹마케팅"
+    parent: 검색마케팅
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3616022"
+    name: "애널리틱스"
+    parent: 마케팅총괄
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L0-L1
+
+  - bot_id: "3616024"
+    name: "브랜드AIEO"
+    parent: 마케팅총괄
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3105712"
+    name: "개발총괄"
+    parent: 대장Bot
+    status: ACTIVE
+    audit: 정상
+    sot: [github]
+    handoff_targets: [KIX, SOULBOUND, ZARI, 마음결, MVCompiler]
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3616030"
+    name: "KIX"
+    parent: 개발총괄
+    repo: "https://github.com/BeautifulMind-JT/kix-protocol"
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3616033"
+    name: "SOULBOUND"
+    parent: 개발총괄
+    repo: "https://github.com/soulbounddao-ADMIN/soulbound"
+    status: CREATED_NOT_VALIDATED
+    audit: 수정필요
+    onedrive: READ_ONLY
+    approval_level: L1
+    notes: Different org than BeautifulMind-JT; confirm access
+
+  - bot_id: "3616034"
+    name: "ZARI"
+    parent: 개발총괄
+    repo: "https://github.com/BeautifulMind-JT/ZARI"
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3616038"
+    name: "마음결"
+    parent: 개발총괄
+    repo: "https://github.com/BeautifulMind-JT/maeum-gyeol"
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3616076"
+    name: "MVCompiler"
+    parent: 개발총괄
+    repo: "https://github.com/BeautifulMind-JT/film-unit-mv-studio"
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
+
+  - bot_id: "3615917"
+    name: "운영"
+    parent: 대장Bot
+    status: CREATED_NOT_VALIDATED
+    audit: 통합후보
+    onedrive: READ_ONLY
+    approval_level: L0-L1
+    notes: Overlaps COO reporting routines
+
+  - bot_id: "3615918"
+    name: "품질지식"
+    parent: 대장Bot
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    onedrive: READ_ONLY
+    approval_level: L1
