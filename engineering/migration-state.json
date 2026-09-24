@@ -1,0 +1,6 @@
+{
+  "migration_task": "https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/1",
+  "source_commit": "ec3f6db0d613385bfdf2392a4295f0099be1eec6",
+  "stage": "PREPARED_SOURCE_IMPORT_PENDING",
+  "runtime_enabled": false
+}
