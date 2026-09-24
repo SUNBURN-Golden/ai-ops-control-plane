@@ -313,3 +313,14 @@ class ExtractionTests(unittest.TestCase):
         self.assertNotIn('BeautifulMind-JT/beautiful-mind', m.PRODUCTS)
 
 if __name__ == '__main__': unittest.main()
+
+
+class BranchPreservationTests(unittest.TestCase):
+    def test_rejects_existing_writer_change(self):
+        with self.assertRaises(m.MigrationError):
+            m.reject_overwrite({'x': ('100644', b'new')}, {'x': {'sha':'base'}}, {'x': {'sha':'writer'}})
+    def test_rejects_deleting_existing_writer_change(self):
+        with self.assertRaises(m.MigrationError):
+            m.reject_overwrite({'x': None}, {'x': {'sha':'base'}}, {'x': {'sha':'writer'}})
+    def test_accepts_already_identical_output(self):
+        m.reject_overwrite({'x': ('100644', b'new')}, {}, {'x': {'sha':m.blob_sha(b'new')}})

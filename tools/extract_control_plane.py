@@ -184,10 +184,12 @@ class GitHub:
             raise MigrationError("existing branch not owned by this migration")
         return head, tree, entries, True
 
-    def publish(self, repo, changes, title, body, expected_main=None):
+    def publish(self, repo, changes, title, body, expected_main=None, expected_head=None):
         head, tree, existing, exists = self.working(repo)
         if expected_main is not None and self.main(repo) != expected_main:
             raise MigrationError("main advanced; refusing stale migration proposal")
+        if head != expected_head:
+            raise MigrationError("working HEAD changed before publish; stop")
         elements = []
         for path, value in sorted(changes.items()):
             if value is None:
@@ -207,6 +209,9 @@ class GitHub:
             new_tree = self.api(f"repos/{repo}/git/trees", "POST", {"base_tree": tree, "tree": elements})["sha"]
             commit = self.api(f"repos/{repo}/git/commits", "POST",
                               {"message": title, "tree": new_tree, "parents": [head]})["sha"]
+            observed, _, _, still_exists = self.working(repo)
+            if observed != head or still_exists != exists or self.main(repo) != expected_main:
+                raise MigrationError("remote moved during object preparation; no ref update")
             if exists:
                 self.api(f"repos/{repo}/git/refs/heads/{BRANCH}", "PATCH", {"sha": commit, "force": False})
             else:
@@ -267,6 +272,9 @@ def build_import(gh, source):
                  "destination_blob": blob_sha(data), "mode": e["mode"], "transformed": data != original}
         if reason:
             entry["reason"] = reason
+        if data != original:
+            entry["original_preserved_path"] = prov
+            entry["original_preserved_blob"] = e["sha"]
         manifest.append(entry)
     if not any(m["source_path"] == "scripts/control_plane.py" for m in manifest) or len(manifest) < 20:
         raise MigrationError("incomplete source selection")
@@ -362,6 +370,15 @@ def plan_id(bindings, actions):
     payload = json.dumps({"bindings": bindings, "actions": actions}, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
+def reject_overwrite(changes, baseline, working):
+    """A task stamp is not permission to overwrite branch-local source edits."""
+    for path, value in changes.items():
+        before = baseline.get(path, {}).get("sha")
+        current = working.get(path, {}).get("sha")
+        desired = None if value is None else blob_sha(value[1])
+        if current != before and current != desired:
+            raise MigrationError(f"branch-local change would be overwritten: {path}")
+
 def build_plan(gh):
     """Read-only. Returns a plan dict binding every write/delete to remote state.
     plan['_changes'] maps repo -> (changes, reasons, preimage entries) for apply."""
@@ -374,6 +391,12 @@ def build_plan(gh):
     dmain = gh.main(DEST)
     dhead, _, dentries, dexists = gh.working(DEST)
     changes, reasons = build_import(gh, source)
+    # Import only once. Adaptation must never be overwritten by a fresh import.
+    if "engineering/source-manifest.json" in dentries:
+        raise MigrationError("source already imported; reconcile/adapt, do not reapply")
+    for path, value in changes.items():
+        if path != STAMP and path in dentries and dentries[path]["sha"] != blob_sha(value[1]):
+            raise MigrationError(f"existing destination path conflicts: {path}")
     actions += actions_for(DEST, changes, reasons, dentries, dmain, dhead)
     bindings[DEST] = {"main_sha": dmain, "head_sha": dhead}
     prepared[DEST] = (changes, dentries)
@@ -385,6 +408,7 @@ def build_plan(gh):
         changes, reasons = product_changes(gh, repo, entries, "PENDING_IMPORT_COMMIT")
         head_sha = phead if pexists else None
         basis = pentries if pexists else entries
+        reject_overwrite(changes, entries, basis)
         actions += actions_for(repo, changes, reasons, basis, main_sha, head_sha)
         bindings[repo] = {"main_sha": main_sha, "head_sha": head_sha}
         prepared[repo] = entries
@@ -482,7 +506,7 @@ def main():
             "The author cannot self-approve. No application or live-provider tests claimed.\n")
     imported_sha = gh.publish(DEST, dest_changes,
                               "refactor: import shared engineering control plane from KIX (disabled)",
-                              body, plan["bindings"][DEST]["main_sha"])
+                              body, plan["bindings"][DEST]["main_sha"], plan["bindings"][DEST]["head_sha"])
     verify_remote(gh, DEST, imported_sha, dest_changes)
     for repo in PRODUCTS:
         main_sha = gh.main(repo)
@@ -501,7 +525,7 @@ def main():
                 "User-only merge. Runtime identity separation, ledger continuity, host/Slack cutover\n"
                 "and a separately authorized canary remain independent gates.\n")
         head = gh.publish(repo, change, "refactor: remove shared control-plane ownership from product",
-                          text, main_sha)
+                          text, main_sha, phead)
         verify_remote(gh, repo, head, change)
     print("Draft source/consumer PR preparation complete. Nothing merged or deployed.")
 
@@ -511,3 +535,4 @@ if __name__ == "__main__":
     except (MigrationError, KeyError, ValueError) as exc:
         print(f"STOP: {exc}", file=sys.stderr)
         sys.exit(1)
+
