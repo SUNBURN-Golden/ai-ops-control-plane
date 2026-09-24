@@ -1,3 +1,6 @@
+<!-- CP-EXTRACT-001 source update -->
+Current stage: SOURCE_ADAPTED_REVIEW_PENDING. Import commit 55240a610688a5fe7f4883e250b0ffab6c126fdb. The preparation sequence below is retained as migration history; source import is now real. Product proposals and exact-head review are tracked on issue #1. Central runtime remains disabled. See README.md and CUTOVER.md for current execution limits.
+
 # CP-EXTRACT-001 — source extraction and cutover boundary
 
 User decision: [central issue #1](https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/1).
@@ -57,3 +60,4 @@ KIX #50 and #51 must not land new shared operations notes in the product reposit
 ## Non-claims
 
 A destination repository, documentation PR or source copy is not a deployed control plane. The current preparation does not prove imported runtime test success, latest host status, central cross-project execution, ledger migration, independent audit, production readiness, or safe retirement of the current KIX runtime.
+

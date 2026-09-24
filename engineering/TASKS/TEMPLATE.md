@@ -53,7 +53,7 @@ PHASE_OR_LAYER_POINTER:
 
 Use exact task-spec sections or existing repository documents; N/A is allowed
 only when no such requirement applies. Existing project-specific requirements
-remain mandatory, including KIX immutable docs/tasks specifications.
+remain mandatory, including the selected product’s authoritative task specifications.
 
 For CHEAP_MECHANICAL/A0 only:
 A0_AUTHORIZATION_POINTER:

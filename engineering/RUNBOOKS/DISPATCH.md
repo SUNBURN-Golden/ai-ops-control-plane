@@ -10,56 +10,12 @@ NO SECOND SEMANTIC REASONING PASS.
 
 ## 1. Project map
 
-PROJECT: KIX
-REPO: `BeautifulMind-JT/kix-protocol`
-DEFAULT_BRANCH: `main`
-SLACK_PROJECT: `#kix`
-SLACK_CONTROL: `#ai-control`
-SLACK_DECISIONS: `#ai-decisions`
-SLACK_AUDIT: `#ai-audit`
-
-OPERATING_MODE: `MANUAL_ONLY`
-AUTOMATED_ACTION_ADAPTER: `MECHANICAL`
-GROK_EVENT_OVERRIDES: `NONE`
-
-DEFAULT_EXECUTION_CLASS: `BUILDER_STANDARD`
-DEFAULT_BUILDER_ID: `CONFIG_REQUIRED`
-DEFAULT_AUDIT_FLOOR: `A1`
-DEFAULT_ASTRA_GATE: `NONE`
-REVIEW_POLICY: `REQUIRED_NON_A0`
-REVIEWER_LANE_ID: `CONFIG_REQUIRED`
-
-TASK_SPEC_POLICY: `KIX_DOCS_TASK_REQUIRED`
-A0_POLICY: `EXPLICIT_AUTHORIZATION_ONLY; NEVER_LOCKED_FILES`
-POST_MERGE_POLICY: `REPOSITORY_RULES_REQUIRED`
-
-The task envelope is only an orchestration envelope.
-The immutable execution specification remains the applicable file under
-`docs/tasks/` with an exact blob/SHA pointer.
-
-A control-plane decision does not silently rewrite that task document.
-If scope/contract changes require a task-spec revision, that revision is created
-outside the executing agent session by the already-authorized repository
-workflow, then TASK_REVISION is incremented before resume.
-
-Existing KIX locked-file and prohibited-work rules remain absolute.
-
-KIX compatibility rules:
-
-- legacy KIX wording that green exact-head CI is "merge-ready" means only that
-  the KIX CI gate itself is satisfied inside this control plane; global
-  READY_FOR_MERGE additionally requires independent review + any required Astra gate +
-  current-task/current-HEAD predicates;
-- legacy instructions to "wait" for queued/in-progress CI do not authorize a
-  standing Grok session or polling. The mechanical layer waits for the next
-  GitHub event and then resumes the state machine;
-- generic same-owner CI feedback applies only before merge. Post-merge KIX
-  failure follows the preserved new-task/session/branch/PR rule.
-
-If PROJECT MAP or required actor/reviewer configuration is missing:
-`[BLOCKED] Reason: CONTROL_PLANE_NOT_CONFIGURED`
-
-Do not guess.
+Shared source owner: BeautifulMind-JT/ai-ops-control-plane.
+Resolve the exact target repository in `.github/control-plane/projects.json`.
+Project-specific task/verification rules are in `projects/<repository-name>.md`.
+All profiles are source-only and deployment_enabled=false. No default target.
+KIX, ZARI, FILM UNIT and MAEUM_GYEOL are peers. SOULBOUND is excluded.
+Never infer target, channel, builder or reviewer. Missing configuration blocks.
 
 ## 2. Activation preconditions
 
@@ -311,17 +267,10 @@ A single successful check is never equivalent to CI_GATE_PASS.
 
 The mechanical layer aggregates the complete project policy for CURRENT_HEAD_SHA.
 
-KIX verification policy is `CI_REQUIRED`.
-
-For each CURRENT_HEAD_SHA, both workflow runs must be terminal success:
-
-- `KTX kernel verification`
-- `KIX protocol verification`
-
-A success from an older SHA is stale.
-A single job/check is not enough.
-
-KIX existing exact-head CI and evidence rules remain authoritative.
+Use the selected product profile and authoritative product CI rules.
+KIX requires both KTX kernel and KIX protocol verification; this is not the
+default gate for other products. Do not infer or waive a missing gate.
+A success from an older SHA is stale; a single job is not a workflow gate.
 
 Accepted verification facts must include exact HEAD/evidence SHA and run IDs or
 local evidence pointers.
@@ -650,7 +599,7 @@ preserved KIX governance.
 
 After merge:
 - record merge SHA;
-- perform the required KIX post-merge checks for that merge;
+- for KIX, perform the required KIX post-merge checks for that merge;
 - derived state is MERGED_POST_VERIFY until complete.
 
 If post-merge verification fails:

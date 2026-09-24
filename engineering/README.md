@@ -1,42 +1,31 @@
-# Shared engineering control plane
+# Shared engineering control plane — source candidate
 
-Migration: [CP-EXTRACT-001](https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/1).
+Owner: BeautifulMind-JT/ai-ops-control-plane. Root organization policies remain authoritative.
+KIX, ZARI, FILM UNIT and MAEUM_GYEOL are product consumers. SOULBOUND is excluded.
 
-## Scope and current state
+Source imported from KIX ec3f6db0d613385bfdf2392a4295f0099be1eec6.
+Import commit: 55240a610688a5fe7f4883e250b0ffab6c126fdb.
+source-manifest.json records import-time blobs; later adaptation is a separate commit.
+Original transformed files are in provenance/kix; historical PR notes are indexed in history/manifest.json.
+These are historical evidence, never transferred deployment authorization.
 
-This repository, not KIX, is the destination for shared AI engineering governance, dispatch, runtime, boundary helpers and tests. KIX, ZARI, FILM UNIT and 마음결 are product repositories, not infrastructure owners.
+Central config separates control_repository from the explicit ASTRA_TARGET_REPOSITORY.
+Only projects.json targets are accepted. Every target deployment_enabled is false.
+No default target, enabled central route, production installation or cutover is claimed.
+Project task/CI inputs are in projects/. Approved product contracts always remain in products.
 
-**PREPARED_SOURCE_IMPORT_PENDING.** This PR prepares a reproducible extraction and records the new ownership boundary. It does not yet contain the full imported runtime and does not claim completion, independent audit, production cutover, or activation.
+Repository-root Engineering source CI runs offline Python and shell checks.
+Nested .github/workflows are archived workflow source, not active dispatch workflows.
+Their original KIX paths/identity are historical; do not install them as a central runner workflow.
+A reviewed central dispatch workflow, target credential scopes and fresh host/workflow attestation
+remain separate integration/cutover gates. The current sources cannot authorize production dispatch.
 
-Existing root-level Lawhelpers/CRM/knowledge/OneDrive policies remain unchanged. Engineering source belongs under `engineering/`; product code and project-specific contracts remain in their own repositories. No customer data, secrets or runtime databases are imported.
+Run from repository root:
+- python3 -m unittest discover -s tests
+- ASTRA_TARGET_REPOSITORY=BeautifulMind-JT/kix-protocol python3 -m unittest discover -s engineering/scripts -p 'test_control_plane*.py'
+- bash -n engineering/scripts/control_plane_boundary_hook.sh
+- bash -n engineering/scripts/control_plane_boundary_probe.sh
 
-## One-time source import
-
-Use an already authenticated development host with Python 3.10+ and GitHub CLI (`gh`). No model/builder session or new paid service is needed.
-
-```sh
-gh auth status
-gh repo clone BeautifulMind-JT/ai-ops-control-plane ai-ops-control-plane-migration -- --branch ops/cp-extract-001
-cd ai-ops-control-plane-migration
-python3 -m unittest discover -s tests -v
-python3 tools/extract_control_plane.py --plan cp-extract-001-plan.json
-python3 tools/extract_control_plane.py --apply --plan cp-extract-001-plan.json
-```
-
-The default command is read-only and writes a machine-readable plan (`repo`, `action`, `path`, `before_blob`, `after_blob`, `main_sha`, `head_sha`, transform `reason`) plus a `plan_id` binding each repository's `main` SHA, migration-branch HEAD SHA and preimage blobs. `--apply` re-validates that identical plan against live remote state before any write: drifted `main`/HEAD/preimage aborts and requires a re-plan, so a reviewed plan can never overwrite another writer or a moved baseline. It then imports the pinned source into this migration branch, verifies remote HEAD/tree/deletions/locked KIX blobs, and creates/updates draft extraction PRs for the four product repositories. It never merges, modifies a default branch, enables a runtime, attaches a runner, invokes a builder, changes credentials/settings, moves a live ledger, or retries a failed API write. It stops if pinned KIX main moved or an existing migration lineage is closed/review-ready/unrecognized.
-
-AGENTS governance is split at an explicit per-repository boundary marker (`# Repository-specific engineering rules (preserved)` for kix-protocol and ZARI; `## Repository-specific engineering constraints` for film-unit-mv-studio and maeum-gyeol). The marker must be a single exact standalone line and the local suffix — marker line included — is preserved byte-for-byte; other similar headings are never used to enlarge the split. The FILM legacy E2 pointer appendix is removed only on an exact byte match.
-
-Run this once; do not schedule it. A failed or uncertain write requires inspection, not automatic replay. Do not put access tokens in chat or source. Use existing local `gh` authentication with access to the five relevant private repositories.
-
-## Verification boundary
-
-The preparation script has author-side synthetic unit tests. Those are not the imported runtime's tests, not integration proof, and not a non-author review. Required exact-HEAD CI and independent review remain open. No old KIX audit/activation result transfers to a new repository.
-
-## Source versus deployment
-
-Source import and deployment are separate. The imported activation is reset to NOT_APPROVED/PENDING/false. Nested `engineering/.github/workflows/` files are source, not installed GitHub workflows. Existing KIX-oriented fixtures and root-relative Git assumptions are preserved as provenance; the import alone is not a working cross-repository dispatcher.
-
-A separate implementation/cutover gate must distinguish control-repository/workflow identity from target-repository/task identity, preserve task/owner/request and ledger continuity, fence/drain old dispatch before retiring it, verify runner permissions and fresh exact-source attestation, and obtain independent review plus User authorization for a bounded canary. Never operate two live dispatchers for the same task.
-
-Read [MIGRATION.md](MIGRATION.md) before reviewing or merging. The author cannot self-approve this architecture change.
+No main changes, merge, runner registration, Slack/webhook routing, ledger migration,
+paid provider calls or renewed FILM/MAEUM rollout are part of source extraction.
+See CUTOVER.md for the separate approval gate. Issue: https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/1

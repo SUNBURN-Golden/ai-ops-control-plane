@@ -286,6 +286,7 @@ class RuntimeEnabledGateTests(unittest.TestCase):
         fail = subprocess.CompletedProcess([], 1)
         with patch.object(cp, "load_activation", return_value=activation), \
              patch.object(cp, "validate_repo"), \
+             patch.object(cp, "load_config", return_value={"repository":"owner/repo"}), \
              patch.object(cp.subprocess, "run", return_value=fail) as run:
             with self.assertRaises(cp.ControlPlaneError):
                 cp.require_runtime_enabled()
@@ -297,6 +298,7 @@ class RuntimeEnabledGateTests(unittest.TestCase):
         ok = subprocess.CompletedProcess([], 0)
         with patch.object(cp, "load_activation", return_value=activation), \
              patch.object(cp, "validate_repo"), \
+             patch.object(cp, "load_config", return_value={"repository":"owner/repo"}), \
              patch.object(cp.subprocess, "run", return_value=ok) as run:
             self.assertIs(cp.require_runtime_enabled(), activation)
             self.assertEqual(run.call_count, 3)
@@ -312,7 +314,7 @@ class RuntimeEnabledGateTests(unittest.TestCase):
         with patch.object(cp, "ACTIVATION_PATH", Path(handle.name)):
             doc = cp.load_activation()
         self.assertTrue(doc["runtime_enabled"])
-        env = {"GITHUB_REPOSITORY": "BeautifulMind-JT/kix-protocol"}
+        env = {"GITHUB_REPOSITORY": "BeautifulMind-JT/ai-ops-control-plane"}
         with patch.object(cp, "load_activation", return_value=doc), \
              patch.object(cp, "validate_repo"), \
              patch.object(cp.subprocess, "run") as run:
@@ -326,7 +328,7 @@ class RuntimeEnabledGateTests(unittest.TestCase):
 
     def test_validate_repo_enabled_requires_sha_and_pointers(self):
         enabled = activation_doc(runtime_enabled=True, activated_runtime_sha="b" * 40)
-        env = {"GITHUB_REPOSITORY": "BeautifulMind-JT/kix-protocol"}
+        env = {"GITHUB_REPOSITORY": "BeautifulMind-JT/ai-ops-control-plane"}
         for field, bad in (("activated_runtime_sha", "PENDING"),
                            ("activated_runtime_sha", ""),
                            ("activated_runtime_sha", None),
@@ -341,7 +343,7 @@ class RuntimeEnabledGateTests(unittest.TestCase):
                         cp.validate_repo()
 
     def test_validate_repo_succeeds_while_disabled(self):
-        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "BeautifulMind-JT/kix-protocol"}):
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "BeautifulMind-JT/ai-ops-control-plane"}):
             cp.validate_repo()
 
 

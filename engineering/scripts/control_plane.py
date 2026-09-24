@@ -48,6 +48,7 @@ ALLOWED_LAUNCH_STATES = (
 HOST_COMMAND = ("/usr/bin/sudo", "-n", "-u", "astra-control", "/opt/astra/bin/astra-host-control")
 LAUNCH_IDENTITY = ("repository", "task_id", "task_revision", "builder_id", "launch_request_id", "attempt_id")
 RUNTIME_PATHS = (
+    ".github/control-plane/projects.json",
     "scripts/control_plane.py", "scripts/control_plane_host.py",
     "scripts/control_plane_boundary.py", "scripts/control_plane_boundary_hook.sh",
     "scripts/control_plane_boundary_probe.sh",
@@ -78,6 +79,17 @@ def load_json(path: Path) -> Dict[str, Any]:
 
 def load_config() -> Dict[str, Any]:
     cfg = load_json(CONFIG_PATH)
+    if "control_repository" in cfg:
+        control = cfg["control_repository"]
+        if control != "BeautifulMind-JT/ai-ops-control-plane":
+            raise ControlPlaneError("unrecognized control repository")
+        target = os.environ.get("ASTRA_TARGET_REPOSITORY")
+        profiles = load_json(CONFIG_PATH.with_name("projects.json"))
+        if target not in profiles:
+            raise ControlPlaneError("explicit allowlisted ASTRA_TARGET_REPOSITORY required")
+        cfg = dict(profiles[target])
+        if cfg.get("repository") != target or cfg.get("control_repository") != control:
+            raise ControlPlaneError("control/target identity mismatch")
     required = {
         "schema_version",
         "project",
@@ -173,7 +185,7 @@ def require_text(path: str, substrings: Iterable[str]) -> None:
 def validate_repo() -> None:
     cfg = load_config()
     activation = load_activation()
-    if cfg["repository"] != os.environ.get("GITHUB_REPOSITORY", cfg["repository"]):
+    if cfg.get("control_repository", cfg["repository"]) != os.environ.get("GITHUB_REPOSITORY", cfg.get("control_repository", cfg["repository"])):
         raise ControlPlaneError("config repository does not match GITHUB_REPOSITORY")
     require_text(
         "TASKS/TEMPLATE.md",
@@ -351,15 +363,18 @@ def require_runtime_enabled() -> Dict[str, Any]:
     if not activation["runtime_enabled"]:
         raise ControlPlaneError("runtime is fail-closed: runtime_enabled=false")
     validate_repo()
+    cfg = load_config()
+    if "control_repository" in cfg and cfg.get("deployment_enabled") is not True:
+        raise ControlPlaneError("central target deployment not approved")
     audited = activation["activated_runtime_sha"]
     if not isinstance(audited, str) or not re.fullmatch(r"[0-9a-f]{40}", audited):
         raise ControlPlaneError("activated_runtime_sha must identify the audited runtime commit")
     # An activation-only commit may follow the audited commit. Product changes
     # do not require re-auditing unchanged control code; control changes do.
     for args in (("merge-base", "--is-ancestor", audited, "HEAD"),
-                 ("diff", "--exit-code", audited, "HEAD", "--", *RUNTIME_PATHS),
-                 ("diff", "--exit-code", "HEAD", "--", *RUNTIME_PATHS,
-                  ".github/control-plane/activation.json")):
+                 ("diff", "--exit-code", audited, "HEAD", "--", *("./" + p for p in RUNTIME_PATHS)),
+                 ("diff", "--exit-code", "HEAD", "--", *("./" + p for p in RUNTIME_PATHS),
+                  "./.github/control-plane/activation.json")):
         result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, check=False)
         if result.returncode:
             raise ControlPlaneError("current runtime differs from or cannot resolve audited runtime SHA")
