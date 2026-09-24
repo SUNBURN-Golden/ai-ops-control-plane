@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "policy_id": "PENDING-prod-boundary",
+  "description": "EXAMPLE production boundary policy for the astra-control-plane runner. All claim values are placeholders — the operator must pin the real repository/owner/actor ids and the exact workflow commit SHA (GITHUB_WORKFLOW_SHA is the commit SHA containing the audited control-plane-runtime.yml, never the file's blob SHA) before install. Missing or mismatched claims deny the job.",
+  "required_claims": [
+    "env:GITHUB_RUN_ID",
+    "env:GITHUB_RUN_ATTEMPT",
+    "env:GITHUB_EVENT_PATH",
+    "event:repository.id"
+  ],
+  "allow": [
+    {
+      "name": "control-plane-runtime-main",
+      "claims": {
+        "env:GITHUB_REPOSITORY": "OWNER/REPO",
+        "env:GITHUB_REPOSITORY_ID": "0000000000",
+        "env:GITHUB_REPOSITORY_OWNER_ID": "000000000",
+        "env:GITHUB_REF": "refs/heads/main",
+        "env:GITHUB_WORKFLOW_REF": "OWNER/REPO/.github/workflows/control-plane-runtime.yml@refs/heads/main",
+        "env:GITHUB_WORKFLOW_SHA": "0000000000000000000000000000000000000000",
+        "env:GITHUB_EVENT_NAME": "workflow_dispatch",
+        "env:GITHUB_JOB": "control",
+        "env:GITHUB_ACTOR_ID": "000000000",
+        "event:repository.id": 0,
+        "event:repository.owner.id": 0,
+        "event:sender.id": 0
+      }
+    }
+  ]
+}
