@@ -14,5 +14,6 @@ These are immutable source pointers, not current central state. The original PR 
 - SOULBOUND is represented by the accessible `BeautifulMind-JT/beautiful-mind` repository; the old E4 'missing' row is not a verified claim about that repository. Its rollout remains excluded.
 - GLM readiness and another builder's successful canary do not establish a GLM production launch. No enablement or prior audit transfers to a central import.
 - Historical host paths are provenance, not an instruction to access them, move a live database, copy credentials or change an endpoint.
+- 2026-09-24 Phase A tooling correction: the extraction helper now uses explicit per-repository AGENTS boundary markers and a hash-bound plan (`main`/HEAD/preimage) that `--apply` must re-verify; earlier single-marker planning was corrected before any `--apply` run. No import or cutover is claimed by this note.
 
 Future corrections and residual acceptance belong to [CP-EXTRACT-001](https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/1). Original source is retained rather than rewritten to look current.

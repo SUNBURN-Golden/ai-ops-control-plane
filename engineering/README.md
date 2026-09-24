@@ -19,11 +19,13 @@ gh auth status
 gh repo clone BeautifulMind-JT/ai-ops-control-plane ai-ops-control-plane-migration -- --branch ops/cp-extract-001
 cd ai-ops-control-plane-migration
 python3 -m unittest discover -s tests -v
-python3 tools/extract_control_plane.py
-python3 tools/extract_control_plane.py --apply
+python3 tools/extract_control_plane.py --plan cp-extract-001-plan.json
+python3 tools/extract_control_plane.py --apply --plan cp-extract-001-plan.json
 ```
 
-The default command only plans. `--apply` imports the pinned source into this migration branch, verifies every remote destination blob, then creates/updates draft extraction PRs for the four product repositories. It never merges, modifies a default branch, enables a runtime, attaches a runner, invokes a builder, changes credentials/settings, moves a live ledger, or retries a failed API write. It stops if pinned KIX main moved or an existing migration lineage is closed/review-ready/unrecognized.
+The default command is read-only and writes a machine-readable plan (`repo`, `action`, `path`, `before_blob`, `after_blob`, `main_sha`, `head_sha`, transform `reason`) plus a `plan_id` binding each repository's `main` SHA, migration-branch HEAD SHA and preimage blobs. `--apply` re-validates that identical plan against live remote state before any write: drifted `main`/HEAD/preimage aborts and requires a re-plan, so a reviewed plan can never overwrite another writer or a moved baseline. It then imports the pinned source into this migration branch, verifies remote HEAD/tree/deletions/locked KIX blobs, and creates/updates draft extraction PRs for the four product repositories. It never merges, modifies a default branch, enables a runtime, attaches a runner, invokes a builder, changes credentials/settings, moves a live ledger, or retries a failed API write. It stops if pinned KIX main moved or an existing migration lineage is closed/review-ready/unrecognized.
+
+AGENTS governance is split at an explicit per-repository boundary marker (`# Repository-specific engineering rules (preserved)` for kix-protocol and ZARI; `## Repository-specific engineering constraints` for film-unit-mv-studio and maeum-gyeol). The marker must be a single exact standalone line and the local suffix — marker line included — is preserved byte-for-byte; other similar headings are never used to enlarge the split. The FILM legacy E2 pointer appendix is removed only on an exact byte match.
 
 Run this once; do not schedule it. A failed or uncertain write requires inspection, not automatic replay. Do not put access tokens in chat or source. Use existing local `gh` authentication with access to the five relevant private repositories.
 

@@ -2,5 +2,6 @@
   "migration_task": "https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/1",
   "source_commit": "ec3f6db0d613385bfdf2392a4295f0099be1eec6",
   "stage": "PREPARED_SOURCE_IMPORT_PENDING",
+  "phase_a": "helper_hardened_tests_green_2026-09-24; per-repo AGENTS markers, plan binding, evidence actions",
   "runtime_enabled": false
 }

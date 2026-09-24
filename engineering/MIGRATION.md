@@ -7,7 +7,10 @@ User decision: [central issue #1](https://github.com/BeautifulMind-JT/ai-ops-con
 - Source: `BeautifulMind-JT/kix-protocol@ec3f6db0d613385bfdf2392a4295f0099be1eec6`.
 - Source tree: `b328572528dc0c2d52b6df9ace39b376a25bd93e`.
 - Destination baseline: `e9386f4b1c30c62d1caf10e6784ba98ee3bb5f66`.
+- Product baselines re-verified 2026-09-24: ZARI `35dc9ce864aa7487c200de93675dc4d3014a8d87`, film-unit-mv-studio `4259d1c881f85b166ced07555c625f042accc48a`, maeum-gyeol `9099c1d5f28e92d4500cbabdd74a2770bede506f`.
 - Migration branch in each participating repository: `ops/cp-extract-001`.
+- AGENTS boundary markers (exact standalone line, suffix preserved byte-for-byte): kix-protocol and ZARI `# Repository-specific engineering rules (preserved)`; film-unit-mv-studio and maeum-gyeol `## Repository-specific engineering constraints`.
+- Plan binding: the read-only plan binds destination `main` SHA, branch HEAD SHA and preimage blob SHAs for every written/deleted path; `--apply` re-verifies the identical binding and aborts on drift.
 
 ## What moves
 
