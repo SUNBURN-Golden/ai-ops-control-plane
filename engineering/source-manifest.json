@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "source_repository": "BeautifulMind-JT/kix-protocol",
+  "source_commit": "ec3f6db0d613385bfdf2392a4295f0099be1eec6",
+  "source_tree": "b328572528dc0c2d52b6df9ace39b376a25bd93e",
+  "entries": [
+    {
+      "source_path": ".github/control-plane/activation.json",
+      "source_blob": "c20c20d65cec4509c0c615081492eb35a4026782",
+      "destination_path": "engineering/.github/control-plane/activation.json",
+      "destination_blob": "f7c65c590bb896b880adb7ca48e608b204edfc76",
+      "mode": "100644",
+      "transformed": true,
+      "reason": "activation_reset",
+      "original_preserved_path": "engineering/provenance/kix/.github/control-plane/activation.json",
+      "original_preserved_blob": "c20c20d65cec4509c0c615081492eb35a4026782"
+    },
+    {
+      "source_path": ".github/control-plane/boundary-policy.example.json",
+      "source_blob": "f4725dd84523c34e94dad7d8a3d651d0b2798976",
+      "destination_path": "engineering/.github/control-plane/boundary-policy.example.json",
+      "destination_blob": "f4725dd84523c34e94dad7d8a3d651d0b2798976",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": ".github/control-plane/config.json",
+      "source_blob": "fe40fa7e40069c998a37add359f6b14a53a50c6a",
+      "destination_path": "engineering/.github/control-plane/config.json",
+      "destination_blob": "4e83c6498e5fa6bb0a3406ae1fd2c4bc8361245f",
+      "mode": "100644",
+      "transformed": true,
+      "reason": "config_repinned_to_destination",
+      "original_preserved_path": "engineering/provenance/kix/.github/control-plane/config.json",
+      "original_preserved_blob": "fe40fa7e40069c998a37add359f6b14a53a50c6a"
+    },
+    {
+      "source_path": ".github/control-plane/flow-policy.example.json",
+      "source_blob": "7dbbbb610c9efd6e113527d556d19afd5d116b2c",
+      "destination_path": "engineering/.github/control-plane/flow-policy.example.json",
+      "destination_blob": "b22ac408ae4e047c05d6b13d8a978ddb80e8eb6d",
+      "mode": "100644",
+      "transformed": true,
+      "reason": "flow_policy_disabled",
+      "original_preserved_path": "engineering/provenance/kix/.github/control-plane/flow-policy.example.json",
+      "original_preserved_blob": "7dbbbb610c9efd6e113527d556d19afd5d116b2c"
+    },
+    {
+      "source_path": ".github/control-plane/host-policy.example.json",
+      "source_blob": "245b44be31c77428cb38484f22a65599b547ce52",
+      "destination_path": "engineering/.github/control-plane/host-policy.example.json",
+      "destination_blob": "245b44be31c77428cb38484f22a65599b547ce52",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": ".github/workflows/control-plane-ci.yml",
+      "source_blob": "ba533f6f3c06c78387791af39153f3a37b6d0b2a",
+      "destination_path": "engineering/.github/workflows/control-plane-ci.yml",
+      "destination_blob": "ba533f6f3c06c78387791af39153f3a37b6d0b2a",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": ".github/workflows/control-plane-runtime.yml",
+      "source_blob": "eef715a939965bf860d5fdb3b860b7e859a5c13b",
+      "destination_path": "engineering/.github/workflows/control-plane-runtime.yml",
+      "destination_blob": "eef715a939965bf860d5fdb3b860b7e859a5c13b",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "AGENTS.md",
+      "source_blob": "92773db3dd3156cef0d77a410bbfb7d9a75d55a7",
+      "destination_path": "engineering/AGENTS.md",
+      "destination_blob": "51cfa85cc47b4f3135a5cd20ba8d3bfe542089bf",
+      "mode": "100644",
+      "transformed": true,
+      "reason": "agents_common_extracted",
+      "original_preserved_path": "engineering/provenance/kix/AGENTS.md",
+      "original_preserved_blob": "92773db3dd3156cef0d77a410bbfb7d9a75d55a7"
+    },
+    {
+      "source_path": "RUNBOOKS/BOUNDARY.md",
+      "source_blob": "87a7377708b22caafc70a1b7b7533f67db5f4986",
+      "destination_path": "engineering/RUNBOOKS/BOUNDARY.md",
+      "destination_blob": "87a7377708b22caafc70a1b7b7533f67db5f4986",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "RUNBOOKS/DISPATCH.md",
+      "source_blob": "f2da3672905454d5c2792c2b33ac2ad10bba8f56",
+      "destination_path": "engineering/RUNBOOKS/DISPATCH.md",
+      "destination_blob": "f2da3672905454d5c2792c2b33ac2ad10bba8f56",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "TASKS/TEMPLATE.md",
+      "source_blob": "5880a5d0feb36a08c0fc64523abbd8598f95b1d0",
+      "destination_path": "engineering/TASKS/TEMPLATE.md",
+      "destination_blob": "5880a5d0feb36a08c0fc64523abbd8598f95b1d0",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "docs/CONTROL_PLANE_FLOW.md",
+      "source_blob": "0acd9e36b3a64e45113eda64fd5f189f4d58be3a",
+      "destination_path": "engineering/docs/CONTROL_PLANE_FLOW.md",
+      "destination_blob": "0acd9e36b3a64e45113eda64fd5f189f4d58be3a",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "docs/CONTROL_PLANE_RUNTIME.md",
+      "source_blob": "7a438f6decbf7970c3790c9966f69c438f28eeef",
+      "destination_path": "engineering/docs/CONTROL_PLANE_RUNTIME.md",
+      "destination_blob": "7a438f6decbf7970c3790c9966f69c438f28eeef",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/control_plane.py",
+      "source_blob": "518cdd5a6ece09a6a28de92dac8b69e2844020bb",
+      "destination_path": "engineering/scripts/control_plane.py",
+      "destination_blob": "518cdd5a6ece09a6a28de92dac8b69e2844020bb",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/control_plane_boundary.py",
+      "source_blob": "11a9cdcaf1e7a44f377fe3ddd0077065a7808038",
+      "destination_path": "engineering/scripts/control_plane_boundary.py",
+      "destination_blob": "11a9cdcaf1e7a44f377fe3ddd0077065a7808038",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/control_plane_boundary_hook.sh",
+      "source_blob": "befb6551474a33956027091226687b712ec965bf",
+      "destination_path": "engineering/scripts/control_plane_boundary_hook.sh",
+      "destination_blob": "befb6551474a33956027091226687b712ec965bf",
+      "mode": "100755",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/control_plane_boundary_probe.sh",
+      "source_blob": "11a20377f1215626bf2e4177157d4482a694452b",
+      "destination_path": "engineering/scripts/control_plane_boundary_probe.sh",
+      "destination_blob": "11a20377f1215626bf2e4177157d4482a694452b",
+      "mode": "100755",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/control_plane_flow.py",
+      "source_blob": "a0ec66e2fe4f99ebf463cb4fc4c7c17a75c0d2a4",
+      "destination_path": "engineering/scripts/control_plane_flow.py",
+      "destination_blob": "a0ec66e2fe4f99ebf463cb4fc4c7c17a75c0d2a4",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/control_plane_flow_cli.py",
+      "source_blob": "9af5c5b0e4a524d9c5726f504ac8b96b5d7280a9",
+      "destination_path": "engineering/scripts/control_plane_flow_cli.py",
+      "destination_blob": "9af5c5b0e4a524d9c5726f504ac8b96b5d7280a9",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/control_plane_flow_gateway.py",
+      "source_blob": "cf4d17b8588d4e11b4cb30855623df12422e1ebe",
+      "destination_path": "engineering/scripts/control_plane_flow_gateway.py",
+      "destination_blob": "cf4d17b8588d4e11b4cb30855623df12422e1ebe",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/control_plane_host.py",
+      "source_blob": "bc7d1012c152992824bb9bad4d4cacaae513597b",
+      "destination_path": "engineering/scripts/control_plane_host.py",
+      "destination_blob": "bc7d1012c152992824bb9bad4d4cacaae513597b",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/test_control_plane.py",
+      "source_blob": "c4d4643eff4baca4fadc6d3c9e25f3d510af64f4",
+      "destination_path": "engineering/scripts/test_control_plane.py",
+      "destination_blob": "c4d4643eff4baca4fadc6d3c9e25f3d510af64f4",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/test_control_plane_boundary.py",
+      "source_blob": "a03479642895686df4db26786a2559a9b1b3f8ea",
+      "destination_path": "engineering/scripts/test_control_plane_boundary.py",
+      "destination_blob": "a03479642895686df4db26786a2559a9b1b3f8ea",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/test_control_plane_flow.py",
+      "source_blob": "3a900dddce34029d2b5134d0a4a35f60578764be",
+      "destination_path": "engineering/scripts/test_control_plane_flow.py",
+      "destination_blob": "3a900dddce34029d2b5134d0a4a35f60578764be",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/test_control_plane_flow_lane.py",
+      "source_blob": "63b88cbc4abe10251f825b67e1406e30f8d729ac",
+      "destination_path": "engineering/scripts/test_control_plane_flow_lane.py",
+      "destination_blob": "63b88cbc4abe10251f825b67e1406e30f8d729ac",
+      "mode": "100644",
+      "transformed": false
+    },
+    {
+      "source_path": "scripts/test_control_plane_host.py",
+      "source_blob": "b1dd71e1392a3478e2a68695be3519e4abdef47d",
+      "destination_path": "engineering/scripts/test_control_plane_host.py",
+      "destination_blob": "b1dd71e1392a3478e2a68695be3519e4abdef47d",
+      "mode": "100644",
+      "transformed": false
+    }
+  ],
+  "historical_tasks_and_validation": "https://github.com/BeautifulMind-JT/kix-protocol/tree/ec3f6db0d613385bfdf2392a4295f0099be1eec6",
+  "note": "Historical task/validation files remain at the original immutable commit; no history rewritten."
+}

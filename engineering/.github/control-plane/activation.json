@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "user_activation_approval": "NOT_APPROVED",
+  "user_activation_approval_pointer": null,
+  "implementation_audit": "PENDING",
+  "implementation_audit_pointer": null,
+  "runner_preflight": "PENDING",
+  "runner_preflight_pointer": null,
+  "runtime_enabled": false,
+  "activated_runtime_sha": "PENDING"
+}

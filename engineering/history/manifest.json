@@ -1,0 +1,22 @@
+[
+  {
+    "source_repository": "BeautifulMind-JT/kix-protocol",
+    "source_pr": 50,
+    "source_commit": "eaab0cfd13f064c5fb73297a7c0d1a4462fec4d9",
+    "source_path": "docs/status/CONTROL_PLANE_PRODUCTION_BRINGUP_E4.md",
+    "source_blob": "5fde6fae37ede27c4dd70f1cdbe6b402fb0d17c7",
+    "destination_path": "engineering/history/kix-pr-50/docs/status/CONTROL_PLANE_PRODUCTION_BRINGUP_E4.md",
+    "destination_blob": "5fde6fae37ede27c4dd70f1cdbe6b402fb0d17c7",
+    "status": "HISTORICAL_ONLY_NOT_CENTRAL_APPROVAL"
+  },
+  {
+    "source_repository": "BeautifulMind-JT/kix-protocol",
+    "source_pr": 51,
+    "source_commit": "c9909e6be128cc34913e1bc3219cb2e9d1544a4c",
+    "source_path": "docs/status/GLM_READINESS_EVIDENCE_BUNDLE.md",
+    "source_blob": "67d290ae4e29effd6a4f0ae3e1ee2ce64e050f4a",
+    "destination_path": "engineering/history/kix-pr-51/docs/status/GLM_READINESS_EVIDENCE_BUNDLE.md",
+    "destination_blob": "67d290ae4e29effd6a4f0ae3e1ee2ce64e050f4a",
+    "status": "HISTORICAL_ONLY_NOT_CENTRAL_APPROVAL"
+  }
+]

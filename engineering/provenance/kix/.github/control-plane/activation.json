@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "user_activation_approval": "APPROVED",
+  "user_activation_approval_pointer": "https://github.com/BeautifulMind-JT/kix-protocol/pull/32#issuecomment-5770580023",
+  "implementation_audit": "PASS",
+  "implementation_audit_pointer": "Section8 architecture-only designation for ba366de + dual independent FLOW-on-main audits PASS_WITH_NOTES (GROK_BUILD + GLM) @ ba366def267df55fab09a3c630830c32e3758941; see https://github.com/BeautifulMind-JT/kix-protocol/issues/33#issuecomment-5804569239 and operator SECTION8_DESIGNATION_ba366de.md / GROK_BUILD_AUDIT_FLOW_MAIN.md / GLM_AUDIT_FLOW_MAIN.md. Prior #41 delta audits PASS_WITH_NOTES. Not activation; activated_runtime_sha remains PENDING. | G1 enable GROK_BUILD in config.enabled_builders (keep DEVIN, not GLM); activated_runtime_sha retarget fd6c25ff238a962dfe38d2a177991b7070b9e5cc\u2192c106fc7a8427583bbc4a085055413c6d334b3712 via ordinary PR (Astra canary-blocker G1/G2 2026-09-24). Delta audit required before merge.",
+  "runner_preflight": "PASS",
+  "runner_preflight_pointer": "Staging-on-box host-preflight GROK_BUILD/GLM/DEVIN all PASS at helper 5e5fc45f\u2026; PRODUCTION_RUNNER=NOT_CONNECTED; runtime_enabled=false. Evidence: https://github.com/BeautifulMind-JT/kix-protocol/issues/40#issuecomment-5804568997 and /workspace/astra-host-evidence/ba366de-host/PREFLIGHT_REPORT.md. Not production runner connect.",
+  "runtime_enabled": true,
+  "activated_runtime_sha": "c106fc7a8427583bbc4a085055413c6d334b3712"
+}
