@@ -606,7 +606,7 @@ If post-merge verification fails:
 - record POST_MERGE_FAILED;
 - do not patch main or return the failure to the completed writer as an
   ordinary same-ticket CI fix;
-- corrective code requires a new KIX task/session/branch/PR under existing
+- corrective code requires a new task/session/branch/PR for the affected product under its existing
   governance;
 - the original task may become DONE only after the failure and follow-up task
   pointer are durably recorded.
