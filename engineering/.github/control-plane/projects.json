@@ -29,7 +29,7 @@
       "DEVIN"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
-    "deployment_enabled": false
+    "deployment_enabled": true
   },
   "BeautifulMind-JT/ZARI": {
     "schema_version": 1,
