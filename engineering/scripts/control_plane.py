@@ -112,12 +112,14 @@ def load_config() -> Dict[str, Any]:
         raise ControlPlaneError("unsupported config schema_version")
     if cfg["control_record_marker"] != CONTROL_MARKER:
         raise ControlPlaneError("control_record_marker mismatch")
-    if cfg["control_record_actor"] != "github-actions[bot]":
-        raise ControlPlaneError("control_record_actor must be github-actions[bot]")
     for actor_field in ("allowed_task_actors", "allowed_dispatch_actors"):
         actors = cfg[actor_field]
         if not isinstance(actors, list) or not actors or any(not isinstance(a, str) or not a for a in actors):
             raise ControlPlaneError(f"{actor_field} must be a non-empty string list")
+    record_actor = cfg["control_record_actor"]
+    if (not isinstance(record_actor, str) or not record_actor or
+            (record_actor != "github-actions[bot]" and record_actor not in cfg["allowed_task_actors"])):
+        raise ControlPlaneError("control_record_actor must be github-actions[bot] or a login in allowed_task_actors")
     builders = cfg["allowed_builders"]
     if not isinstance(builders, list) or not builders:
         raise ControlPlaneError("allowed_builders must be a non-empty list")
