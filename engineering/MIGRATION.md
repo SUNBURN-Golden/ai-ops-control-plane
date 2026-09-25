@@ -1,5 +1,5 @@
 <!-- CP-EXTRACT-001 source update -->
-Current stage: SOURCE_ADAPTED_REVIEW_PENDING. Import commit 55240a610688a5fe7f4883e250b0ffab6c126fdb. The preparation sequence below is retained as migration history; source import is now real. Product proposals and exact-head review are tracked on issue #1. Central runtime remains disabled. See README.md and CUTOVER.md for current execution limits.
+Current stage: INSTALL_PREP_DISABLED. User authorized operational cutover on 2026-09-25 for install preparation only. Root production dispatch workflow and disabled host install/pin tooling are committed pending independent exact-HEAD review; activation remains NOT_APPROVED and runtime_enabled=false. Import commit 55240a610688a5fe7f4883e250b0ffab6c126fdb. The preparation sequence below is retained as migration history; source import is now real. Product proposals and exact-head review are tracked on issue #1. Central runtime remains disabled. See README.md and CUTOVER.md for current execution limits.
 
 # CP-EXTRACT-001 — source extraction and cutover boundary
 

@@ -54,9 +54,11 @@ RUNTIME_PATHS = (
     "scripts/control_plane_boundary_probe.sh",
     "scripts/test_control_plane.py", "scripts/test_control_plane_host.py",
     "scripts/test_control_plane_boundary.py",
+    "scripts/control_plane_install.py", "scripts/test_control_plane_install.py",
     ".github/control-plane/config.json", ".github/control-plane/host-policy.example.json",
     ".github/control-plane/boundary-policy.example.json",
     ".github/workflows/control-plane-runtime.yml", ".github/workflows/control-plane-ci.yml",
+    "../.github/workflows/control-plane-runtime.yml",
     "docs/CONTROL_PLANE_RUNTIME.md", "AGENTS.md", "RUNBOOKS/DISPATCH.md", "TASKS/TEMPLATE.md",
 )
 
