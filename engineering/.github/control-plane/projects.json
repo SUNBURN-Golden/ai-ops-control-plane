@@ -26,8 +26,7 @@
       "BeautifulMind-JT"
     ],
     "enabled_builders": [
-      "DEVIN",
-      "GROK_BUILD"
+      "DEVIN"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
     "deployment_enabled": false
