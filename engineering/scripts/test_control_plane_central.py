@@ -19,7 +19,7 @@ class CentralIdentityTests(unittest.TestCase):
                               ["github-actions[bot]", *cfg["allowed_task_actors"]])
                 self.assertEqual(cfg["deployment_enabled"], repo == "kix-protocol")
     def test_target_profile_blocks_even_if_global_gate_is_enabled(self):
-        with patch.object(cp,"load_activation",return_value={"runtime_enabled":True}), patch.object(cp,"validate_repo"), patch.object(cp.subprocess,"run") as run:
+        with patch.dict(os.environ, {"ASTRA_TARGET_REPOSITORY":"BeautifulMind-JT/ZARI"}), patch.object(cp,"load_activation",return_value={"runtime_enabled":True}), patch.object(cp,"validate_repo"), patch.object(cp.subprocess,"run") as run:
             with self.assertRaisesRegex(cp.ControlPlaneError,"target deployment not approved"):
                 cp.require_runtime_enabled()
             run.assert_not_called()

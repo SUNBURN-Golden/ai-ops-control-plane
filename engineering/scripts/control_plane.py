@@ -370,7 +370,7 @@ def require_runtime_enabled() -> Dict[str, Any]:
     cfg = load_config()
     if "control_repository" in cfg and cfg.get("deployment_enabled") is not True:
         raise ControlPlaneError("central target deployment not approved")
-    audited = activation["activated_runtime_sha"]
+    audited = activation.get("activated_runtime_sha")
     if not isinstance(audited, str) or not re.fullmatch(r"[0-9a-f]{40}", audited):
         raise ControlPlaneError("activated_runtime_sha must identify the audited runtime commit")
     # An activation-only commit may follow the audited commit. Product changes
