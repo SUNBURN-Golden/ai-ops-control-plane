@@ -116,7 +116,7 @@ jobs:
         id: prepare
         if: ${{ inputs.operation == 'dispatch' }}
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
         run: >-
           python3 -I engineering/scripts/control_plane.py prepare-dispatch
           --issue-number "$ISSUE_NUMBER"
@@ -132,7 +132,7 @@ jobs:
       - name: Finalize exact launch state
         if: ${{ always() && inputs.operation == 'dispatch' && steps.prepare.outputs.launch_required == 'true' }}
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
           LAUNCH_REQUEST_ID: ${{ steps.prepare.outputs.launch_request_id }}
         run: >-
           python3 -I engineering/scripts/control_plane.py finalize-dispatch
