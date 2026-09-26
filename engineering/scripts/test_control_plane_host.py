@@ -39,7 +39,7 @@ class AdmissionTests(unittest.TestCase):
             "allowed_repositories": [f"owner/repo{i}" for i in range(5)],
             "enabled_builders": ["DEVIN"], "max_active_sessions": 2,
             "max_launches_per_24h": None, "ledger_path": str(self.path),
-            "wrapper_paths": dict(host.WRAPPERS),
+            "wrapper_paths": {builder: host.WRAPPERS[builder] for builder in ("DEVIN", "GROK_BUILD", "GLM")},
             "boundary_evidence_pointer": "https://github.com/owner/ops/issues/12",
         }
         self.calls = []
@@ -328,3 +328,4 @@ class AdmissionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

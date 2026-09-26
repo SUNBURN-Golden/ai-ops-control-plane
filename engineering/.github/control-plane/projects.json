@@ -10,12 +10,14 @@
     "allowed_builders": [
       "DEVIN",
       "GROK_BUILD",
-      "GLM"
+      "GLM",
+      "CURSOR"
     ],
     "builder_wrappers": {
       "DEVIN": "/opt/astra/bin/astra-builder-devin",
       "GROK_BUILD": "/opt/astra/bin/astra-builder-grok-build",
-      "GLM": "/opt/astra/bin/astra-builder-glm"
+      "GLM": "/opt/astra/bin/astra-builder-glm",
+      "CURSOR": "/opt/astra/bin/astra-builder-cursor"
     },
     "control_record_marker": "<!-- ASTRA_CONTROL_RECORD_V1 -->",
     "control_record_actor": "BeautifulMind-JT",
@@ -42,12 +44,14 @@
     "allowed_builders": [
       "DEVIN",
       "GROK_BUILD",
-      "GLM"
+      "GLM",
+      "CURSOR"
     ],
     "builder_wrappers": {
       "DEVIN": "/opt/astra/bin/astra-builder-devin",
       "GROK_BUILD": "/opt/astra/bin/astra-builder-grok-build",
-      "GLM": "/opt/astra/bin/astra-builder-glm"
+      "GLM": "/opt/astra/bin/astra-builder-glm",
+      "CURSOR": "/opt/astra/bin/astra-builder-cursor"
     },
     "control_record_marker": "<!-- ASTRA_CONTROL_RECORD_V1 -->",
     "control_record_actor": "github-actions[bot]",
@@ -74,12 +78,14 @@
     "allowed_builders": [
       "DEVIN",
       "GROK_BUILD",
-      "GLM"
+      "GLM",
+      "CURSOR"
     ],
     "builder_wrappers": {
       "DEVIN": "/opt/astra/bin/astra-builder-devin",
       "GROK_BUILD": "/opt/astra/bin/astra-builder-grok-build",
-      "GLM": "/opt/astra/bin/astra-builder-glm"
+      "GLM": "/opt/astra/bin/astra-builder-glm",
+      "CURSOR": "/opt/astra/bin/astra-builder-cursor"
     },
     "control_record_marker": "<!-- ASTRA_CONTROL_RECORD_V1 -->",
     "control_record_actor": "github-actions[bot]",
@@ -106,12 +112,14 @@
     "allowed_builders": [
       "DEVIN",
       "GROK_BUILD",
-      "GLM"
+      "GLM",
+      "CURSOR"
     ],
     "builder_wrappers": {
       "DEVIN": "/opt/astra/bin/astra-builder-devin",
       "GROK_BUILD": "/opt/astra/bin/astra-builder-grok-build",
-      "GLM": "/opt/astra/bin/astra-builder-glm"
+      "GLM": "/opt/astra/bin/astra-builder-glm",
+      "CURSOR": "/opt/astra/bin/astra-builder-cursor"
     },
     "control_record_marker": "<!-- ASTRA_CONTROL_RECORD_V1 -->",
     "control_record_actor": "github-actions[bot]",

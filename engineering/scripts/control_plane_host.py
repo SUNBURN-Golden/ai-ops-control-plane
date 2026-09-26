@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import sqlite3
 import stat
@@ -21,7 +22,8 @@ POLICY_PATH = Path("/etc/astra/control-plane-host.json")
 INSTALLED_PATH = Path("/opt/astra/bin/astra-host-control")
 WRAPPERS = {"DEVIN": "/opt/astra/bin/astra-builder-devin",
             "GROK_BUILD": "/opt/astra/bin/astra-builder-grok-build",
-            "GLM": "/opt/astra/bin/astra-builder-glm"}
+            "GLM": "/opt/astra/bin/astra-builder-glm",
+            "CURSOR": "/opt/astra/bin/astra-builder-cursor"}
 IDENTITY = ("repository", "task_id", "task_revision", "builder_id", "launch_request_id", "attempt_id")
 ACTIVE = ("SUBMITTING", "CONFIRMED", "UNKNOWN")
 CLEAN_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
@@ -88,8 +90,9 @@ def protected_root_path(path, *, directory=False):
 def validate_policy(policy):
     ids = [policy.get("control_uid"), policy.get("runner_uid")]
     builders = policy.get("builder_uids")
-    if not isinstance(builders, dict) or set(builders) != set(WRAPPERS):
-        raise HostError("builder_uids must name all three builders")
+    if (not isinstance(builders, dict) or
+            set(builders) not in ({"DEVIN", "GROK_BUILD", "GLM"}, set(WRAPPERS))):
+        raise HostError("builder_uids must register the legacy builders and optionally CURSOR")
     ids.extend(builders.values())
     if any(type(uid) is not int or uid <= 0 for uid in ids) or len(set(ids)) != len(ids):
         raise HostError("control, runner and builder Unix UIDs must be distinct and non-root")
@@ -103,9 +106,10 @@ def validate_policy(policy):
             any(not isinstance(repo, str) or len(repo.split("/")) != 2 or not all(repo.split("/")) for repo in repos)):
         raise HostError("allowed_repositories must contain owner/repository names")
     if (not isinstance(enabled, list) or not enabled or
-            any(builder not in WRAPPERS for builder in enabled)):
-        raise HostError("enabled_builders must be a nonempty subset of the three builders")
-    if policy.get("wrapper_paths") != WRAPPERS:
+            any(not isinstance(builder, str) or builder not in builders for builder in enabled)
+            or len(set(enabled)) != len(enabled)):
+        raise HostError("enabled_builders must be a nonempty subset of registered builders")
+    if policy.get("wrapper_paths") != {builder: WRAPPERS[builder] for builder in builders}:
         raise HostError("wrapper_paths must match fixed installed adapter paths")
     if not evidence_url(policy.get("boundary_evidence_pointer")):
         raise HostError("provisioned boundary evidence URL is required")
@@ -373,6 +377,13 @@ def preflight(builder, policy, ledger):
             or report.get("parallel_safe") is not True or type(report.get("launch_contract_version")) is not int
             or report["launch_contract_version"] != 2):
         raise HostError("adapter preflight failed")
+    if builder == "CURSOR" and (
+            report.get("harness") != "CURSOR_CLI"
+            or report.get("execution_mode") != "PERSISTENT_SUPERVISOR"
+            or not isinstance(report.get("model"), str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", report["model"])
+            or report["model"].upper() in {"AUTO", "DEFAULT", "CONFIG_REQUIRED", "PENDING", "UNKNOWN"}):
+        raise HostError("CURSOR requires explicit Cursor CLI harness/model provenance")
     report.update(host_admission="ENFORCED", boundary_evidence_pointer=policy["boundary_evidence_pointer"],
                   allowed_repositories=policy["allowed_repositories"],
                   helper_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
@@ -426,3 +437,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

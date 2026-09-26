@@ -256,7 +256,7 @@ def qualify_lane(report, approval, expected_runtime):
     """Check an operator-collected report. Does not claim to have executed a CLI."""
     required = ("cli", "authentication", "credential_isolation", "durable_session",
                 "duplicate_unknown", "trusted_workflow_boundary", "quota_policy")
-    require(report.get("builder_id") in {"DEVIN", "GROK_BUILD", "GLM"}, "unknown builder")
+    require(report.get("builder_id") in {"DEVIN", "GROK_BUILD", "GLM", "CURSOR"}, "unknown builder")
     require(report.get("runtime_sha") == expected_runtime, "runtime mismatch")
     for key in ("wrapper_sha256", "binary_sha256"):
         require(isinstance(report.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", report[key]), "hash missing")
@@ -268,6 +268,11 @@ def qualify_lane(report, approval, expected_runtime):
     require(approval.get("active") is True and github_pointer(approval.get("pointer")), "approval missing")
     require(approval.get("report_digest") == digest(report), "approval is not bound to exact report")
     require(report.get("harness") != "ZCODE_UNVERIFIED", "unverified ZCode headless surface")
+    if report["builder_id"] == "CURSOR":
+        require(report["harness"] == "CURSOR_CLI", "CURSOR must identify its Cursor CLI harness")
+        require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", report["model"]) is not None
+                and report["model"].upper() not in {"AUTO", "DEFAULT", "CONFIG_REQUIRED", "PENDING", "UNKNOWN"},
+                "CURSOR requires the explicit model returned by the installed CLI")
     return {"status": "QUALIFIED_FOR_INDEPENDENT_REVIEW", "report_digest": digest(report),
             "production_enabled": False}
 
@@ -362,7 +367,8 @@ class Store:
             if not row["valid"]:
                 return {"state": "STALE", "sent": False}
             if row["state"] != "NOT_STARTED":
-                return {"state": row["state"], "sent": False}
+                return {"state": row["state"], "sent": False,
+                        "receipt": decode(row["receipt"]) if row["receipt"] else None}
         # Fresh authority read must occur outside the DB transaction, then CAS below.
         if not is_current(action):
             self.invalidate(action["request_id"])
@@ -420,9 +426,13 @@ message delivery; it never creates a semantic review/audit result.
             if projected["state"] != "CONFIRMED":
                 self.store.end_event(event_id, False)
                 return {"state": "PROJECTION_" + projected["state"]}
-            routed = self.store.send_once(action, self.ports.route, current)
+            route = self.ports.route
+            if action["kind"] in ("AUDIT", "DECISION"):
+                route = lambda a: self.ports.route(a, projection_receipt=projected.get("receipt"))
+            routed = self.store.send_once(action, route, current)
             self.store.end_event(event_id, routed["state"] == "CONFIRMED")
             return {"state": verdict["state"], "delivery": routed["state"]}
         except Exception:
             self.store.end_event(event_id, False)
             raise
+

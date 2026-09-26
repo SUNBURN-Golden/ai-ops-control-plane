@@ -406,6 +406,8 @@ class CollectorTests(unittest.TestCase):
         prerequisite=body('<!-- ASTRA_FLOW_PREREQUISITES_V1 -->',dict(active=True,subject=scoped,result='PASS'))
         registration['prerequisites']=binding(5,prerequisite)
         self.policy=dict(enabled=True,user_actors=['owner'],repositories=['owner/repo'],
+                         control_repository='BeautifulMind-JT/ai-ops-control-plane',
+                         runtime_workflow='control-plane-runtime.yml', runtime_workflow_ref='main',
                          registrations={'owner/repo#1':registration}, review_routes={'DEVIN':'reviewer'},
                          review_lanes={'reviewer':lane})
         self.data={
@@ -725,3 +727,4 @@ class SlackFixtureTests(unittest.TestCase):
 
 
 if __name__=='__main__': unittest.main()
+

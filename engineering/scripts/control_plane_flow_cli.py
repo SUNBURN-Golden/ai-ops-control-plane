@@ -19,7 +19,7 @@ def main():
     qualify.add_argument('--approval', type=Path, required=True)
     qualify.add_argument('--runtime-sha', required=True)
     probe = commands.add_parser('host-preflight')
-    probe.add_argument('--builder', choices=('DEVIN', 'GROK_BUILD', 'GLM'), required=True)
+    probe.add_argument('--builder', choices=('DEVIN', 'GROK_BUILD', 'GLM', 'CURSOR'), required=True)
     args = parser.parse_args()
     try:
         if args.command == 'qualify-lane':
@@ -45,3 +45,4 @@ def main():
 
 if __name__ == '__main__':
     raise SystemExit(main())
+

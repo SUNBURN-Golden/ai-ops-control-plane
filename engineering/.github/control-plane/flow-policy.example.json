@@ -21,6 +21,9 @@
     },
     "GLM": {
       "enabled": false
+    },
+    "CURSOR": {
+      "enabled": false
     }
   },
   "slack": {
@@ -32,5 +35,9 @@
   },
   "status_channel": null,
   "audit_channel": null,
-  "decision_channel": null
+  "decision_channel": null,
+  "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
+  "runtime_workflow": "control-plane-runtime.yml",
+  "runtime_workflow_ref": "main",
+  "projection_actor": null
 }

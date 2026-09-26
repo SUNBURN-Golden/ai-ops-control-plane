@@ -271,16 +271,74 @@ PASS text. Shared author/reviewer GitHub identities are conservatively rejected.
         flow.require(flow.github_pointer(result.get("html_url")), "GitHub projection receipt missing")
         return {"accepted": True, "request_id": action["request_id"], "pointer": result["html_url"]}
 
-    def route(self, action):
+    def projected_pointer(self, action, receipt, command):
+        """Verify one durable projection by its receipt, never scan issue history."""
+        flow.require(isinstance(receipt, dict) and receipt.get("accepted") is True and
+                     receipt.get("request_id") == flow.digest(["projection", action["request_id"]]),
+                     "confirmed projection receipt required")
+        repo, issue = command["repository"], command["issue"]
+        pointer = receipt.get("pointer")
+        prefix = f"https://github.com/{repo}/issues/{issue}#issuecomment-"
+        flow.require(isinstance(pointer, str) and pointer.startswith(prefix), "projection belongs to another task")
+        comment_id = pointer[len(prefix):]
+        flow.require(re.fullmatch(r"[1-9][0-9]*", comment_id) is not None, "invalid projection comment ID")
+        actor = self.policy.get("projection_actor")
+        flow.require(isinstance(actor, str) and actor and actor != "CONFIG_REQUIRED", "projection actor not configured")
+        comment = self.api.call("GET", f"repos/{repo}/issues/comments/{comment_id}")
+        flow.require(comment.get("html_url") == pointer and
+                     comment.get("issue_url") == f"https://api.github.com/repos/{repo}/issues/{issue}" and
+                     comment.get("user", {}).get("login") == actor,
+                     "untrusted GitHub projection")
+        published = unwrap(comment.get("body"), "<!-- ASTRA_FLOW_ACTION_V1 -->")
+        flow.require(published == action, "GitHub projection changed or belongs to another request")
+        return pointer
+
+    def astra_message(self, action, pointer):
+        """Fields-only request; Slack text/metadata never authorizes a result."""
+        scope = action["subject"]
+        fields = {"Type": action["kind"] + "_REQUIRED", "Source": "MECHANICAL_LAYER",
+                  "Repository": scope["repository"], "Task": scope["task_id"],
+                  "Task revision": scope["revision"], "HEAD": scope["head"], "Base": scope["base"],
+                  "Policy revision": scope["policy_revision"], "Task digest": scope["task_digest"],
+                  "Request": action["request_id"], "Attempt": action["attempt_id"],
+                  "Accepted identity": action["identity"], "Designation": action["designation"],
+                  "Task pointer": action["task_pointer"], "PR pointer": action.get("pr_pointer"),
+                  "Gate": action.get("gate"), "Scope digest": action.get("scope_digest"),
+                  "GitHub control record": pointer,
+                  "Result authority": "authenticated GitHub result; Slack delivery is not approval",
+                  "User decision required": action["kind"] == "DECISION"}
+        # JSON scalar encoding prevents multiline field injection. plain_text blocks
+        # and escaped fallback text prevent user-controlled pointers/labels from pinging bots.
+        text = "\n".join(key + ": " + flow.canonical(value) for key, value in fields.items())
+        flow.require(len(text) <= 2900, "Astra request fields exceed Slack message bound")
+        metadata = {"event_type": "astra_control_request_v1", "event_payload": {
+            "source_actor": "MECHANICAL_LAYER", "route": "ASTRA", "kind": action["kind"],
+            "subject": scope, "request_id": action["request_id"], "attempt_id": action["attempt_id"],
+            "github_projection": pointer, "notification_only": True}}
+        return {"text": text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"),
+                "blocks": [{"type": "section", "text": {"type": "plain_text", "text": text, "emoji": False}}],
+                "metadata": metadata}
+
+    def route(self, action, *, projection_receipt=None):
         flow.require(self.policy.get("enabled") is True, "event flow is disabled")
         command = self.command_for(action["subject"])
         repo, issue = command["repository"], command["issue"]
         if action["kind"] == "DISPATCH":
+            # A product task is never sent to the removed product workflow. These
+            # routes are explicit protected policy, with no product fallback.
+            control = self.policy.get("control_repository")
+            workflow = self.policy.get("runtime_workflow")
+            ref = self.policy.get("runtime_workflow_ref")
+            flow.require(control == "BeautifulMind-JT/ai-ops-control-plane" and
+                         workflow == "control-plane-runtime.yml" and ref == "main",
+                         "trusted central runtime route not configured")
+            flow.require(repo in self.policy.get("repositories", []), "target repository not configured")
             snapshot = self.load(command)
             flow.require(flow.subject(snapshot) == action["subject"] and self.dispatch_authorized(snapshot),
                          "dispatch scope changed before delivery")
-            self.api.call("POST", f"repos/{repo}/actions/workflows/control-plane-runtime.yml/dispatches",
-                          {"ref": "main", "inputs": {"operation": "dispatch", "issue_number": str(issue),
+            self.api.call("POST", f"repos/{control}/actions/workflows/{workflow}/dispatches",
+                          {"ref": ref, "inputs": {"operation": "dispatch", "target_repository": repo,
+                           "issue_number": str(issue),
                            "expected_task_id": snapshot["task_id"],
                            "expected_task_revision": snapshot["revision"],
                            "expected_builder_id": snapshot["builder_id"],
@@ -294,11 +352,23 @@ PASS text. Shared author/reviewer GitHub identities are conservatively rejected.
             channel = self.policy[{"AUDIT": "audit_channel", "DECISION": "decision_channel"}.get(
                 action["kind"], "status_channel")]
             flow.require(isinstance(channel, str) and re.fullmatch(r"[CG][A-Z0-9]+", channel), "Slack channel not configured")
-            self.api.call("POST", "chat.postMessage", {"channel": channel,
-                          "text": f"[{action['kind']}] {repo} {action['subject']['task_id']} @ {action['subject']['head']}\n"
-                                  f"Task: {action['task_pointer']}\nRequest: {action['request_id']}\n"
-                                  "Status projection only. User-only merge.",
-                          "unfurl_links": False, "unfurl_media": False}, slack=True)
+            message = {"channel": channel, "unfurl_links": False, "unfurl_media": False}
+            if action["kind"] in {"AUDIT", "DECISION"}:
+                flow.require(self.is_current(action), "Astra request scope changed before delivery")
+                pointer = self.projected_pointer(action, projection_receipt, command)
+                message.update(self.astra_message(action, pointer))
+            else:
+                message["text"] = (f"[{action['kind']}] {repo} {action['subject']['task_id']} @ {action['subject']['head']}\n"
+                                   f"Task: {action['task_pointer']}\nRequest: {action['request_id']}\n"
+                                   "Status projection only. User-only merge.")
+            receipt = self.api.call("POST", "chat.postMessage", message, slack=True)
+            flow.require(isinstance(receipt, dict) and receipt.get("ok") is True and
+                         receipt.get("channel") == channel and
+                         isinstance(receipt.get("ts"), str) and
+                         re.fullmatch(r"[0-9]{10,}\.[0-9]{6}", receipt["ts"]),
+                         "ambiguous Slack receipt; reconcile without retry")
+            return {"accepted": True, "request_id": action["request_id"],
+                    "channel": channel, "ts": receipt["ts"]}
         return {"accepted": True, "request_id": action["request_id"]}
 
 

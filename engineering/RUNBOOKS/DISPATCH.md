@@ -13,7 +13,8 @@ NO SECOND SEMANTIC REASONING PASS.
 Shared source owner: BeautifulMind-JT/ai-ops-control-plane.
 Resolve the exact target repository in `.github/control-plane/projects.json`.
 Project-specific task/verification rules are in `projects/<repository-name>.md`.
-All profiles are source-only and deployment_enabled=false. No default target.
+Deployment is determined by the exact projects.json profile and activation/host gates;
+policy adoption alone never enables a product. No default target.
 KIX, ZARI, FILM UNIT and MAEUM_GYEOL are peers. SOULBOUND is excluded.
 Never infer target, channel, builder or reviewer. Missing configuration blocks.
 
@@ -652,6 +653,10 @@ Fields: task/revision, state, owner/session, PR/HEAD, verification/review/audit,
 blocker pointer, required Human action. Long context stays behind GitHub pointers.
 Astra attention is #ai-decisions/#ai-audit, never the project-channel firehose.
 
+AUDIT/DECISION delivery uses the confirmed GitHub action pointer, exact subject,
+request/attempt identity and protected channel mapping; see docs/ASTRA_SLACK.md.
+No Grok browser login or manual rephrasing of the request is required.
+
 Do not subscribe Grok to every Slack message.
 Only explicit commands or normalized workflow events invoke Grok.
 
@@ -665,7 +670,7 @@ Target logical permissions:
 - Grok command relay: only enough permission to invoke approved control-plane
   commands and relay narrow status; no source write, PR creation, admin,
   secrets, delete or merge.
-- DEVIN / GROK_BUILD / GLM builder adapters: only the assigned repo + task
+- DEVIN / GROK_BUILD / GLM / CURSOR builder adapters: only the assigned repo + task
   branch/PR; no merge/admin. Provider credentials may differ, but each active
   writer remains scoped to one canonical task lineage.
 - Cheap writer: only explicitly assigned branch/task.
@@ -699,4 +704,5 @@ or relay short deterministic commands rather than read project context.
 Measure validated completed-task throughput, per-builder cost, Astra usage,
 Grok usage, User interventions, review findings, rework and integration
 conflicts. Report unavailable usage metrics as unknown.
+
 
