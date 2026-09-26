@@ -1,0 +1,4 @@
+{
+  "name": "AI Ops Control Plane",
+  "install": "python3 --version && python3 -m compileall -q engineering tools tests"
+}

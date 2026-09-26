@@ -39,5 +39,10 @@
   "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
   "runtime_workflow": "control-plane-runtime.yml",
   "runtime_workflow_ref": "main",
-  "projection_actor": null
+  "projection_actor": null,
+  "astra_consumer": {
+    "enabled": false,
+    "identity": null,
+    "decision_identity": null
+  }
 }

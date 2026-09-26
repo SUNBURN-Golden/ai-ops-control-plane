@@ -36,13 +36,33 @@ do not subscribe it to general project chatter. Route results through a differen
 sender or thread, never back into the request trigger. Prefixes/metadata are routing
 data, not authentication. An unrelated `[AUDIT_RESULT]` text cannot change a gate.
 
-Before enabling an automatic consumer, provide a protected, serialized request claim
-for the designated auditor keyed by request/attempt/subject. Duplicate Slack delivery
-must reuse that claim before any expensive audit starts; unresolved consumption must
-be reconciled, not relaunched. Sender outbox dedupe alone does not provide receiver
-exactly-once execution. This PR does not implement or activate that receiver claim.
-Until it exists and passes an end-to-end test, a designated human starts Astra from
-the single posted GitHub pointer; notification mode remains usable without Grok.
+The gateway implements `POST /astra/claim`, backed by the protected flow ledger.
+Before expensive analysis, the connected receiver's narrow transport must authenticate
+and claim the request. Only a response with `start_allowed=true` starts analysis.
+Duplicate delivery, even with another session ID, returns false. A lost claim response
+may stall the task; it never justifies restarting. This is at-most-once start permission,
+not an exactly-once completion promise.
+
+Initialize the added table once with `control_plane_flow_cli.py init-consumer-ledger
+--ledger <protected-flow-ledger>` while intake is fenced. There is no automatic schema
+upgrade on ingress. Enable only after provisioning a dedicated transport credential
+`ASTRA_FLOW_ASTRA_CONSUMER_SECRET` (32 bytes minimum) and protected `astra_consumer`
+identity mapping. Never put that credential in Slack, model prompts or repository files.
+The receiver transport signs raw JSON `{request_id,session_id}` using HMAC-SHA256 over
+`timestamp + "." + raw_body`; headers are `X-Astra-Timestamp` and `X-Astra-Signature`.
+It must be a supported narrow connector/transport callable by the actual Astra account.
+An event trigger alone does not provide this capability or install a receiver.
+
+The gateway verifies confirmed sender/projection rows, the exact remote GitHub projection,
+current task/revision/HEAD/designation and protected recipient identity before atomic
+claim. Only one unresolved consumer per task is admitted. `CLAIMED` survives crashes;
+no lease timer releases it. After the actual session stops (including successful analysis),
+an operator records its durable evidence with `reconcile-consumer --request-id ...
+--actor ... --session ... --evidence <GitHub-pointer> --consumer-fenced`. This retires
+the consumption slot; it grants no audit PASS or decision authority. Do not fence an
+active analyst just to start a replacement. Until the receiver transport and end-to-end
+test exist, notification mode remains usable and a designated human starts Astra from
+the single posted GitHub pointer without Grok mediation.
 
 The auditor reads GitHub directly and verifies current subject, designation and
 non-authorship. It emits findings/result against the exact SHA. The existing collector

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import hmac
 import importlib.util
 import os
 from pathlib import Path
@@ -378,11 +379,40 @@ class Ingress:
 A failed/uncertain processing attempt is never retried by a timer. An operator
 can reconcile it; NOT_STARTED rows may be resumed by an explicit event.
 """
-    def __init__(self, store, ports, policy, slack_secret, github_secret, executor=None):
+    def __init__(self, store, ports, policy, slack_secret, github_secret, executor=None, consumer_secret=b""):
         self.store, self.ports, self.policy = store, ports, policy
         self.slack_secret, self.github_secret = slack_secret, github_secret
+        self.consumer_secret = consumer_secret
         self.executor = executor or ThreadPoolExecutor(max_workers=2, thread_name_prefix="astra-event")
         self.slots = threading.BoundedSemaphore(16)
+
+    def claim_consumer(self, raw, headers):
+        """Authenticated receiver lease without an AI call or automatic restart."""
+        configured = self.policy.get("astra_consumer", {})
+        flow.require(configured.get("enabled") is True and len(self.consumer_secret) >= 32,
+                     "Astra consumer disabled or credential unavailable")
+        stamp = headers.get("x-astra-timestamp", "")
+        flow.require(re.fullmatch(r"[0-9]{1,12}", stamp) and abs(time.time() - int(stamp)) <= 300,
+                     "stale consumer command")
+        expected = hmac.new(self.consumer_secret, stamp.encode() + b"." + raw,
+                            hashlib.sha256).hexdigest()
+        flow.require(hmac.compare_digest(expected, headers.get("x-astra-signature", "")),
+                     "unauthenticated consumer")
+        value = flow.decode(raw)
+        flow.require(isinstance(value, dict) and set(value) == {"request_id", "session_id"},
+                     "unexpected consumer command")
+        action, receipt = self.store.delivered_action(value["request_id"])
+        # The authenticated identity comes from protected policy, never the message.
+        actor = configured.get("identity" if action["kind"] == "AUDIT" else "decision_identity")
+        flow.require(isinstance(actor, str) and actor not in {"", "CONFIG_REQUIRED", "PENDING"}
+                     and actor == action["identity"], "consumer is not the designated recipient")
+        command = self.ports.command_for(action["subject"])
+        self.ports.projected_pointer(action, receipt, command)
+        flow.require(self.ports.is_current(action), "stale request or revoked designation")
+        result = self.store.claim_astra(action, actor, value["session_id"])
+        if result["start_allowed"]:
+            result["action"] = action
+        return result
 
     def work(self, event_id, command):
         if command["operation"] == "refresh_repository":
@@ -412,7 +442,11 @@ can reconcile it; NOT_STARTED rows may be resumed by an explicit event.
             raw = environ["wsgi.input"].read(length)
             flow.require(len(raw) == length, "truncated body")
             headers = {k[5:].replace("_", "-").lower(): v for k, v in environ.items() if k.startswith("HTTP_")}
-            if environ.get("PATH_INFO") == "/slack/commands":
+            if environ.get("PATH_INFO") == "/astra/claim":
+                result = self.claim_consumer(raw, headers)
+                start_response("200 OK", [("Content-Type", "application/json")])
+                return [flow.canonical(result).encode()]
+            elif environ.get("PATH_INFO") == "/slack/commands":
                 key, command = flow.verify_slack(raw, headers, self.slack_secret, self.policy["slack"], time.time())
             elif environ.get("PATH_INFO") == "/github/events":
                 key, command = flow.verify_github(raw, headers, self.github_secret, self.policy["repositories"])
@@ -464,4 +498,5 @@ def create_app(policy_path):
     store = flow.Store(policy["ledger_path"])
     return Ingress(store, GithubPorts(api, policy), policy,
                    os.environ["ASTRA_FLOW_SLACK_SIGNING_SECRET"].encode(),
-                   os.environ["ASTRA_FLOW_GITHUB_WEBHOOK_SECRET"].encode())
+                   os.environ["ASTRA_FLOW_GITHUB_WEBHOOK_SECRET"].encode(),
+                   consumer_secret=os.environ.get("ASTRA_FLOW_ASTRA_CONSUMER_SECRET", "").encode())

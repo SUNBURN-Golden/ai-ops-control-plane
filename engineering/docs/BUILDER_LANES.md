@@ -42,8 +42,14 @@ No CLI/model is selected because its display name resembles another lane.
    without secrets. Choose the exact supported Grok model/effort from `agent models`
    or `agent --list-models`; `auto`, aliases and guessed slugs are not qualification.
 2. Install `/opt/astra/bin/astra-builder-cursor` using the existing wrapper contract.
-   This PR registers that path; it does not ship or install a supervisor adapter.
-   Until the real adapter exists, admission/preflight must fail closed.
+   Source: `scripts/control_plane_cursor.py`; protected config example:
+   `.github/control-plane/cursor-adapter.example.json`. The same installed executable
+   invokes only its fixed worker modes under the dedicated CURSOR UID. Provision a
+   narrowly scoped sudo rule, lingering systemd user manager, private HOME/workspace
+   and root-owned CLI bundle. Source publication does not install these host resources.
+   Preserve piped stdin (no sudo PTY conversion for these fixed modes). Worker entry
+   requires a kernel-owned anonymous read pipe from the control UID, never SUDO_UID.
+   Provider children receive new builder-owned stdin; they cannot reuse that capability.
 3. Prove isolated task workspace, durable execution after wrapper/runner teardown,
    exact session ownership, duplicate launch rejection and UNKNOWN reconciliation.
    `create-chat` / `--resume` alone are not process-lifetime evidence.
@@ -60,6 +66,33 @@ No CLI/model is selected because its display name resembles another lane.
 Legacy three-lane host configuration stays valid. Enabling an unregistered lane is
 rejected. Source enum membership never implies authentication or production readiness.
 FILM/MAEUM rollout and SOULBOUND remain outside this change.
+
+The Cursor adapter requires observed official `status --format json` account fields
+in `auth_match`, the exact `models` entry, current binary/wrapper digests and independent
+host proofs. It creates a separate persistent clone/branch per full packet digest,
+records actual checkout/chat/unit identity and starts a `systemd-run --user` service
+with `Restart=no`. Runner teardown does not own that service. Any ambiguity is UNKNOWN;
+an existing packet directory is never reused to launch. Reconcile before changing
+attempt/revision. Admission, not the clone directory, is the global writer lock.
+
+Headless writing uses the official `--print --force --trust` flags only after explicit
+host qualification of `headless_write_authorized`. OS credential/workspace boundaries
+are mandatory; these CLI flags are not a sandbox or reviewer read-only guarantee.
+This adapter is a writer, not an independently qualified reviewer. Its tests use a
+fake CLI/supervisor. They do not establish installed authentication, included quota,
+Linux isolation, durable live execution or supported account models.
+
+Launch uses a detached control-UID custodian with an owner-only `custodian_root`.
+It retains `ASTRA_HOST_INFLIGHT_FD` through public-wrapper death; sudo, provider and
+builder UID never inherit that descriptor. A normal, identity-matched CONFIRMED send
+releases it. Timeout, nonzero, malformed result or bookkeeping failure retains the
+fence indefinitely: inspect the private sender record, fence all possible senders,
+then terminate the recorded custodian and perform evidence-based host reconciliation.
+Do not auto-expire it or delete a record to retry. These process-boundary tests use
+real subprocesses, but do not replace a live teardown test on the target host.
+The adapter does not make provider credentials inaccessible to their own builder UID;
+qualification must verify the approved provider/egress boundary and document that
+trust assumption. Neither a forged environment nor direct worker entry is admission.
 
 Official interfaces (verify installed/account support at qualification):
 - https://cursor.com/docs/cli/reference/parameters
