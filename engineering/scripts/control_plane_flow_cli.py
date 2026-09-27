@@ -19,12 +19,26 @@ def main():
     qualify.add_argument('--approval', type=Path, required=True)
     qualify.add_argument('--runtime-sha', required=True)
     probe = commands.add_parser('host-preflight')
-    probe.add_argument('--builder', choices=('DEVIN', 'GROK_BUILD', 'GLM'), required=True)
+    probe.add_argument('--builder', choices=('DEVIN', 'GROK_BUILD', 'GLM', 'CURSOR'), required=True)
+    initialize = commands.add_parser('init-consumer-ledger')
+    initialize.add_argument('--ledger', type=Path, required=True)
+    reconcile = commands.add_parser('reconcile-consumer')
+    reconcile.add_argument('--ledger', type=Path, required=True)
+    for flag in ('request-id', 'actor', 'session', 'evidence'):
+        reconcile.add_argument('--' + flag, required=True)
+    reconcile.add_argument('--consumer-fenced', action='store_true')
     args = parser.parse_args()
     try:
         if args.command == 'qualify-lane':
             result = flow.qualify_lane(flow.decode(args.report.read_bytes()),
                                        flow.decode(args.approval.read_bytes()), args.runtime_sha)
+        elif args.command == 'init-consumer-ledger':
+            flow.Store(args.ledger).initialize_consumers()
+            result = {'status': 'CONSUMER_LEDGER_INITIALIZED', 'production_enabled': False}
+        elif args.command == 'reconcile-consumer':
+            result = flow.Store(args.ledger).reconcile_astra(
+                args.request_id, args.actor, args.session, args.evidence,
+                consumer_fenced=args.consumer_fenced)
         else:
             # No bypass: disabled lanes remain denied by the existing protected host policy.
             run = subprocess.run([*HOST, 'preflight', '--builder-id', args.builder],
@@ -45,3 +59,4 @@ def main():
 
 if __name__ == '__main__':
     raise SystemExit(main())
+

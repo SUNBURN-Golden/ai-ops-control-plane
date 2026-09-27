@@ -256,7 +256,7 @@ def qualify_lane(report, approval, expected_runtime):
     """Check an operator-collected report. Does not claim to have executed a CLI."""
     required = ("cli", "authentication", "credential_isolation", "durable_session",
                 "duplicate_unknown", "trusted_workflow_boundary", "quota_policy")
-    require(report.get("builder_id") in {"DEVIN", "GROK_BUILD", "GLM"}, "unknown builder")
+    require(report.get("builder_id") in {"DEVIN", "GROK_BUILD", "GLM", "CURSOR"}, "unknown builder")
     require(report.get("runtime_sha") == expected_runtime, "runtime mismatch")
     for key in ("wrapper_sha256", "binary_sha256"):
         require(isinstance(report.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", report[key]), "hash missing")
@@ -268,6 +268,11 @@ def qualify_lane(report, approval, expected_runtime):
     require(approval.get("active") is True and github_pointer(approval.get("pointer")), "approval missing")
     require(approval.get("report_digest") == digest(report), "approval is not bound to exact report")
     require(report.get("harness") != "ZCODE_UNVERIFIED", "unverified ZCode headless surface")
+    if report["builder_id"] == "CURSOR":
+        require(report["harness"] == "CURSOR_CLI", "CURSOR must identify its Cursor CLI harness")
+        require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", report["model"]) is not None
+                and report["model"].upper() not in {"AUTO", "DEFAULT", "CONFIG_REQUIRED", "PENDING", "UNKNOWN"},
+                "CURSOR requires the explicit model returned by the installed CLI")
     return {"status": "QUALIFIED_FOR_INDEPENDENT_REVIEW", "report_digest": digest(report),
             "production_enabled": False}
 
@@ -355,6 +360,75 @@ class Store:
             # Transport uncertainty is retained even when semantic authority is revoked.
             db.execute("UPDATE outbox SET valid=0 WHERE id=?", (request_id,))
 
+    def initialize_consumers(self):
+        """Explicit installed-ledger upgrade; never performed by a received event."""
+        with self.transaction() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS astra_claims (
+                request TEXT PRIMARY KEY, task_key TEXT NOT NULL, body TEXT NOT NULL,
+                actor TEXT NOT NULL, session TEXT NOT NULL, state TEXT NOT NULL,
+                evidence TEXT)""")
+            db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS one_astra_consumer_per_task
+                ON astra_claims(task_key) WHERE state='CLAIMED'""")
+
+    def delivered_action(self, request_id):
+        require(isinstance(request_id, str) and re.fullmatch(r"[0-9a-f]{64}", request_id),
+                "invalid request identity")
+        with self.transaction() as db:
+            row = db.execute("SELECT * FROM outbox WHERE id=?", (request_id,)).fetchone()
+            require(row is not None and row["valid"] == 1 and row["state"] == "CONFIRMED",
+                    "request not currently confirmed; reconcile delivery first")
+            action = decode(row["body"])
+            require(action.get("kind") in {"AUDIT", "DECISION"}, "not an Astra request")
+            projection = db.execute("SELECT * FROM outbox WHERE id=?",
+                                   (digest(["projection", request_id]),)).fetchone()
+            require(projection is not None and projection["valid"] == 1 and
+                    projection["state"] == "CONFIRMED", "projection not confirmed")
+            return action, decode(projection["receipt"])
+
+    def claim_astra(self, action, actor, session):
+        """One permission to start, even if the caller loses this response.
+
+        Caller must authenticate and check current GitHub authority first. A claim
+        is not an audit result. No lease timeout, auto-release or automatic retry.
+        """
+        require(isinstance(actor, str) and actor == action.get("identity"), "wrong consumer identity")
+        require(isinstance(session, str) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,160}", session),
+                "invalid consumer session")
+        key, body = action["request_id"], canonical(action)
+        task_key = canonical([action["subject"]["repository"], action["subject"]["task_id"]])
+        with self.transaction() as db:
+            sender = db.execute("SELECT * FROM outbox WHERE id=?", (key,)).fetchone()
+            require(sender is not None and sender["valid"] == 1 and
+                    sender["state"] == "CONFIRMED" and sender["body"] == body,
+                    "request changed or delivery unconfirmed")
+            previous = db.execute("SELECT * FROM astra_claims WHERE request=?", (key,)).fetchone()
+            if previous:
+                require(previous["body"] == body and previous["actor"] == actor,
+                        "consumer request identity collision")
+                return {"request_id": key, "start_allowed": False, "state": previous["state"]}
+            require(db.execute("SELECT 1 FROM astra_claims WHERE task_key=? AND state='CLAIMED'",
+                               (task_key,)).fetchone() is None,
+                    "previous task consumer unresolved; fence/reconcile before replacement")
+            db.execute("INSERT INTO astra_claims VALUES (?,?,?,?,?,'CLAIMED',NULL)",
+                       (key, task_key, body, actor, session))
+            return {"request_id": key, "start_allowed": True, "state": "CLAIMED"}
+
+    def reconcile_astra(self, request_id, actor, session, evidence, *, consumer_fenced=False):
+        """Operator-only release of a finished/never-started consumer; grants no PASS."""
+        require(consumer_fenced is True and github_pointer(evidence),
+                "consumer fence and durable evidence are required")
+        with self.transaction() as db:
+            row = db.execute("SELECT * FROM astra_claims WHERE request=?", (request_id,)).fetchone()
+            require(row is not None and row["actor"] == actor and row["session"] == session,
+                    "reconciliation owner mismatch")
+            if row["state"] == "RECONCILED":
+                require(row["evidence"] == evidence, "reconciliation evidence mismatch")
+            else:
+                db.execute("UPDATE astra_claims SET state='RECONCILED',evidence=? WHERE request=?",
+                           (evidence, request_id))
+            return {"request_id": request_id, "state": "RECONCILED", "start_allowed": False,
+                    "audit_result": "NOT_GRANTED"}
+
     def send_once(self, action, send, is_current):
         self.reserve(action)
         with self.transaction() as db:
@@ -362,7 +436,8 @@ class Store:
             if not row["valid"]:
                 return {"state": "STALE", "sent": False}
             if row["state"] != "NOT_STARTED":
-                return {"state": row["state"], "sent": False}
+                return {"state": row["state"], "sent": False,
+                        "receipt": decode(row["receipt"]) if row["receipt"] else None}
         # Fresh authority read must occur outside the DB transaction, then CAS below.
         if not is_current(action):
             self.invalidate(action["request_id"])
@@ -420,9 +495,13 @@ message delivery; it never creates a semantic review/audit result.
             if projected["state"] != "CONFIRMED":
                 self.store.end_event(event_id, False)
                 return {"state": "PROJECTION_" + projected["state"]}
-            routed = self.store.send_once(action, self.ports.route, current)
+            route = self.ports.route
+            if action["kind"] in ("AUDIT", "DECISION"):
+                route = lambda a: self.ports.route(a, projection_receipt=projected.get("receipt"))
+            routed = self.store.send_once(action, route, current)
             self.store.end_event(event_id, routed["state"] == "CONFIRMED")
             return {"state": verdict["state"], "delivery": routed["state"]}
         except Exception:
             self.store.end_event(event_id, False)
             raise
+

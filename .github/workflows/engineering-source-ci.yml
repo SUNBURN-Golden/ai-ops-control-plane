@@ -1,10 +1,10 @@
 name: Engineering source CI
 on:
   pull_request:
-    paths: ['engineering/**', 'tools/**', 'tests/**', '.github/workflows/engineering-source-ci.yml']
+    paths: ['engineering/**', 'tools/**', 'tests/**', '.github/workflows/*.yml']
   push:
     branches: [main, ops/cp-extract-001]
-    paths: ['engineering/**', 'tools/**', 'tests/**', '.github/workflows/engineering-source-ci.yml']
+    paths: ['engineering/**', 'tools/**', 'tests/**', '.github/workflows/*.yml']
 permissions:
   contents: read
 jobs:
@@ -22,3 +22,4 @@ jobs:
       - run: python3 -m unittest discover -s engineering/scripts -p 'test_control_plane*.py'
       - run: bash -n engineering/scripts/control_plane_boundary_hook.sh && bash -n engineering/scripts/control_plane_boundary_probe.sh
       - run: python3 engineering/scripts/control_plane.py validate-repo
+

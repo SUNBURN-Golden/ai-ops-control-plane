@@ -60,6 +60,7 @@ on:
           - DEVIN
           - GROK_BUILD
           - GLM
+          - CURSOR
 
 permissions:
   contents: read
@@ -139,3 +140,4 @@ jobs:
           --issue-number "$ISSUE_NUMBER"
           --launch-request-id "$LAUNCH_REQUEST_ID"
           --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
+

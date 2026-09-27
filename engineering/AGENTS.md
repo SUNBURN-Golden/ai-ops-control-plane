@@ -7,7 +7,7 @@ ONE NORMALIZED EVENT → ONE SHORT ACTION → END SESSION.
 
 User decides. Astra owns architecture, architecture exceptions and explicit milestone/release gates.
 The mechanical layer dispatches deterministically; Grok is only an optional command relay.
-Devin, Grok Build and GLM are peer autonomous builders. GitHub stores durable truth. Slack is a cockpit.
+Devin, native Grok Build, GLM and Cursor CLI are peer autonomous builders. GitHub stores durable truth. Slack is a cockpit.
 
 ## 1. Separation of concerns
 
@@ -31,7 +31,7 @@ pointers.
 | USER | Final authority: product scope, consequential architecture choice, risk acceptance, merge | Be silently substituted by an agent |
 | ASTRA | Principal Architect / Design Authority; architecture exceptions; explicitly required milestone, architecture and release audits | Become the routine ticket manager or default A1/A2 reviewer; implement audit fixes; audit a change it authored or modified |
 | GROK | Optional human-facing command relay to the mechanical control plane | Engineer, architect, reviewer, semantic router, event bus, polling daemon |
-| BUILDER | One configured autonomous writer: DEVIN, GROK_BUILD or GLM; investigate → implement → test/debug → PR/evidence | Change approved architecture silently; write outside the assigned task/worktree; merge |
+| BUILDER | One configured autonomous writer: DEVIN, GROK_BUILD, GLM or CURSOR; investigate → implement → test/debug → PR/evidence | Change approved architecture silently; write outside the assigned task/worktree; merge |
 | REVIEWER | Configured non-author read-only reviewer; may be a different builder lane or User-designated external lane | Modify the reviewed change or become a second writer |
 | CHEAP_WORKER | Explicitly authorized mechanical work | Become a second writer on a substantive task |
 | MECHANICAL_LAYER | Actor validation, task serialization, builder dispatch, durable control record, event dedupe, gate aggregation | Perform semantic engineering or architecture judgment |
@@ -123,7 +123,7 @@ through another authenticated caller without changing task ownership or gates.
 
 ## 6. Builder autonomy
 
-DEVIN, GROK_BUILD and GLM are peer builder implementations behind the same
+DEVIN, GROK_BUILD, GLM and CURSOR are peer builder implementations behind the same
 task-owner contract. The canonical task/control record names exactly one active
 builder for a substantive task.
 
@@ -279,7 +279,7 @@ The mechanical layer must maintain configured actor identities for at least:
 - USER;
 - ASTRA;
 - optional Grok command relay;
-- each enabled builder adapter: DEVIN, GROK_BUILD and/or GLM;
+- each enabled builder adapter: DEVIN, GROK_BUILD, GLM and/or CURSOR;
 - the assigned independent reviewer lane;
 - GitHub/CI source.
 
@@ -346,8 +346,27 @@ exists. Do not use Grok for semantic routing, code reading, transcript
 surveillance or polling. Deterministic delivery uses the mechanical adapter;
 Grok is an optional command relay, not a mandatory hop.
 
+Use available subscription capacity for useful implementation, adversarial tests,
+regression and non-author review. Do not spend tokens merely to exhaust a quota.
+Default: one autonomous owner and one independent reviewer; an additional
+read-only review is scoped to an unresolved risk, not a second implementation.
+No additional paid usage, quota purchase, account cycling or automatic fallback.
+Grok quota is never a reason to interrupt the builder's own fix/retest loop.
+
+CURSOR identifies the Cursor CLI harness, not a model or native GROK_BUILD.
+Its exact installed model/effort slug and subscription route are qualified
+separately. Do not label Cursor as GLM or reuse another lane's provider approval.
+
+Astra requests go directly from the mechanical layer to configured Slack audit
+or decision channels. Grok is not a browser driver or intermediary for ChatGPT.
+Only scoped architecture/A3/milestone/release requests invoke Astra. This User
+instruction authorizes engineering Astra consultation; unrelated root-domain
+approval rules remain in force. Slack delivery is not an audit or User decision.
+See docs/ASTRA_SLACK.md for consumer identity, duplicate protection and setup.
+
 Keep existing repository-specific review and safety gates. Measure validated
 task throughput, per-builder cost, Astra usage, Grok usage, User interventions,
 review findings and rework separately; do not claim savings without observations.
 
 ---
+

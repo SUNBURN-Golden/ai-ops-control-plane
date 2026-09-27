@@ -151,6 +151,37 @@ class DispatchBoundaryTests(unittest.TestCase):
             with self.assertRaises(cp.ControlPlaneError):
                 cp.require_runtime_enabled()
 
+    def test_real_git_binding_covers_cursor_and_astra_receiver_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)/'engineering'; root.mkdir()
+            def git(*args):
+                return subprocess.run(['git', '-c', 'user.name=Offline Test', '-c',
+                    'user.email=offline@example.invalid', '-c', 'core.hooksPath=/dev/null', *args],
+                    cwd=root, text=True, capture_output=True, check=True).stdout.strip()
+            git('init', '-q', '..')
+            paths = ('scripts/control_plane_cursor.py', 'scripts/control_plane_flow_gateway.py',
+                     '.github/control-plane/activation.json')
+            for name in paths:
+                path = root/name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text('baseline\n')
+            git('add', '.'); git('commit', '-qm', 'audited')
+            audited = git('rev-parse', 'HEAD')
+            activation = activation_doc(runtime_enabled=True, activated_runtime_sha=audited)
+            with patch.object(cp, 'ROOT', root), patch.object(cp, 'load_activation', return_value=activation), \
+                 patch.object(cp, 'validate_repo'), patch.object(cp, 'load_config', return_value={'repository':'owner/repo'}):
+                # An activation-only commit does not force an implementation-SHA chase.
+                (root/paths[2]).write_text('activation only\n')
+                git('add', '.'); git('commit', '-qm', 'activation')
+                cp.require_runtime_enabled()
+                for name in paths[:2]:
+                    (root/name).write_text('changed implementation\n')
+                    with self.subTest(path=name), self.assertRaises(cp.ControlPlaneError):
+                        cp.require_runtime_enabled()
+                    git('add', name); git('commit', '-qm', 'unreviewed source')
+                    with self.subTest(committed=name), self.assertRaises(cp.ControlPlaneError):
+                        cp.require_runtime_enabled()
+                    (root/name).write_text('baseline\n')
+                    git('add', name); git('commit', '-qm', 'restore fixture')
+
     def test_dirty_runtime_cannot_reuse_activation(self):
         activation = {"runtime_enabled": True, "activated_runtime_sha": "a" * 40}
         responses = [subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0),

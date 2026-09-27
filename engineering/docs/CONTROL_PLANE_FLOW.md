@@ -1,8 +1,8 @@
 # CP-FLOW-002 — 이벤트 접수·review 배정·감사 전달·준비 판정
 
-기준: KIX runtime PR #32, `843840b603b011a0f04517261188c322e36a3f85`.
-구현 작업: GitHub issue #33 / revision 1. 기존 runtime, host helper, admission ledger,
-activation.json, AGENTS/TASKS/DISPATCH와 제품 코드는 변경하지 않는다.
+역사적 출발점: KIX runtime PR #32, `843840b603b011a0f04517261188c322e36a3f85`, KIX issue #33.
+현재 정본: `BeautifulMind-JT/ai-ops-control-plane/engineering`. CP-OPT-002는 중앙 dispatch와
+CURSOR 등록·직접 Astra 요청 전달을 추가한다. 과거 KIX 근거는 새 구현/설치 승인이 아니다.
 이 문서는 별도 승인된 governance를 대체하지 않는다.
 
 ## 구현된 경계
@@ -14,7 +14,7 @@ activation.json, AGENTS/TASKS/DISPATCH와 제품 코드는 변경하지 않는�
 - 고정 승인 route로 non-author reviewer를 선정하고 GitHub의 requested_reviewers API로 배정한다. 임의의 저가 모델 fallback은 없다.
 - 현재 PR·CI·독립 review를 API에서 새로 읽고 gate를 계산한다. reviewer 발견 A3는 architecture audit을 추가한다. 기존 RELEASE/MILESTONE 의무를 지우지 않는다.
 - 필요한 audit/decision과 상태만 Slack의 지정 채널로 전달한다. 문장을 생성하는 LLM 호출, polling, 자동 merge는 없다.
-- Grok Build/GLM의 host preflight 호출 경로와 정확한 runtime/binary/wrapper/harness/report에 결합된 lane qualification 검사.
+- Grok Build/GLM/CURSOR의 host preflight 호출 경로와 정확한 runtime/binary/wrapper/harness/report에 결합된 lane qualification 검사.
 
 **아직 실제 운영 활성화가 아니다.** 이 PR은 Slack 앱 설치·HTTPS 배포·signing secret 설정,
 production runner 연결·trusted workflow boundary·새 provider 로그인/과금/격리 검증을 수행하지 않는다.
@@ -121,11 +121,12 @@ GithubPorts의 추가 attestation은 아직 사람/승인된 collector가 제공
 outbox CAS를 쓰되, 외부 상태가 그 직후 바뀔 수 있으므로 실행/최종 gate에서도 새로 검증한다.
 transport CONFIRMED는 요청/메시지 전달만 의미한다. 의미론적 PASS와 구분한다.
 
-## Grok Build / GLM staging 검증
+## Grok Build / GLM / CURSOR staging 검증
 
 ```sh
 python3 -I scripts/control_plane_flow_cli.py host-preflight --builder GROK_BUILD
 python3 -I scripts/control_plane_flow_cli.py host-preflight --builder GLM
+python3 -I scripts/control_plane_flow_cli.py host-preflight --builder CURSOR
 python3 -I scripts/control_plane_flow_cli.py qualify-lane \
   --report report.json --approval approval.json --runtime-sha <audited-implementation-sha>
 ```
@@ -149,9 +150,15 @@ Primary references (implementation-time check):
 - https://docs.x.ai/build/cli/headless-scripting
 - https://docs.z.ai/devpack/tool/opencode
 
+빌더 구분·구독 사용·host 설치 조건: [BUILDER_LANES](BUILDER_LANES.md).
+Grok 없는 Astra 전달과 아직 미구현인 자동 수신 claim: [ASTRA_SLACK](ASTRA_SLACK.md).
+중앙 dispatch는 보호된 `control_repository/runtime_workflow/runtime_workflow_ref`가 필요하고,
+Slack audit/decision은 `projection_actor`와 exact GitHub projection을 검증한다.
+
 ## 완료 판정과 제외
 
 이 PR의 테스트 PASS는 author verification이다. 새 exact-HEAD independent review,
 실제 Slack 왕복, provider preflight, trusted workflow boundary와 host 자격증명 검증이 남는다.
-기존 #32의 PASS를 이 추가 코드에 승계하지 않는다. 다른 4개 repo에는 검토 전 복제하지 않는다.
+기존 KIX #32의 PASS를 이 추가 코드에 승계하지 않는다. 제품에는 후보 SHA 참조만 두고 공통 런타임을 복제하지 않는다.
 5개 repo 자동 배포, live activation, CLI reviewer 자동 실행, 자동 merge는 이 PR의 완료 주장이 아니다.
+

@@ -22,7 +22,7 @@ Astra approval is required for an already authorized, well-scoped task.
 Missing consequential requirements need clarification; repository investigation
 and ordinary implementation choices belong to the assigned builder.
 
-## Fixed defaults from RUNBOOKS/DISPATCH.md
+## Fixed defaults from the pinned central projects/<repository-name>.md
 
 EXECUTION_CLASS: BUILDER_STANDARD
 BUILDER_ID: CONFIG_REQUIRED
@@ -33,7 +33,7 @@ REVIEW_POLICY: REQUIRED_NON_A0
 REVIEWER_LANE_ID: CONFIG_REQUIRED
 
 For BUILDER_STANDARD, BUILDER_ID must resolve to one configured builder adapter
-such as DEVIN, GROK_BUILD or GLM before dispatch. Grok never chooses the builder
+such as DEVIN, GROK_BUILD, GLM or CURSOR before dispatch. Grok never chooses the builder
 or reviewer by reading the task.
 
 REPO/PROJECT must match the project map. Verification/post-merge policy comes
@@ -46,10 +46,15 @@ Other ASTRA_GATE values: NONE | MILESTONE | ARCHITECTURE | RELEASE.
 
 ## Conditional pointers
 
+EXECUTION_PROFILE_POINTER:
 CONTRACT_POINTERS:
 INVARIANT_POINTERS:
 LOCKED_AREAS_POINTERS:
 PHASE_OR_LAYER_POINTER:
+
+EXECUTION_PROFILE_POINTER is optional navigation to the approved lane report
+(harness, exact model/effort, wrapper digest, subscription route). It does not
+override the protected lane binding or authorize an unqualified provider.
 
 Use exact task-spec sections or existing repository documents; N/A is allowed
 only when no such requirement applies. Existing project-specific requirements
@@ -107,3 +112,4 @@ The independent reviewer verifies touched areas and contract-change requirements
 No transcript, repeated status or mutable execution state belongs here.
 
 Missing required fields: BLOCKED / INCOMPLETE_TASK_ENVELOPE, field names only.
+

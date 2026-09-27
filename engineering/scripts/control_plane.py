@@ -37,7 +37,7 @@ REQUIRED_TASK_FIELDS = (
     "BUILDER_ID",
     "CONTROL_RECORD_POINTER",
 )
-ALLOWED_BUILDERS = ("DEVIN", "GROK_BUILD", "GLM")
+ALLOWED_BUILDERS = ("DEVIN", "GROK_BUILD", "GLM", "CURSOR")
 ALLOWED_LAUNCH_STATES = (
     "NOT_STARTED",
     "SUBMITTING",
@@ -53,6 +53,14 @@ RUNTIME_PATHS = (
     "scripts/control_plane_boundary.py", "scripts/control_plane_boundary_hook.sh",
     "scripts/control_plane_boundary_probe.sh",
     "scripts/test_control_plane.py", "scripts/test_control_plane_host.py",
+    "scripts/test_control_plane_cursor.py",
+    "scripts/control_plane_cursor.py", "scripts/test_control_plane_cursor_adapter.py",
+    "scripts/control_plane_flow.py", "scripts/control_plane_flow_gateway.py",
+    "scripts/control_plane_flow_cli.py", "scripts/test_control_plane_flow.py",
+    "scripts/test_control_plane_flow_routes.py", "scripts/test_control_plane_flow_lane.py",
+    "scripts/test_control_plane_astra_consumer.py",
+    ".github/control-plane/cursor-adapter.example.json", ".github/control-plane/flow-policy.example.json",
+    "docs/BUILDER_LANES.md", "docs/ASTRA_SLACK.md",
     "scripts/test_control_plane_boundary.py",
     "scripts/control_plane_install.py", "scripts/test_control_plane_install.py",
     ".github/control-plane/config.json", ".github/control-plane/host-policy.example.json",
@@ -123,8 +131,10 @@ def load_config() -> Dict[str, Any]:
     builders = cfg["allowed_builders"]
     if not isinstance(builders, list) or not builders:
         raise ControlPlaneError("allowed_builders must be a non-empty list")
-    if set(builders) != set(ALLOWED_BUILDERS):
-        raise ControlPlaneError("allowed_builders must be exactly DEVIN, GROK_BUILD, GLM")
+    if (any(not isinstance(builder, str) for builder in builders) or
+            len(set(builders)) != len(builders) or
+            set(builders) not in ({"DEVIN", "GROK_BUILD", "GLM"}, set(ALLOWED_BUILDERS))):
+        raise ControlPlaneError("allowed_builders must register the legacy builders and optionally CURSOR")
     enabled = cfg["enabled_builders"]
     if (not isinstance(enabled, list) or not enabled or
             any(builder not in builders for builder in enabled) or len(set(enabled)) != len(enabled)):
@@ -441,6 +451,14 @@ def host_preflight(builder_id: Optional[str]) -> None:
             continue
         if report.get("parallel_safe") is not True:
             failures.append(f"{builder}: parallel_safe must be true")
+            continue
+        if builder == "CURSOR" and (
+                report.get("harness") != "CURSOR_CLI"
+                or report.get("execution_mode") != "PERSISTENT_SUPERVISOR"
+                or not isinstance(report.get("model"), str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", report["model"])
+                or report["model"].upper() in {"AUTO", "DEFAULT", "CONFIG_REQUIRED", "PENDING", "UNKNOWN"}):
+            failures.append("CURSOR: explicit Cursor CLI harness/model provenance required")
             continue
         reports.append(report)
 

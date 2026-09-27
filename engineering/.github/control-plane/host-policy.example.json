@@ -1,7 +1,7 @@
 {
   "control_uid": 0,
   "runner_uid": 0,
-  "builder_uids": {"DEVIN": 0, "GROK_BUILD": 0, "GLM": 0},
+  "builder_uids": {"DEVIN": 0, "GROK_BUILD": 0, "GLM": 0, "CURSOR": 0},
   "allowed_repositories": [],
   "enabled_builders": ["DEVIN"],
   "max_active_sessions": 1,
@@ -10,7 +10,9 @@
   "wrapper_paths": {
     "DEVIN": "/opt/astra/bin/astra-builder-devin",
     "GROK_BUILD": "/opt/astra/bin/astra-builder-grok-build",
-    "GLM": "/opt/astra/bin/astra-builder-glm"
+    "GLM": "/opt/astra/bin/astra-builder-glm",
+    "CURSOR": "/opt/astra/bin/astra-builder-cursor"
   },
   "boundary_evidence_pointer": "PENDING"
 }
+

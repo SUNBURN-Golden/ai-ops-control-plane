@@ -91,6 +91,7 @@ GitHub task에는 reconciliation evidence와 control projection을 남긴다.
 DEVIN      /opt/astra/bin/astra-builder-devin
 GROK_BUILD /opt/astra/bin/astra-builder-grok-build
 GLM        /opt/astra/bin/astra-builder-glm
+CURSOR     /opt/astra/bin/astra-builder-cursor
 ```
 
 비활성 lane의 미설치는 활성 lane을 막지 않는다. `ALL`은 활성 lane 전체를 의미한다.
