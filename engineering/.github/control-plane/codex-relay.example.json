@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "enabled": false,
+  "model": "gpt-6-sol",
+  "reasoning_effort": "low",
+  "billing": "CHATGPT_SUBSCRIPTION_ONLY",
+  "live_acceptance": "PENDING",
+  "evidence_pointer": "PENDING",
+  "claim_url": "CONFIG_REQUIRED",
+  "codex_binary": "CONFIG_REQUIRED",
+  "codex_sha256": "PENDING",
+  "codex_home": "CONFIG_REQUIRED",
+  "state_directory": "CONFIG_REQUIRED",
+  "work_sessions": {}
+}
