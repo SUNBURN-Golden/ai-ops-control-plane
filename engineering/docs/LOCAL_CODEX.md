@@ -10,7 +10,14 @@ cloud Work browser. It is not the builder, architect, independent auditor or Use
 User explicitly selected gpt-6-sol / ultra on 2026-09-27, superseding the earlier
 low-effort selection. The disabled example records that choice; it is not proof
 of installed availability. Verify the exact model and ultra effort in the intended
-CLI/account's `model/list` response. No automatic model or effort fallback.
+CLI/account's `model/list` response. User also explicitly authorized one alternative:
+gpt-5.6-sol / xhigh (Extra high). Only before claim, select it when the primary
+model/ultra pair is absent, hidden or unsupported in the qualified complete catalog.
+Malformed or ambiguous catalog entries block; they do not trigger fallback.
+Both pairs require their exact effort to be listed. Persist the chosen model/effort
+with the request before network effects. No post-claim switch, automatic retry,
+quota-error fallback or new conversation after a failure/UNKNOWN. This exception
+applies only to the coordinator, not builders or cloud Astra.
 Cloud Work Astra mid uses the verified Astra model and medium effort in its own
 session. Normal builder debugging never goes through Astra. Consequential matters
 outside durable User delegation remain User decisions; a relay cannot expand it.
@@ -72,11 +79,12 @@ Store the complete returned `data`, `nextCursor: null`, a timezone-qualified
 `model_catalog`. Set its `source` to `codex app-server model/list`.
 
 The validator requires the explicitly selected model to occur exactly once,
-be visible (`hidden=false`), and list the selected ultra effort under
+be visible (`hidden=false`), and list the chosen pair's effort (ultra or xhigh) under
 `supportedReasoningEfforts`. Missing catalogs, incomplete pagination, unknown
-models, unsupported efforts and a different CLI digest or Codex home block before
-any central claim or local reservation. The client never chooses `isDefault`, an
-upgrade suggestion or a fallback. Source examples and another user's model cache
+models/efforts without a qualified approved alternative, or a different CLI digest
+or Codex home block before any central claim or local reservation. The client never
+chooses `isDefault`, an upgrade suggestion or an unconfigured alternative.
+Source examples and another user's model cache
 are not installed-environment evidence.
 
 The protected catalog is an operator-recorded observation, not remote attestation

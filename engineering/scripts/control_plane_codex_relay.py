@@ -69,13 +69,29 @@ def validate_model(p):
             isinstance(catalog.get("data"), list) and
             all(isinstance(entry, dict) for entry in catalog["data"]),
             "complete installed model catalog required")
-    matches = [entry for entry in catalog["data"] if entry.get("model") == model]
-    require(len(matches) == 1 and matches[0].get("hidden") is False,
-            "selected coordinator model is not uniquely listed")
-    efforts = matches[0].get("supportedReasoningEfforts")
-    require(isinstance(efforts, list) and any(
-        isinstance(entry, dict) and entry.get("reasoningEffort") == p["reasoning_effort"]
-        for entry in efforts), "selected coordinator effort is not listed")
+    fallback = p.get("fallback")
+    approved = {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"}
+    require(fallback is None or (model == "gpt-6-sol" and fallback == approved),
+            "unapproved coordinator fallback")
+
+    def listed(candidate):
+        matches = [entry for entry in catalog["data"] if entry.get("model") == candidate["model"]]
+        require(len(matches) <= 1, "ambiguous coordinator model")
+        if not matches:
+            return False
+        entry = matches[0]
+        efforts = entry.get("supportedReasoningEfforts")
+        require(type(entry.get("hidden")) is bool and isinstance(efforts, list) and
+                all(isinstance(e, dict) and isinstance(e.get("reasoningEffort"), str)
+                    for e in efforts), "malformed model catalog entry")
+        return not entry["hidden"] and any(
+            e["reasoningEffort"] == candidate["reasoning_effort"] for e in efforts)
+
+    primary = {"model": model, "reasoning_effort": p["reasoning_effort"]}
+    if listed(primary):
+        return primary
+    require(fallback is not None and listed(fallback), "no qualified coordinator model/effort")
+    return dict(fallback)
 
 
 def validate_policy(p):
@@ -213,6 +229,8 @@ def run_codex(p, action, session, root):
 
 def deliver(p, request_id, secret, claim_fn=claim, send_fn=run_codex):
     validate_policy(p)
+    selected = validate_model(p)  # choose once, before reservation or external side effects
+    p = dict(p, **selected)
     require(len(secret) >= 32, "consumer credential unavailable")
     require(request_id in p["work_sessions"], "request is not explicitly bound")
     session = p["work_sessions"][request_id]
@@ -222,12 +240,15 @@ def deliver(p, request_id, secret, claim_fn=claim, send_fn=run_codex):
     db = sqlite3.connect(state / "relay.sqlite3", timeout=5)
     try:
         db.execute("CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, session TEXT UNIQUE, state TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS request_models (id TEXT PRIMARY KEY, model TEXT, effort TEXT)")
         db.execute("BEGIN IMMEDIATE")
         previous = db.execute("SELECT state FROM requests WHERE id=?", (request_id,)).fetchone()
         if previous:
             db.rollback()
             return {"request_id": request_id, "state": previous[0], "sent": False}
         db.execute("INSERT INTO requests VALUES (?,?,'CLAIMING')", (request_id, session))
+        db.execute("INSERT INTO request_models VALUES (?,?,?)",
+                   (request_id, selected["model"], selected["reasoning_effort"]))
         db.commit()  # persisted before any network/AI side effect
         try:
             receipt = claim_fn(p, request_id, session, secret)
@@ -249,7 +270,8 @@ def deliver(p, request_id, secret, claim_fn=claim, send_fn=run_codex):
         db.execute("UPDATE requests SET state=? WHERE id=?", (status, request_id))
         db.commit()
         return {"request_id": request_id, "state": status, "audit_result": "NOT_GRANTED",
-                "automatic_resume": False}
+                "automatic_resume": False, "selected_model": selected["model"],
+                "selected_effort": selected["reasoning_effort"]}
     finally:
         db.close()
 
@@ -265,7 +287,8 @@ def main():
         policy = json.loads(private(args.policy).read_text())
         validate_policy(policy)
         if args.command == "check-config":
-            result = {"status": "CONFIG_VALID", "live_test": "NOT_RUN"}
+            result = {"status": "CONFIG_VALID", "live_test": "NOT_RUN",
+                      "selected": validate_model(policy)}
         else:
             secret = os.environ.pop("ASTRA_FLOW_ASTRA_CONSUMER_SECRET", "").encode()
             result = deliver(policy, args.request_id, secret)

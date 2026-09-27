@@ -219,6 +219,58 @@ class RelayTests(unittest.TestCase):
                      'UNKNOWN','medium reasoning','never paraphrase','Do not repeatedly inspect'):
             self.assertIn(text,prompt)
 
+    def allow_fallback(self):
+        self.policy['fallback'] = dict(model='gpt-5.6-sol',reasoning_effort='xhigh')
+        self.policy['model_catalog']['data'].append(dict(model='gpt-5.6-sol',hidden=False,
+            supportedReasoningEfforts=[dict(reasoningEffort='xhigh')]))
+
+    def test_approved_fallback_is_selected_before_claim_and_persisted(self):
+        self.allow_fallback()
+        self.policy['model_catalog']['data'].pop(0)
+        def fake_run(command,**kwargs):
+            self.assertEqual(command[command.index('--model')+1],'gpt-5.6-sol')
+            self.assertEqual(command[command.index('-c')+1],'model_reasoning_effort="xhigh"')
+            with sqlite3.connect(self.root/'state'/'relay.sqlite3') as db:
+                self.assertEqual(db.execute('SELECT model,effort FROM request_models').fetchone(),
+                                 ('gpt-5.6-sol','xhigh'))
+            Path(command[command.index('--output-last-message')+1]).write_text(json.dumps(self.send()))
+            return subprocess.CompletedProcess(command,0)
+        with patch.object(relay.subprocess,'run',side_effect=fake_run):
+            result=self.run_relay(send_fn=relay.run_codex)
+        self.assertEqual((result['selected_model'],result['selected_effort']),('gpt-5.6-sol','xhigh'))
+        self.assertEqual((self.claims,self.sends),(1,1))
+
+    def test_primary_preferred_and_post_claim_failure_never_switches(self):
+        self.allow_fallback()
+        def lost(p,*args):
+            self.assertEqual((p['model'],p['reasoning_effort']),('gpt-6-sol','ultra'))
+            self.sends+=1
+            raise TimeoutError()
+        self.assertEqual(self.run_relay(send_fn=lost)['state'],'UNKNOWN')
+        self.policy['model_catalog']['data'].pop(0)
+        self.assertEqual(self.run_relay()['state'],'UNKNOWN')
+        self.assertEqual((self.claims,self.sends),(1,1))
+
+    def test_fallback_requires_exact_authorization_and_supported_effort(self):
+        self.allow_fallback()
+        original=copy.deepcopy(self.policy)
+        for change in ('wrong_pair','unsupported','ambiguous'):
+            self.policy=copy.deepcopy(original)
+            if change=='wrong_pair': self.policy['fallback']['reasoning_effort']='high'
+            if change=='unsupported':
+                self.policy['model_catalog']['data'].pop(0)
+                self.policy['model_catalog']['data'][0]['supportedReasoningEfforts']=[]
+            if change=='ambiguous': self.policy['model_catalog']['data'].append(
+                copy.deepcopy(self.policy['model_catalog']['data'][0]))
+            with self.subTest(change=change),self.assertRaises(relay.RelayError): self.run_relay()
+        self.assertEqual((self.claims,self.sends),(0,0))
+        self.assertFalse((self.root/'state'/'relay.sqlite3').exists())
+
+    def test_missing_primary_effort_can_select_only_approved_alternative(self):
+        self.allow_fallback()
+        self.policy['model_catalog']['data'][0]['supportedReasoningEfforts']=[dict(reasoningEffort='low')]
+        self.assertEqual(relay.validate_model(self.policy),self.policy['fallback'])
+
     def test_central_hmac_wire_and_redirect_rejection(self):
         class Response:
             def __enter__(self): return self

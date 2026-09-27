@@ -369,8 +369,13 @@ Under CP-LOCAL-001, User authorizes local macOS Codex to deliver an existing
 claimed request to a dedicated cloud Work Astra mid conversation and collect
 its result pointer. This is a qualified transport exception, not a new authority
 or shared personal browser. Central consumer serialization remains mandatory.
-No recurring LLM session, automatic resend, model fallback or browser-derived
-approval. Existing delegated decisions retain their exact recorded scope.
+No recurring LLM session, automatic resend, unconfigured model fallback or
+browser-derived approval. User authorized gpt-6-sol/ultra with one alternative:
+gpt-5.6-sol/xhigh (Extra high), selected only before claim if the primary pair is
+unavailable in the qualified model catalog. Persist the selected pair with the
+request; never switch or resend after claim/send failure or uncertainty. This
+exception does not authorize builder fallback. Existing delegated decisions
+retain their exact recorded scope.
 See docs/LOCAL_CODEX.md; disabled source registration is not live acceptance.
 
 Keep existing repository-specific review and safety gates. Measure validated
