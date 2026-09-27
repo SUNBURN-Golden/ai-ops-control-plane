@@ -10,8 +10,8 @@ Original transformed files are in provenance/kix; historical PR notes are indexe
 These are historical evidence, never transferred deployment authorization.
 
 Central config separates control_repository from the explicit ASTRA_TARGET_REPOSITORY.
-Only projects.json targets are accepted. Every target deployment_enabled is false.
-No default target, enabled central route, production installation or cutover is claimed.
+Only projects.json targets are accepted. Peer targets KIX, ZARI, FILM UNIT and MAEUM_GYEOL have deployment_enabled=true.
+No default target. SOULBOUND is not a target. Production installation and host allow-list attestation remain separate from this flag.
 Project task/CI inputs are in projects/. Approved product contracts always remain in products.
 
 Repository-root Engineering source CI runs offline Python and shell checks.

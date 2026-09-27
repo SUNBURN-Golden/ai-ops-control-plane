@@ -1,6 +1,6 @@
 # KIX project input
 
-Source-only profile; no deployment authorization.
+Central dispatch target. deployment_enabled=true as of 2026-09-27. Merge and production release stay separate approvals.
 
 
 
