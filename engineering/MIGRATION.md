@@ -1,5 +1,5 @@
 <!-- CP-EXTRACT-001 source update -->
-Current stage: INSTALL_PREP_DISABLED. User authorized operational cutover on 2026-09-25 for install preparation only. Root production dispatch workflow and disabled host install/pin tooling are committed pending independent exact-HEAD review; activation remains NOT_APPROVED and runtime_enabled=false. Import commit 55240a610688a5fe7f4883e250b0ffab6c126fdb. The preparation sequence below is retained as migration history; source import is now real. Product proposals and exact-head review are tracked on issue #1. Central runtime remains disabled. See README.md and CUTOVER.md for current execution limits.
+Current stage: four peer targets have deployment_enabled=true as of the user decision on 2026-09-27 (KIX, ZARI, FILM UNIT, MAEUM_GYEOL). SOULBOUND stays excluded. The 2026-09-25 install-prep record remains history below. Import commit 55240a610688a5fe7f4883e250b0ffab6c126fdb. See CUTOVER.md for what this flag does and does not authorize.
 
 # CP-EXTRACT-001 — source extraction and cutover boundary
 
@@ -55,7 +55,7 @@ KIX #50 and #51 must not land new shared operations notes in the product reposit
 - KIX #35 and unrelated product PRs are untouched.
 - KIX locked blobs: `runtime/crates/kix-kernel/src/lib.rs` = `69564b166f0c27f9af5d8422f0a466b18d74c20f`; `runtime/crates/kix-kernel/tests/quarantine_capacity.rs` = `b607996c83a119c349f1cc90469ac1ba82764e20`.
 - No R2/storage/replication implementation, production bank/chain calls, OneDrive writes, settings/secret changes, force/main pushes, or self-merge.
-- FILM UNIT/마음결 source-reference cleanup does not restart the stopped rollout. SOULBOUND remains excluded.
+- FILM UNIT/마음결 source-reference cleanup does not itself restart rollout. The 2026-09-27 decision separately sets deployment_enabled for the four peer targets. SOULBOUND remains excluded.
 
 ## Non-claims
 

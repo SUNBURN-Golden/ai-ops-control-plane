@@ -61,7 +61,7 @@
       "DEVIN"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
-    "deployment_enabled": false
+    "deployment_enabled": true
   },
   "BeautifulMind-JT/film-unit-mv-studio": {
     "schema_version": 1,
@@ -93,7 +93,7 @@
       "DEVIN"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
-    "deployment_enabled": false
+    "deployment_enabled": true
   },
   "BeautifulMind-JT/maeum-gyeol": {
     "schema_version": 1,
@@ -125,6 +125,6 @@
       "DEVIN"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
-    "deployment_enabled": false
+    "deployment_enabled": true
   }
 }

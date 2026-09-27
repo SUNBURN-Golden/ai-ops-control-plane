@@ -1,4 +1,13 @@
-# Runtime cutover — AUTHORIZED FOR INSTALL-PREP, RUNTIME STILL DISABLED
+# Runtime cutover — FOUR PEER TARGETS ENABLED
+
+On 2026-09-27 the user authorized `deployment_enabled=true` for every peer
+target in `projects.json`: KIX, ZARI, FILM UNIT, and MAEUM_GYEOL.
+SOULBOUND stays excluded. There is still no default target.
+This opens central dispatch acceptance for those four repositories.
+It does not merge product code, release a service, or rewrite the host
+machine's separate repository allow-list.
+
+The 2026-09-25 stage below remains the historical install-prep record.
 
 User authorized the operational cutover for CP-EXTRACT-001 on 2026-09-25.
 Authorization covers preparing the central production ops path and a disabled
@@ -28,7 +37,7 @@ The technical gate sequence below still applies and is not waived:
    - `control_plane_install.py verify` is the non-mutating check; `apply` refuses unless the
      in-repo activation record is runtime_enabled=false / NOT_APPROVED / PENDING.
 7. User separately approves one bounded canary; maintain one writer and one active dispatcher.
-   FILM/MAEUM rollout remains stopped; SOULBOUND remains excluded.
+   2026-09-25 stopped FILM/MAEUM rollout. 2026-09-27 enables deployment for the four peers. SOULBOUND remains excluded.
 8. Retire old product execution workflows only after source acceptance and confirmed drain/fence.
 9. Rollback: fence the new sender first; reconcile its ambiguous requests; restore compatible code
    and ledger state without losing accepted request IDs; only then authorize the old sender again.
