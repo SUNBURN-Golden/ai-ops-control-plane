@@ -2,7 +2,7 @@
 
 Owner: BeautifulMind-JT/ai-ops-control-plane. Root non-engineering policies remain authoritative.
 Product contracts, code, task specifications and product CI stay in their repositories.
-SOULBOUND is excluded. FILM/MAEUM changes remain source-only.
+SOULBOUND is excluded. All four peer targets retain deployment eligibility.
 
 Source import: KIX ec3f6db0d613385bfdf2392a4295f0099be1eec6;
 import commit 55240a610688a5fe7f4883e250b0ffab6c126fdb.
@@ -12,8 +12,12 @@ not current installation digests or transferred deployment approvals.
 Central runtime: repository-root .github/workflows/control-plane-runtime.yml.
 Nested engineering/.github/workflows are non-executing source copies.
 ASTRA_TARGET_REPOSITORY explicitly selects projects.json; no default target.
-Current committed activation, target deployment and protected host/lane gates jointly decide execution.
+KIX, ZARI, FILM UNIT and MAEUM_GYEOL retain deployment_enabled=true.
+This is target eligibility, not installed-runtime approval. Current activation
+is disabled pending evidence for this implementation. Activation, exact runtime
+SHA, protected host allowlist and lane gates must all pass before execution.
 A new source PR does not inherit an older implementation audit or authorize installation.
+Project task/CI inputs are in projects/. Approved contracts remain in products.
 
 Engineering governance: AGENTS.md. Task shape: TASKS/TEMPLATE.md. Procedure: RUNBOOKS/DISPATCH.md.
 Builder setup: docs/BUILDER_LANES.md. Direct Astra requests: docs/ASTRA_SLACK.md.

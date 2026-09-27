@@ -13,9 +13,9 @@ NO SECOND SEMANTIC REASONING PASS.
 Shared source owner: BeautifulMind-JT/ai-ops-control-plane.
 Resolve the exact target repository in `.github/control-plane/projects.json`.
 Project-specific task/verification rules are in `projects/<repository-name>.md`.
-Deployment is determined by the exact projects.json profile and activation/host gates;
-policy adoption alone never enables a product. No default target.
-KIX, ZARI, FILM UNIT and MAEUM_GYEOL are peers. SOULBOUND is excluded.
+Peer targets KIX, ZARI, FILM UNIT and MAEUM_GYEOL have deployment_enabled=true.
+This grants target eligibility only; activation/host/lane gates still apply.
+No default target. SOULBOUND is excluded.
 Never infer target, channel, builder or reviewer. Missing configuration blocks.
 
 ## 2. Activation preconditions
