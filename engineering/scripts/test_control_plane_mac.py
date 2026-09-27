@@ -249,5 +249,28 @@ class LaunchdStatusTests(unittest.TestCase):
                 self.assertEqual(launchd.status("test"), expected)
 
 
+class CleanupTests(unittest.TestCase):
+    def test_delayed_descendant_exit_is_observed_before_sealing_receipt(self):
+        now = [0.0]
+        def sleep(delay):
+            now[0] += delay
+        with patch.object(mac.os, "killpg", side_effect=[None, None, ProcessLookupError()]) as probe:
+            self.assertTrue(mac.wait_group_gone(123, clock=lambda: now[0], sleep=sleep))
+        self.assertEqual(probe.call_count, 3)
+        self.assertGreater(now[0], 0)
+
+    def test_group_not_confirmed_absent_remains_unresolved_after_bound(self):
+        now = [0.0]
+        def sleep(delay):
+            now[0] += delay
+        with patch.object(mac.os, "killpg", return_value=None):
+            self.assertFalse(mac.wait_group_gone(123, timeout=0.1, clock=lambda: now[0], sleep=sleep))
+        self.assertAlmostEqual(now[0], 0.1)
+
+    def test_permission_error_is_not_proof_of_group_absence(self):
+        with patch.object(mac.os, "killpg", side_effect=PermissionError()), self.assertRaises(PermissionError):
+            mac.wait_group_gone(123)
+
+
 if __name__ == "__main__":
     unittest.main()

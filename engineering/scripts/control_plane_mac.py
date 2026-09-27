@@ -175,6 +175,20 @@ def profile(workspace, read_roots):
             '(allow file-read* file-write* (literal "/dev/null"))\n')
 
 
+def wait_group_gone(pgid, timeout=5, *, clock=time.monotonic, sleep=time.sleep):
+    """Bounded cleanup observation, not a retry/relaunch or admission timeout."""
+    deadline = clock() + timeout
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return False  # unresolved group keeps the admission slot occupied
+        sleep(min(0.05, remaining))
+
+
 class Launchd:
     def __init__(self, uid):
         self.domain = f"gui/{uid}"
@@ -371,11 +385,7 @@ class Runtime:
             except ProcessLookupError:
                 pass
             child.wait(timeout=10)
-            group_gone = False
-            try:
-                os.killpg(child.pid, 0)
-            except ProcessLookupError:
-                group_gone = True
+            group_gone = wait_group_gone(child.pid)
             stdout.flush()
             stderr.flush()
             os.fsync(stdout.fileno())

@@ -77,7 +77,10 @@ standing scheduler and no login/reboot installation. The coordinator starts a
 fixed diagnostic in `sandbox-exec`, with isolated HOME/TMPDIR, an allowlisted
 environment, read-only CLI/runtime files, no network rule, no credential access,
 and write access only to its workspace. It kills remaining child process-group
-members before recording a terminal receipt. SIGTERM requests cancellation;
+members before recording a terminal receipt, observing group disappearance for
+at most five seconds so delayed descendant exit is not immediately sealed as a
+permanent unresolved receipt. Still-unconfirmed cleanup retains the slot.
+SIGTERM requests cancellation;
 it does not itself prove cleanup or release the slot.
 
 `recover` is a read-only status operation. No retry, restart, new owner,
