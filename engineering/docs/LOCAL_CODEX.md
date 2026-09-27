@@ -7,12 +7,14 @@ User authorized this design on 2026-09-27. Source candidate, not an installed Ma
 
 Mac Codex relays explicit commands, collects pointers and operates the qualified
 cloud Work browser. It is not the builder, architect, independent auditor or User.
-User explicitly selected gpt-6-sol / ultra on 2026-09-27, superseding the earlier
-low-effort selection. The disabled example records that choice; it is not proof
-of installed availability. Verify the exact model and ultra effort in the intended
+User explicitly selected gpt-5.6-sol / max on 2026-09-27, superseding the earlier
+gpt-6-sol / ultra selection ([User decision](https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/19#issuecomment-5856142120)).
+The disabled example records that choice; it is not proof
+of installed availability. Verify the exact model and max effort in the intended
 CLI/account's `model/list` response. User also explicitly authorized one alternative:
-gpt-5.6-sol / xhigh (Extra high). Only before claim, select it when the primary
-model/ultra pair is absent, hidden or unsupported in the qualified complete catalog.
+gpt-5.6-sol / xhigh (Extra high). Only before claim, select it when max is unsupported
+and xhigh is explicitly supported in the qualified complete catalog. Both pairs use
+the same model entry; a missing or hidden gpt-5.6-sol blocks both choices.
 Malformed or ambiguous catalog entries block; they do not trigger fallback.
 Both pairs require their exact effort to be listed. Persist the chosen model/effort
 with the request before network effects. No post-claim switch, automatic retry,
@@ -79,7 +81,7 @@ Store the complete returned `data`, `nextCursor: null`, a timezone-qualified
 `model_catalog`. Set its `source` to `codex app-server model/list`.
 
 The validator requires the explicitly selected model to occur exactly once,
-be visible (`hidden=false`), and list the chosen pair's effort (ultra or xhigh) under
+be visible (`hidden=false`), and list the chosen pair's effort (max or xhigh) under
 `supportedReasoningEfforts`. Missing catalogs, incomplete pagination, unknown
 models/efforts without a qualified approved alternative, or a different CLI digest
 or Codex home block before any central claim or local reservation. The client never

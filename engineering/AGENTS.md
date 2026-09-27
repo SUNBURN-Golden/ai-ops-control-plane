@@ -370,10 +370,12 @@ claimed request to a dedicated cloud Work Astra mid conversation and collect
 its result pointer. This is a qualified transport exception, not a new authority
 or shared personal browser. Central consumer serialization remains mandatory.
 No recurring LLM session, automatic resend, unconfigured model fallback or
-browser-derived approval. User authorized gpt-6-sol/ultra with one alternative:
-gpt-5.6-sol/xhigh (Extra high), selected only before claim if the primary pair is
-unavailable in the qualified model catalog. Persist the selected pair with the
-request; never switch or resend after claim/send failure or uncertainty. This
+browser-derived approval. User authorized gpt-5.6-sol/max with one alternative:
+gpt-5.6-sol/xhigh (Extra high), selected only before claim if max is unsupported
+and xhigh is supported in the qualified model catalog. Missing/hidden models or
+malformed/ambiguous catalog entries block; neither pair permits another model.
+Persist the selected pair with the request; never switch or resend after
+claim/send failure or uncertainty. This
 exception does not authorize builder fallback. Existing delegated decisions
 retain their exact recorded scope.
 See docs/LOCAL_CODEX.md; disabled source registration is not live acceptance.

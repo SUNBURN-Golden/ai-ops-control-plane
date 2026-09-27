@@ -52,7 +52,7 @@ def validate_model(p):
     model = p.get("model")
     require(isinstance(model, str) and re.fullmatch(r"[a-z0-9][a-z0-9._-]*", model) and
             model not in {"auto", "default", "pending", "config_required"} and
-            p.get("reasoning_effort") == "ultra", "explicit coordinator model/ultra effort required")
+            p.get("reasoning_effort") == "max", "explicit coordinator model/max effort required")
     catalog = p.get("model_catalog")
     require(isinstance(catalog, dict) and catalog.get("source") == "codex app-server model/list",
             "installed model catalog missing")
@@ -71,7 +71,7 @@ def validate_model(p):
             "complete installed model catalog required")
     fallback = p.get("fallback")
     approved = {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"}
-    require(fallback is None or (model == "gpt-6-sol" and fallback == approved),
+    require(fallback is None or (model == "gpt-5.6-sol" and fallback == approved),
             "unapproved coordinator fallback")
 
     def listed(candidate):

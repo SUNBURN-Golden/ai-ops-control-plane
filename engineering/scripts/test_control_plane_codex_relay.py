@@ -24,7 +24,7 @@ class RelayTests(unittest.TestCase):
             (self.root/d).mkdir(mode=0o700)
         self.rid = 'a'*64
         self.session = 'https://chatgpt.com/c/test-session'
-        self.policy = dict(schema_version=1, enabled=True, model='gpt-6-sol', reasoning_effort='ultra',
+        self.policy = dict(schema_version=1, enabled=True, model='gpt-5.6-sol', reasoning_effort='max',
             billing='CHATGPT_SUBSCRIPTION_ONLY', live_acceptance='PASS',
             evidence_pointer='https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/19',
             claim_url='https://control.example/astra/claim', codex_binary=str(self.binary),
@@ -34,8 +34,8 @@ class RelayTests(unittest.TestCase):
         self.policy['model_catalog'] = dict(
             source='codex app-server model/list', observed_at='2026-09-27T11:28:12Z',
             codex_sha256=self.policy['codex_sha256'], codex_home=self.policy['codex_home'],
-            data=[dict(model='gpt-6-sol', hidden=False,
-                       supportedReasoningEfforts=[dict(reasoningEffort='ultra')])], nextCursor=None)
+            data=[dict(model='gpt-5.6-sol', hidden=False,
+                       supportedReasoningEfforts=[dict(reasoningEffort='max')])], nextCursor=None)
         self.action = dict(request_id=self.rid, kind='AUDIT', identity='designated-astra',
             designation='https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/19',
             task_pointer='https://github.com/BeautifulMind-JT/ZARI/issues/11',
@@ -163,11 +163,11 @@ class RelayTests(unittest.TestCase):
         self.policy['model'] = 'gpt-5.6-terra'
         self.policy['model_catalog']['data'].append(dict(
             model='gpt-5.6-terra', hidden=False, isDefault=False,
-            upgrade='gpt-6-astra', supportedReasoningEfforts=[dict(reasoningEffort='ultra')]))
+            upgrade='gpt-6-astra', supportedReasoningEfforts=[dict(reasoningEffort='max')]))
         self.policy['model_catalog']['data'][0]['isDefault'] = True
         def fake_run(command, **kwargs):
             self.assertEqual(command[command.index('--model')+1], 'gpt-5.6-terra')
-            self.assertEqual(command[command.index('-c')+1], 'model_reasoning_effort="ultra"')
+            self.assertEqual(command[command.index('-c')+1], 'model_reasoning_effort="max"')
             Path(command[command.index('--output-last-message')+1]).write_text(json.dumps(self.send()))
             return subprocess.CompletedProcess(command, 0)
         with patch.object(relay.subprocess, 'run', side_effect=fake_run) as run:
@@ -221,12 +221,19 @@ class RelayTests(unittest.TestCase):
 
     def allow_fallback(self):
         self.policy['fallback'] = dict(model='gpt-5.6-sol',reasoning_effort='xhigh')
-        self.policy['model_catalog']['data'].append(dict(model='gpt-5.6-sol',hidden=False,
-            supportedReasoningEfforts=[dict(reasoningEffort='xhigh')]))
+        self.policy['model_catalog']['data'][0]['supportedReasoningEfforts'].append(
+            dict(reasoningEffort='xhigh'))
 
     def test_approved_fallback_is_selected_before_claim_and_persisted(self):
         self.allow_fallback()
-        self.policy['model_catalog']['data'].pop(0)
+        self.policy['model_catalog']['data'][0]['supportedReasoningEfforts'].pop(0)
+        def persisted_claim(p, *args):
+            self.assertEqual((p['model'], p['reasoning_effort']), ('gpt-5.6-sol', 'xhigh'))
+            with sqlite3.connect(self.root/'state'/'relay.sqlite3') as db:
+                self.assertEqual(db.execute('SELECT model,effort FROM request_models').fetchone(),
+                                 ('gpt-5.6-sol', 'xhigh'))
+                self.assertEqual(db.execute('SELECT state FROM requests').fetchone(), ('CLAIMING',))
+            return self.claim(p, *args)
         def fake_run(command,**kwargs):
             self.assertEqual(command[command.index('--model')+1],'gpt-5.6-sol')
             self.assertEqual(command[command.index('-c')+1],'model_reasoning_effort="xhigh"')
@@ -236,40 +243,89 @@ class RelayTests(unittest.TestCase):
             Path(command[command.index('--output-last-message')+1]).write_text(json.dumps(self.send()))
             return subprocess.CompletedProcess(command,0)
         with patch.object(relay.subprocess,'run',side_effect=fake_run):
-            result=self.run_relay(send_fn=relay.run_codex)
+            result=self.run_relay(claim_fn=persisted_claim, send_fn=relay.run_codex)
         self.assertEqual((result['selected_model'],result['selected_effort']),('gpt-5.6-sol','xhigh'))
         self.assertEqual((self.claims,self.sends),(1,1))
 
     def test_primary_preferred_and_post_claim_failure_never_switches(self):
         self.allow_fallback()
         def lost(p,*args):
-            self.assertEqual((p['model'],p['reasoning_effort']),('gpt-6-sol','ultra'))
+            self.assertEqual((p['model'],p['reasoning_effort']),('gpt-5.6-sol','max'))
             self.sends+=1
             raise TimeoutError()
         self.assertEqual(self.run_relay(send_fn=lost)['state'],'UNKNOWN')
-        self.policy['model_catalog']['data'].pop(0)
+        self.policy['model_catalog']['data'][0]['supportedReasoningEfforts'].pop(0)
         self.assertEqual(self.run_relay()['state'],'UNKNOWN')
         self.assertEqual((self.claims,self.sends),(1,1))
+        with sqlite3.connect(self.root/'state'/'relay.sqlite3') as db:
+            self.assertEqual(db.execute('SELECT model,effort FROM request_models').fetchone(),
+                             ('gpt-5.6-sol', 'max'))
 
     def test_fallback_requires_exact_authorization_and_supported_effort(self):
         self.allow_fallback()
         original=copy.deepcopy(self.policy)
-        for change in ('wrong_pair','unsupported','ambiguous'):
+        for change in ('wrong_pair','wrong_model','wrong_primary','unsupported','ambiguous',
+                       'missing','hidden','malformed'):
             self.policy=copy.deepcopy(original)
             if change=='wrong_pair': self.policy['fallback']['reasoning_effort']='high'
+            if change=='wrong_model': self.policy['fallback']['model']='gpt-6-sol'
+            if change=='wrong_primary': self.policy['model']='gpt-6-sol'
             if change=='unsupported':
-                self.policy['model_catalog']['data'].pop(0)
                 self.policy['model_catalog']['data'][0]['supportedReasoningEfforts']=[]
             if change=='ambiguous': self.policy['model_catalog']['data'].append(
                 copy.deepcopy(self.policy['model_catalog']['data'][0]))
+            if change=='missing': self.policy['model_catalog']['data']=[]
+            if change=='hidden': self.policy['model_catalog']['data'][0]['hidden']=True
+            if change=='malformed': self.policy['model_catalog']['data'][0]['hidden']=None
             with self.subTest(change=change),self.assertRaises(relay.RelayError): self.run_relay()
         self.assertEqual((self.claims,self.sends),(0,0))
         self.assertFalse((self.root/'state'/'relay.sqlite3').exists())
 
     def test_missing_primary_effort_can_select_only_approved_alternative(self):
         self.allow_fallback()
-        self.policy['model_catalog']['data'][0]['supportedReasoningEfforts']=[dict(reasoningEffort='low')]
+        self.policy['model_catalog']['data'][0]['supportedReasoningEfforts']=[
+            dict(reasoningEffort='low'), dict(reasoningEffort='xhigh')]
         self.assertEqual(relay.validate_model(self.policy),self.policy['fallback'])
+
+    def test_primary_max_is_forwarded_and_persisted_before_claim(self):
+        self.allow_fallback()
+        entry = self.policy['model_catalog']['data'][0]
+        entry.update(isDefault=False, upgrade='gpt-6-sol')
+        def persisted_claim(p, *args):
+            self.assertEqual((p['model'], p['reasoning_effort']), ('gpt-5.6-sol', 'max'))
+            with sqlite3.connect(self.root/'state'/'relay.sqlite3') as db:
+                self.assertEqual(db.execute('SELECT model,effort FROM request_models').fetchone(),
+                                 ('gpt-5.6-sol', 'max'))
+                self.assertEqual(db.execute('SELECT state FROM requests').fetchone(), ('CLAIMING',))
+            return self.claim(p, *args)
+        def fake_run(command, **kwargs):
+            self.assertEqual(command[command.index('--model')+1], 'gpt-5.6-sol')
+            self.assertEqual(command[command.index('-c')+1], 'model_reasoning_effort="max"')
+            Path(command[command.index('--output-last-message')+1]).write_text(json.dumps(self.send()))
+            return subprocess.CompletedProcess(command, 0)
+        with patch.object(relay.subprocess, 'run', side_effect=fake_run):
+            result = self.run_relay(claim_fn=persisted_claim, send_fn=relay.run_codex)
+        self.assertEqual((result['selected_model'], result['selected_effort']), ('gpt-5.6-sol', 'max'))
+        self.assertEqual((self.claims, self.sends), (1, 1))
+
+    def test_non_max_primary_efforts_cannot_claim_or_reserve(self):
+        self.allow_fallback()
+        for effort in ('ultra', 'xhigh', 'high', 'medium', 'low', '', None):
+            with self.subTest(effort=effort), self.assertRaises(relay.RelayError):
+                relay.deliver(dict(self.policy, reasoning_effort=effort), self.rid,
+                              b's'*32, self.claim, self.send)
+        self.assertEqual((self.claims, self.sends), (0, 0))
+        self.assertFalse((self.root/'state'/'relay.sqlite3').exists())
+
+    def test_disabled_example_records_max_primary_and_xhigh_alternative(self):
+        example = json.loads((Path(__file__).resolve().parents[1] /
+            '.github/control-plane/codex-relay.example.json').read_text())
+        self.assertEqual((example['model'], example['reasoning_effort']), ('gpt-5.6-sol', 'max'))
+        self.assertEqual(example['fallback'], dict(model='gpt-5.6-sol', reasoning_effort='xhigh'))
+        self.assertIs(example['enabled'], False)
+        self.assertEqual(example['live_acceptance'], 'PENDING')
+        with self.assertRaisesRegex(relay.RelayError, 'relay disabled'):
+            relay.validate_policy(example)
 
     def test_central_hmac_wire_and_redirect_rejection(self):
         class Response:
