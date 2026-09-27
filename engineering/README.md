@@ -32,3 +32,6 @@ Offline checks from repository root:
 
 Live activation requires exact source/host verification and evidence under CUTOVER.md.
 Never reset existing admission/flow ledgers or replay UNKNOWN while deploying a new source.
+
+Approved graph/correction loop: docs/TASK_GRAPH.md (source-only, disabled).
+It uses the existing flow ledger; deployment requires qualified adapters and collector.
