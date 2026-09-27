@@ -14,5 +14,13 @@
     "sha256": "CONFIG_REQUIRED"
   },
   "observations": {},
-  "adapters": {}
+  "adapters": {},
+  "slack_display": {
+    "enabled": false,
+    "source_audit": "PENDING",
+    "approval_pointer": null,
+    "publisher_user_id": "CONFIG_REQUIRED",
+    "request_channel_ids": [],
+    "targets": {}
+  }
 }

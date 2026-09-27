@@ -362,10 +362,10 @@ class GraphRunner:
                                       lambda _:self.current(a))
                 if p['state']!='CONFIRMED':
                     self.store.end_event(event_id,False)
-                    return {'state':'PROJECTION_'+p['state'],'nodes':states}
+                    return {'state':'PROJECTION_'+p['state'],'node_id':node['id'],'nodes':states}
                 result=self.store.send_execution(a,self.ports.route,self.current)
                 self.store.end_event(event_id,result['state']=='CONFIRMED')
-                return {'state':states[node['id']]['state'],'delivery':result['state'],'nodes':states}
+                return {'state':states[node['id']]['state'],'node_id':node['id'],'delivery':result['state'],'nodes':states}
             for node in plan['nodes']:
                 state=states[node['id']]
                 if state['state'] not in ('MERGE_CANDIDATE','DONE','BLOCKED'):continue
@@ -379,7 +379,7 @@ class GraphRunner:
                     return digest(current)==digest(plan) and now.get(node['id'])==state
                 delivered=self.store.send_once(status,self.ports.project,fresh_status)
                 self.store.end_event(event_id,delivered['state']=='CONFIRMED')
-                return {'state':'STATUS_PROJECTED','delivery':delivered['state'],'nodes':states,'merge_authorized':False}
+                return {'state':'STATUS_PROJECTED','node_id':node['id'],'delivery':delivered['state'],'nodes':states,'merge_authorized':False}
             self.store.end_event(event_id,True)
             return {'state':'QUIET','nodes':states,'merge_authorized':False}
         except Exception:

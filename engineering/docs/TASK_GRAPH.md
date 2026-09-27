@@ -155,3 +155,74 @@ unless the protected policy has explicit activation and source-audit evidence.
 A trusted webhook/local callback must authenticate the event then invoke it once;
 webhook content is only a refresh hint. No event listener is deployed here.
 Product flags, activation files, host settings and existing Mac PRs are unchanged.
+
+## Slack status card (display connection)
+
+`control_plane_graph_slack.py` posts ONE bot-owned reply in an existing canonical
+Slack task thread, then updates that same message on meaningful state changes.
+The card shows graph/task revision, dependencies, current state, current HEAD,
+owner/session, delivery uncertainty, a bounded blocker category, human action,
+and GitHub task/graph/PR links. It includes no transcript, source code, raw provider
+error or approval button. This is a status projection, not a new execution graph.
+
+The sender uses Slack `chat.postMessage` for initial creation and `chat.update`
+for later changes, with a dedicated bot (`chat:write`, member of target channel).
+Only that bot's confirmed message timestamp is updated. `auth.test` checks the
+configured workspace and publisher identity before every actual write. No channel
+history scan, model invocation or token-consuming summary is needed. Transport:
+https://docs.slack.dev/reference/methods/chat.postMessage/
+https://docs.slack.dev/reference/methods/chat.update/
+
+Protected policy adds `slack_display`: `enabled`, `source_audit`,
+`approval_pointer`, `publisher_user_id`, a nonempty `request_channel_ids` exclusion
+list, and `targets` keyed by graph node ID. Each target supplies `repository`,
+`task_id`, `team_id`, `channel_id`, `thread_ts`. The User-approved GitHub plan node
+must contain an identical `slack_thread` object (team_id/channel_id/thread_ts).
+Use actual IDs, not guessed channel names. Bot token is host-local
+`ASTRA_GRAPH_SLACK_TOKEN`; never save it in policy JSON, Git or chat.
+
+Status channels must be outside Astra/agent request-only channels. Keep the
+existing event layer's publisher identity/bot-event exclusion: never wake an
+agent for this sender's posts or message_changed events. Outbound metadata
+`astra_graph_projection_v1` and the matching block ID identify display content;
+neither authenticates a command. This module does not install raw Slack listeners.
+
+Explicitly extend the EXISTING flow DB with graph CLI `init` while intake is
+fenced; it now adds `graph_slack_display` alongside existing graph tables.
+The display row is transport bookkeeping only, never task or merge authority.
+It serializes one in-flight create/update per repo+task, retains the thread/bot
+binding across revisions, and skips an unchanged card without a Slack API call.
+Before sending, reread current GitHub facts. A stale snapshot is not sent.
+A remote change after that read can temporarily make the card stale: the displayed
+exact HEAD is mandatory and only a subsequent validated event refreshes it.
+Always reread GitHub gates for a consequential action; never use the card as a lock.
+
+Creation/update response loss or mismatch leaves UNKNOWN and stops further
+writes, including newer-HEAD updates. This also prevents a late old update from
+overwriting a newer card. No automatic repost, message replacement, channel
+migration, timer retry or ledger reset. Reconcile the original request, bot/thread
+identity and actual Slack outcome before an operator-approved recovery. A crash
+leaves SUBMITTING and the same hold. Failure before a write returns NOT_SENT.
+A deleted message or permission failure is not permission to create another one.
+
+Commands:
+
+```sh
+# GitHub-backed preview: no Slack call, dispatch or state mutation.
+python3 engineering/scripts/control_plane_graph_cli.py display --policy /protected/graph-policy.json --node-id NODE --dry-run
+# One explicit validated event updates one task card, with display approval only.
+python3 engineering/scripts/control_plane_graph_cli.py display --policy /protected/graph-policy.json --node-id NODE
+```
+
+An enabled display can also run after `advance`: the affected node ID is returned
+by the graph runner; `--node-id` selects the card for a no-action/progress event.
+A display failure is reported separately and never changes the already recorded
+work outcome or triggers a work retry. `--dry-run` is rejected for every command
+except `display`, so it can never accidentally launch work.
+
+Display approval does not enable graph execution. Both remain disabled in the
+example. This source PR includes rendering/transport wiring and mocked API
+regressions, not a deployed Slack bot, live channel binding or proven host roundtrip.
+Qualify actual posting/updating/loss handling using an approved diagnostic thread
+before enabling the display. Existing global activation/host/product flags remain
+unchanged. No additional product repository changes are needed for this module.

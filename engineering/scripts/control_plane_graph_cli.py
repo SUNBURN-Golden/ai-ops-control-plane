@@ -20,6 +20,7 @@ def sibling(name):
 
 graph=sibling('control_plane_graph');flow=graph.flow
 gateway=sibling('control_plane_flow_gateway')
+graph_slack=sibling('control_plane_graph_slack')
 
 
 def protected(path):
@@ -180,29 +181,43 @@ class GithubGraphPorts:
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=('init','assess','advance'))
+    parser.add_argument('command',choices=('init','assess','advance','display'))
     parser.add_argument('--policy',type=Path,required=True)
     parser.add_argument('--event-id')
+    parser.add_argument('--node-id')
+    parser.add_argument('--dry-run',action='store_true',help='display preview only; never execute work')
     args=parser.parse_args();os.umask(0o077)
     try:
+        flow.require(not args.dry_run or args.command=='display','dry-run is display-only')
         policy=flow.decode(protected(args.policy).read_bytes())
         flow.require(policy.get('schema_version')==1,'policy version')
         store=graph.GraphStore(policy['ledger_path']) # existing authoritative host flow DB
         if args.command=='init':
-            store.initialize_graph();result={'state':'GRAPH_SCHEMA_READY','activated':False}
+            store.initialize_graph();graph_slack.initialize(store)
+            result={'state':'GRAPH_SCHEMA_READY','activated':False}
         else:
-            api=gateway.Api(os.environ.get('ASTRA_GRAPH_GITHUB_TOKEN'),None)
+            api=gateway.Api(os.environ.get('ASTRA_GRAPH_GITHUB_TOKEN'),os.environ.get('ASTRA_GRAPH_SLACK_TOKEN'))
             ports=GithubGraphPorts(api,policy);runner=graph.GraphRunner(store,ports)
             if args.command=='assess':
                 _,states,_=runner.assess();result={'nodes':states,'side_effects':False}
+            elif args.command=='display':
+                flow.require(bool(args.node_id),'display node required')
+                result=graph_slack.Display(runner,api,policy.get('slack_display',{})).refresh(args.node_id,dry_run=args.dry_run)
             else:
                 flow.require(policy.get('enabled') is True and policy.get('source_audit')=='PASS' and
                              flow.github_pointer(policy.get('activation_pointer')),'graph execution disabled')
                 flow.require(isinstance(args.event_id,str) and re.fullmatch(r'[A-Za-z0-9:_-]{8,160}',args.event_id),
                              'explicit event ID required')
                 result=runner.advance(args.event_id)
+                display_node=result.get('node_id') or args.node_id
+                if policy.get('slack_display',{}).get('enabled') is True and display_node:
+                    try:
+                        result['slack_display']=graph_slack.Display(runner,api,policy['slack_display']).refresh(display_node)
+                    except Exception:
+                        # Display outage cannot alter/retry the already recorded work action.
+                        result['slack_display']={'state':'BLOCKED','merge_authorized':False}
         print(flow.canonical(result));return 0
-    except (flow.FlowError,gateway.flow.FlowError,OSError,KeyError,ValueError,TypeError,subprocess.SubprocessError):
+    except (flow.FlowError,gateway.flow.FlowError,graph_slack.flow.FlowError,OSError,KeyError,ValueError,TypeError,subprocess.SubprocessError):
         print(flow.canonical({'state':'BLOCKED','merge_authorized':False}));return 2
 
 
