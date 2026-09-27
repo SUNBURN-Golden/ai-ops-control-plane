@@ -24,7 +24,7 @@ class RelayTests(unittest.TestCase):
             (self.root/d).mkdir(mode=0o700)
         self.rid = 'a'*64
         self.session = 'https://chatgpt.com/c/test-session'
-        self.policy = dict(schema_version=1, enabled=True, model='gpt-5.6-sol', reasoning_effort='low',
+        self.policy = dict(schema_version=1, enabled=True, model='gpt-6-sol', reasoning_effort='ultra',
             billing='CHATGPT_SUBSCRIPTION_ONLY', live_acceptance='PASS',
             evidence_pointer='https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/19',
             claim_url='https://control.example/astra/claim', codex_binary=str(self.binary),
@@ -34,8 +34,8 @@ class RelayTests(unittest.TestCase):
         self.policy['model_catalog'] = dict(
             source='codex app-server model/list', observed_at='2026-09-27T11:28:12Z',
             codex_sha256=self.policy['codex_sha256'], codex_home=self.policy['codex_home'],
-            data=[dict(model='gpt-5.6-sol', hidden=False,
-                       supportedReasoningEfforts=[dict(reasoningEffort='low')])], nextCursor=None)
+            data=[dict(model='gpt-6-sol', hidden=False,
+                       supportedReasoningEfforts=[dict(reasoningEffort='ultra')])], nextCursor=None)
         self.action = dict(request_id=self.rid, kind='AUDIT', identity='designated-astra',
             designation='https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/19',
             task_pointer='https://github.com/BeautifulMind-JT/ZARI/issues/11',
@@ -163,11 +163,11 @@ class RelayTests(unittest.TestCase):
         self.policy['model'] = 'gpt-5.6-terra'
         self.policy['model_catalog']['data'].append(dict(
             model='gpt-5.6-terra', hidden=False, isDefault=False,
-            upgrade='gpt-6-astra', supportedReasoningEfforts=[dict(reasoningEffort='low')]))
+            upgrade='gpt-6-astra', supportedReasoningEfforts=[dict(reasoningEffort='ultra')]))
         self.policy['model_catalog']['data'][0]['isDefault'] = True
         def fake_run(command, **kwargs):
             self.assertEqual(command[command.index('--model')+1], 'gpt-5.6-terra')
-            self.assertEqual(command[command.index('-c')+1], 'model_reasoning_effort="low"')
+            self.assertEqual(command[command.index('-c')+1], 'model_reasoning_effort="ultra"')
             Path(command[command.index('--output-last-message')+1]).write_text(json.dumps(self.send()))
             return subprocess.CompletedProcess(command, 0)
         with patch.object(relay.subprocess, 'run', side_effect=fake_run) as run:
@@ -175,7 +175,7 @@ class RelayTests(unittest.TestCase):
         self.assertEqual((self.claims, self.sends, run.call_count), (1, 1, 1))
 
     def test_unlisted_or_placeholder_model_cannot_claim_or_reserve(self):
-        for model in ('gpt-6-sol', 'auto', 'default', 'CONFIG_REQUIRED', '', None):
+        for model in ('unlisted-model', 'auto', 'default', 'CONFIG_REQUIRED', '', None):
             with self.subTest(model=model), self.assertRaises(relay.RelayError):
                 relay.deliver(dict(self.policy, model=model), self.rid, b's'*32, self.claim, self.send)
         self.assertEqual((self.claims, self.sends), (0, 0))
@@ -202,7 +202,8 @@ class RelayTests(unittest.TestCase):
         entry = self.policy['model_catalog']['data'][0]
         cases = [[], [dict(entry, hidden=True)], [dict(entry, hidden=None)], [entry, entry],
                  [dict(entry, supportedReasoningEfforts=[dict(reasoningEffort='medium')])],
-                 [dict(entry, supportedReasoningEfforts=None)]]
+                 [dict(entry, supportedReasoningEfforts=None)],
+                 [dict(entry, supportedReasoningEfforts=[dict(reasoningEffort='low')])]]
         for entries in cases:
             policy = copy.deepcopy(self.policy)
             policy['model_catalog']['data'] = entries

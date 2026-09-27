@@ -52,7 +52,7 @@ def validate_model(p):
     model = p.get("model")
     require(isinstance(model, str) and re.fullmatch(r"[a-z0-9][a-z0-9._-]*", model) and
             model not in {"auto", "default", "pending", "config_required"} and
-            p.get("reasoning_effort") == "low", "explicit coordinator model/low effort required")
+            p.get("reasoning_effort") == "ultra", "explicit coordinator model/ultra effort required")
     catalog = p.get("model_catalog")
     require(isinstance(catalog, dict) and catalog.get("source") == "codex app-server model/list",
             "installed model catalog missing")
@@ -152,7 +152,8 @@ def validate_action(receipt, request_id):
 
 def browser_prompt(action, session):
     return """You are CODEX_COORDINATOR, a transport operator, never Astra or the User.
-Use only the configured browser capability. Do not use shell, read local files,
+Use only the configured browser capability. Do not spawn or delegate to subagents.
+Do not use shell, read local files,
 edit code, invoke builders, export cookies, change settings, buy quota or call APIs.
 Open only the exact Work conversation below in the qualified dedicated browser.
 Before sending verify visible ChatGPT Work mode, Astra model, medium reasoning,

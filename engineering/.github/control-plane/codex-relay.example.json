@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "enabled": false,
-  "model": "CONFIG_REQUIRED",
-  "reasoning_effort": "low",
+  "model": "gpt-6-sol",
+  "reasoning_effort": "ultra",
   "model_catalog": {
     "source": "codex app-server model/list",
     "observed_at": "PENDING",

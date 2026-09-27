@@ -7,10 +7,10 @@ User authorized this design on 2026-09-27. Source candidate, not an installed Ma
 
 Mac Codex relays explicit commands, collects pointers and operates the qualified
 cloud Work browser. It is not the builder, architect, independent auditor or User.
-There is no default coordinator model. Explicitly select a model supporting low
-effort from the installed CLI/account's `model/list` response. Do not assume that
-gpt-6-sol is available or substitute another model automatically. The disabled
-example leaves the model CONFIG_REQUIRED until that choice is made.
+User explicitly selected gpt-6-sol / ultra on 2026-09-27, superseding the earlier
+low-effort selection. The disabled example records that choice; it is not proof
+of installed availability. Verify the exact model and ultra effort in the intended
+CLI/account's `model/list` response. No automatic model or effort fallback.
 Cloud Work Astra mid uses the verified Astra model and medium effort in its own
 session. Normal builder debugging never goes through Astra. Consequential matters
 outside durable User delegation remain User decisions; a relay cannot expand it.
@@ -72,7 +72,7 @@ Store the complete returned `data`, `nextCursor: null`, a timezone-qualified
 `model_catalog`. Set its `source` to `codex app-server model/list`.
 
 The validator requires the explicitly selected model to occur exactly once,
-be visible (`hidden=false`), and list the selected low effort under
+be visible (`hidden=false`), and list the selected ultra effort under
 `supportedReasoningEfforts`. Missing catalogs, incomplete pagination, unknown
 models, unsupported efforts and a different CLI digest or Codex home block before
 any central claim or local reservation. The client never chooses `isDefault`, an
