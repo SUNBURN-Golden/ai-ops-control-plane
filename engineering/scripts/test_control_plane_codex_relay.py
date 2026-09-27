@@ -1,4 +1,5 @@
 import hashlib
+import copy
 import json
 import os
 from pathlib import Path
@@ -23,13 +24,18 @@ class RelayTests(unittest.TestCase):
             (self.root/d).mkdir(mode=0o700)
         self.rid = 'a'*64
         self.session = 'https://chatgpt.com/c/test-session'
-        self.policy = dict(schema_version=1, enabled=True, model='gpt-6-sol', reasoning_effort='low',
+        self.policy = dict(schema_version=1, enabled=True, model='gpt-5.6-sol', reasoning_effort='low',
             billing='CHATGPT_SUBSCRIPTION_ONLY', live_acceptance='PASS',
             evidence_pointer='https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/19',
             claim_url='https://control.example/astra/claim', codex_binary=str(self.binary),
             codex_sha256=hashlib.sha256(self.binary.read_bytes()).hexdigest(),
             state_directory=str(self.root/'state'), codex_home=str(self.root/'home'),
             work_sessions={self.rid:self.session})
+        self.policy['model_catalog'] = dict(
+            source='codex app-server model/list', observed_at='2026-09-27T11:28:12Z',
+            codex_sha256=self.policy['codex_sha256'], codex_home=self.policy['codex_home'],
+            data=[dict(model='gpt-5.6-sol', hidden=False,
+                       supportedReasoningEfforts=[dict(reasoningEffort='low')])], nextCursor=None)
         self.action = dict(request_id=self.rid, kind='AUDIT', identity='designated-astra',
             designation='https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/19',
             task_pointer='https://github.com/BeautifulMind-JT/ZARI/issues/11',
@@ -152,6 +158,58 @@ class RelayTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(relay.RelayError):
                 relay.deliver(dict(self.policy,**changes), self.rid,b's'*32,self.claim,self.send)
         self.assertEqual((self.claims,self.sends),(0,0))
+
+    def test_explicit_catalog_model_is_forwarded_without_default_or_upgrade(self):
+        self.policy['model'] = 'gpt-5.6-terra'
+        self.policy['model_catalog']['data'].append(dict(
+            model='gpt-5.6-terra', hidden=False, isDefault=False,
+            upgrade='gpt-6-astra', supportedReasoningEfforts=[dict(reasoningEffort='low')]))
+        self.policy['model_catalog']['data'][0]['isDefault'] = True
+        def fake_run(command, **kwargs):
+            self.assertEqual(command[command.index('--model')+1], 'gpt-5.6-terra')
+            self.assertEqual(command[command.index('-c')+1], 'model_reasoning_effort="low"')
+            Path(command[command.index('--output-last-message')+1]).write_text(json.dumps(self.send()))
+            return subprocess.CompletedProcess(command, 0)
+        with patch.object(relay.subprocess, 'run', side_effect=fake_run) as run:
+            self.assertEqual(self.run_relay(send_fn=relay.run_codex)['state'], 'OBSERVATION_ONLY')
+        self.assertEqual((self.claims, self.sends, run.call_count), (1, 1, 1))
+
+    def test_unlisted_or_placeholder_model_cannot_claim_or_reserve(self):
+        for model in ('gpt-6-sol', 'auto', 'default', 'CONFIG_REQUIRED', '', None):
+            with self.subTest(model=model), self.assertRaises(relay.RelayError):
+                relay.deliver(dict(self.policy, model=model), self.rid, b's'*32, self.claim, self.send)
+        self.assertEqual((self.claims, self.sends), (0, 0))
+        self.assertFalse((self.root/'state'/'relay.sqlite3').exists())
+
+    def test_catalog_must_match_environment_and_be_complete(self):
+        original = self.policy['model_catalog']
+        bad_catalogs = [None, {}, dict(original, source='example'),
+                        dict(original, codex_sha256='0'*64),
+                        dict(original, codex_home=str(self.root/'another-home')),
+                        dict(original, observed_at='PENDING'),
+                        dict(original, observed_at='2026-09-27T11:28:12'),
+                        dict(original, nextCursor='another-page'),
+                        {k:v for k,v in original.items() if k != 'nextCursor'},
+                        dict(original, data=[None])]
+        for catalog in bad_catalogs:
+            with self.subTest(catalog=catalog), self.assertRaises(relay.RelayError):
+                relay.deliver(dict(self.policy, model_catalog=catalog), self.rid,
+                              b's'*32, self.claim, self.send)
+        self.assertEqual((self.claims, self.sends), (0, 0))
+        self.assertFalse((self.root/'state'/'relay.sqlite3').exists())
+
+    def test_hidden_ambiguous_or_unsupported_effort_models_are_rejected(self):
+        entry = self.policy['model_catalog']['data'][0]
+        cases = [[], [dict(entry, hidden=True)], [dict(entry, hidden=None)], [entry, entry],
+                 [dict(entry, supportedReasoningEfforts=[dict(reasoningEffort='medium')])],
+                 [dict(entry, supportedReasoningEfforts=None)]]
+        for entries in cases:
+            policy = copy.deepcopy(self.policy)
+            policy['model_catalog']['data'] = entries
+            with self.subTest(entries=entries), self.assertRaises(relay.RelayError):
+                relay.deliver(policy, self.rid, b's'*32, self.claim, self.send)
+        self.assertEqual((self.claims, self.sends), (0, 0))
+        self.assertFalse((self.root/'state'/'relay.sqlite3').exists())
 
     def test_prompt_preserves_exact_action_and_denies_semantic_authority(self):
         prompt=relay.browser_prompt(self.action,self.session)

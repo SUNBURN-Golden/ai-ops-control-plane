@@ -1,8 +1,16 @@
 {
   "schema_version": 1,
   "enabled": false,
-  "model": "gpt-6-sol",
+  "model": "CONFIG_REQUIRED",
   "reasoning_effort": "low",
+  "model_catalog": {
+    "source": "codex app-server model/list",
+    "observed_at": "PENDING",
+    "codex_sha256": "PENDING",
+    "codex_home": "CONFIG_REQUIRED",
+    "data": [],
+    "nextCursor": null
+  },
   "billing": "CHATGPT_SUBSCRIPTION_ONLY",
   "live_acceptance": "PENDING",
   "evidence_pointer": "PENDING",

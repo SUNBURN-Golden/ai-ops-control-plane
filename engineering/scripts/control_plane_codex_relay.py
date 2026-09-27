@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One-shot coordinator transport. No builder launch, audit verdict or User approval."""
 import argparse
+from datetime import datetime
 import hashlib
 import hmac
 import json
@@ -47,10 +48,38 @@ def github_url(value):
         value) is not None
 
 
+def validate_model(p):
+    model = p.get("model")
+    require(isinstance(model, str) and re.fullmatch(r"[a-z0-9][a-z0-9._-]*", model) and
+            model not in {"auto", "default", "pending", "config_required"} and
+            p.get("reasoning_effort") == "low", "explicit coordinator model/low effort required")
+    catalog = p.get("model_catalog")
+    require(isinstance(catalog, dict) and catalog.get("source") == "codex app-server model/list",
+            "installed model catalog missing")
+    require(catalog.get("codex_sha256") == p["codex_sha256"] and
+            catalog.get("codex_home") == p["codex_home"], "model catalog environment mismatch")
+    stamp = catalog.get("observed_at")
+    require(isinstance(stamp, str), "model catalog observation time missing")
+    try:
+        observed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        raise RelayError("invalid model catalog observation time") from None
+    require(observed.utcoffset() is not None, "model catalog observation timezone missing")
+    require("nextCursor" in catalog and catalog["nextCursor"] is None and
+            isinstance(catalog.get("data"), list) and
+            all(isinstance(entry, dict) for entry in catalog["data"]),
+            "complete installed model catalog required")
+    matches = [entry for entry in catalog["data"] if entry.get("model") == model]
+    require(len(matches) == 1 and matches[0].get("hidden") is False,
+            "selected coordinator model is not uniquely listed")
+    efforts = matches[0].get("supportedReasoningEfforts")
+    require(isinstance(efforts, list) and any(
+        isinstance(entry, dict) and entry.get("reasoningEffort") == p["reasoning_effort"]
+        for entry in efforts), "selected coordinator effort is not listed")
+
+
 def validate_policy(p):
     require(p.get("schema_version") == 1 and p.get("enabled") is True, "relay disabled")
-    require(p.get("model") in {"gpt-6-sol", "gpt-5.6-sol"} and p.get("reasoning_effort") == "low",
-            "unqualified coordinator model/effort")
     require(p.get("billing") == "CHATGPT_SUBSCRIPTION_ONLY", "unapproved billing route")
     require(p.get("live_acceptance") == "PASS" and github_url(p.get("evidence_pointer")),
             "Mac/browser/claim/result round-trip acceptance missing")
@@ -64,6 +93,7 @@ def validate_policy(p):
             "Codex executable differs from qualified binary")
     private(p["state_directory"], directory=True)
     private(p["codex_home"], directory=True)
+    validate_model(p)
     require(Path(p["state_directory"]).resolve() != Path(p["codex_home"]).resolve(),
             "relay state and Codex home must be separate")
     require(isinstance(p.get("work_sessions"), dict) and bool(p["work_sessions"]),
@@ -163,7 +193,8 @@ def run_codex(p, action, session, root):
     # No API key, GitHub token or claim secret in argv, stdin or child environment.
     command = [p["codex_binary"], "exec", "--ephemeral", "--sandbox", "read-only",
                "--skip-git-repo-check", "--model", p["model"],
-               "-c", 'model_reasoning_effort="low"', "--output-schema", str(schema),
+               "-c", "model_reasoning_effort=" + json.dumps(p["reasoning_effort"]),
+               "--output-schema", str(schema),
                "--output-last-message", str(output), "-"]
     result = subprocess.run(command, input=browser_prompt(action, session), text=True,
                             cwd=root, env=env, stdout=subprocess.DEVNULL,

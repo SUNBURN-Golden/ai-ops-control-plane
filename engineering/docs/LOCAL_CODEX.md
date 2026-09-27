@@ -7,8 +7,10 @@ User authorized this design on 2026-09-27. Source candidate, not an installed Ma
 
 Mac Codex relays explicit commands, collects pointers and operates the qualified
 cloud Work browser. It is not the builder, architect, independent auditor or User.
-Default coordinator model: gpt-6-sol / low; explicitly configured gpt-5.6-sol is
-an alternative, never an automatic fallback. Verify actual account/CLI support.
+There is no default coordinator model. Explicitly select a model supporting low
+effort from the installed CLI/account's `model/list` response. Do not assume that
+gpt-6-sol is available or substitute another model automatically. The disabled
+example leaves the model CONFIG_REQUIRED until that choice is made.
 Cloud Work Astra mid uses the verified Astra model and medium effort in its own
 session. Normal builder debugging never goes through Astra. Consequential matters
 outside durable User delegation remain User decisions; a relay cannot expand it.
@@ -59,6 +61,32 @@ There is no authenticated Mac execution in the current cloud session. The inspec
 cloud browser was logged out of ChatGPT; this is not evidence about the user's Mac.
 No Mac install or live cloud Work round-trip has been claimed.
 
+### Installed model qualification
+
+In the intended dedicated Codex home, use the pinned CLI's `codex app-server`
+stdio interface: `initialize`, `initialized`, then `model/list` with
+`includeHidden=false`. Follow `nextCursor` pagination to completion without
+starting a thread or turn. This is model discovery, not an inference or Work send.
+Store the complete returned `data`, `nextCursor: null`, a timezone-qualified
+`observed_at`, the exact `codex_sha256` and `codex_home` in the protected policy's
+`model_catalog`. Set its `source` to `codex app-server model/list`.
+
+The validator requires the explicitly selected model to occur exactly once,
+be visible (`hidden=false`), and list the selected low effort under
+`supportedReasoningEfforts`. Missing catalogs, incomplete pagination, unknown
+models, unsupported efforts and a different CLI digest or Codex home block before
+any central claim or local reservation. The client never chooses `isDefault`, an
+upgrade suggestion or a fallback. Source examples and another user's model cache
+are not installed-environment evidence.
+
+The protected catalog is an operator-recorded observation, not remote attestation
+or a fresh availability check on every send. Requalify after CLI, account, Codex
+home, provider configuration or model availability changes. A listed model does
+not prove subscription billing, browser access or successful inference. Those
+remain part of live qualification; do not mark live_acceptance PASS from a listing.
+Keep the saved local disabled draft as historical evidence; prepare any revised
+policy separately and leave it disabled until its existing gates are satisfied.
+
 Use a dedicated macOS coordinator account and browser/Codex home. Keep personal
 files, OneDrive, builder credentials and repository mutation tools out of that
 environment. The allowed browser capability must actually be present and qualified;
@@ -105,3 +133,4 @@ All four target deployment flags stay true. Global runtime stays disabled/PENDIN
 SOULBOUND remains excluded. Existing host settings and installed sessions are untouched.
 
 Official CLI contract: https://learn.chatgpt.com/docs/non-interactive-mode
+Official model discovery: https://learn.chatgpt.com/docs/app-server#list-models-modellist
