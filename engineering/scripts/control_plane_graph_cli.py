@@ -115,10 +115,11 @@ class GithubGraphPorts:
             decisive=[r for r in native if r.get('user',{}).get('login')==lane['identity'] and
                       r.get('commit_id')==head and r.get('state') in ('APPROVED','CHANGES_REQUESTED','DISMISSED')]
             latest=max(decisive,key=lambda r:r['id']) if decisive else None
-            if latest and latest['state'] in ('CHANGES_REQUESTED','DISMISSED'):
+            if latest and (latest['state']=='DISMISSED' or not latest.get('body','').startswith('<!-- ASTRA_GRAPH_RESULT_V1 -->\n')):
                 s['blockers'].append('native_review_withdrawn:'+lane['identity'])
                 continue
             for review in native:
+                if latest and review['id']<latest['id']:continue
                 if (review.get('user',{}).get('login')!=lane['identity'] or
                     review.get('commit_id')!=head or review.get('state')=='DISMISSED' or
                     not review.get('body','').startswith('<!-- ASTRA_GRAPH_RESULT_V1 -->\n')):continue

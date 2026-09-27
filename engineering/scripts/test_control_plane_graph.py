@@ -321,6 +321,12 @@ class PortTests(unittest.TestCase):
         observed=ports.load(node,plan)
         self.assertEqual(observed['reviews'],{})
         self.assertIn('native_review_withdrawn:cursor-grok',observed['blockers'])
+        # A bound canonical FAIL is exact correction evidence, not a generic blocker.
+        failed=dict(r,result='FAIL')
+        native[-1]['body']='<!-- ASTRA_GRAPH_RESULT_V1 -->\n'+g.flow.canonical(failed)
+        observed=ports.load(node,plan)
+        self.assertEqual(observed['reviews']['cursor-grok']['result'],'FAIL')
+        self.assertNotIn('native_review_withdrawn:cursor-grok',observed['blockers'])
 
     def test_adapter_unqualified_or_wrong_digest_never_executes(self):
         with tempfile.TemporaryDirectory() as tmp:
