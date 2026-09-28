@@ -300,6 +300,34 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(self.sends,0)
         self.assertEqual(self.store.diagnostic_claim(self.action)['state'],'CLAIMED')
 
+    def test_unknown_result_blocks_even_operator_consumer_reconciliation(self):
+        self.prepare(); self.claim(); self.loss_after_publish = True
+        self.assertEqual(self.request('/astra/diagnostic/result', self.answer())[1]['state'], 'UNKNOWN')
+        with self.assertRaises(flow.FlowError):
+            self.store.reconcile_astra(self.action['request_id'], self.action['identity'],
+                self.action['work_session'], self.comments[102]['html_url'], consumer_fenced=True)
+        self.assertEqual(self.store.diagnostic_claim(self.action)['state'], 'CLAIMED')
+        self.assertEqual(len(self.posts), 3)
+
+    def test_pending_result_fences_replacement_even_if_consumer_was_already_reconciled(self):
+        self.prepare(); self.claim()
+        self.request('/astra/diagnostic/result', self.answer())
+        self.store.reconcile_astra(self.action['request_id'], self.action['identity'],
+            self.action['work_session'], self.comments[102]['html_url'], consumer_fenced=True)
+        result_id = flow.digest(['diagnostic-result', self.action['request_id']])
+        replacement = flow.diagnostic_request('diag-r2', 'b'*40, self.action['identity'],
+            'https://chatgpt.com/c/other', self.action['designation'])
+        ordinary = flow.request(dict(self.action['subject'], task_pointer=flow.DIAGNOSTIC_ISSUE),
+                                'DISPATCH', 'builder', 'N/A')
+        # Simulate a pre-fix ledger/crash marker, not a supported live state mutation.
+        for state, valid in (('NOT_STARTED', 1), ('SUBMITTING', 1), ('UNKNOWN', 1), ('UNKNOWN', 0)):
+            with self.store.transaction() as db:
+                db.execute('UPDATE outbox SET state=?,valid=? WHERE id=?', (state, valid, result_id))
+            for candidate in (replacement, ordinary):
+                with self.subTest(state=state, valid=valid, kind=candidate['kind']), self.assertRaises(flow.FlowError):
+                    self.store.reserve(candidate)
+        self.assertEqual(len(self.posts), 3)
+
     def test_send_response_loss_and_process_interruption_are_unknown(self):
         self.prepare()
         def interrupted(*args):

@@ -245,7 +245,10 @@ also applies to a killed GitHub/Slack publication. No timer, expiry or disabled
 credential releases ownership. Confirmed collection also does **not** auto-release
 the consumer: the operator must verify the actual session ended and reconcile
 using its bound Work URL and durable evidence. Do not fence a still-running or
-UNKNOWN consumer. Preserve all tombstones and disable the dedicated diagnostic
+UNKNOWN consumer. A pending/uncertain diagnostic result publisher also blocks
+consumer reconciliation and new task admission, even if an older ledger already
+records the consumer as reconciled. Ending the browser is not evidence that a
+separate GitHub result publication has finished. Preserve all tombstones and disable the dedicated diagnostic
 flags after completion; Issue #19 stays open until the full acceptance is verified.
 
 ### Live prerequisites still required after this source PR

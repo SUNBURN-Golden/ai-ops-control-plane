@@ -447,6 +447,11 @@ class Store:
             for row in db.execute("SELECT * FROM outbox WHERE valid=1 OR state IN ('SUBMITTING','UNKNOWN')"):
                 prior = decode(row["body"])
                 prior_kind = prior.get("action_kind", prior["kind"])
+                if (effective_kind in EXECUTION_KINDS and prior_kind == "DIAGNOSTIC_RESULT" and
+                    all(prior["subject"][k] == action["subject"][k] for k in ("repository", "task_id"))):
+                    # Ending the browser consumer does not resolve a separate
+                    # pending/uncertain GitHub publication, even on an old ledger.
+                    require(row["state"] == "CONFIRMED", "unresolved diagnostic result publication")
                 if ("DIAGNOSTIC" not in {effective_kind, prior_kind} or
                     effective_kind not in EXECUTION_KINDS or prior_kind not in EXECUTION_KINDS or
                     any(prior["subject"][k] != action["subject"][k] for k in ("repository", "task_id"))):
@@ -546,6 +551,11 @@ class Store:
             row = db.execute("SELECT * FROM astra_claims WHERE request=?", (request_id,)).fetchone()
             require(row is not None and row["actor"] == actor and row["session"] == session,
                     "reconciliation owner mismatch")
+            if decode(row["body"]).get("kind") == "DIAGNOSTIC":
+                result = db.execute("SELECT state FROM outbox WHERE id=?",
+                                    (digest(["diagnostic-result", request_id]),)).fetchone()
+                require(result is None or result["state"] == "CONFIRMED",
+                        "diagnostic result publisher unresolved; preserve consumer claim")
             if row["state"] == "RECONCILED":
                 require(row["evidence"] == evidence, "reconciliation evidence mismatch")
             else:
