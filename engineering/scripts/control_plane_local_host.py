@@ -340,7 +340,7 @@ class Host:
             self.state(action_id, "UNKNOWN", None)
             raise
 
-    def ui_current(self, packet, operation):
+    def ui_current(self, packet, operation, *, observing=False):
         """Recheck canonical source immediately before admitting a screen effect."""
         self.shared(self.assignment())
         if operation == "WORK_DIAGNOSTIC":
@@ -352,7 +352,7 @@ class Host:
             pr = self.api.call("GET", f"repos/{packet['repository']}/pulls/{packet['pr']}")
             require(pr.get("state") == "open" and pr.get("head", {}).get("sha") == packet["head"],
                     "stale review HEAD")
-        else:
+        elif not observing:
             main = self.api.call("GET", f"repos/{packet['repository']}/git/ref/heads/main")
             require(main.get("object", {}).get("sha") == packet["head"], "stale implementation base")
 
@@ -471,7 +471,9 @@ class Host:
                 flow.diagnostic_result(packet, observation.get("diagnostic_result"))
         else:
             require(outcome != "ANSWER", "builder observation cannot issue a diagnostic/audit verdict")
-        self.ui_current(packet, row["operation"])
+        # A running builder may finish against its pinned base after main moves.
+        # This is observation only; launch and exact-HEAD review/Work gates remain.
+        self.ui_current(packet, row["operation"], observing=True)
         fingerprint = flow.digest(observation)
         with self.store.transaction() as db:
             current = db.execute("SELECT state,receipt FROM host_actions WHERE id=? AND active=1", (action_id,)).fetchone()

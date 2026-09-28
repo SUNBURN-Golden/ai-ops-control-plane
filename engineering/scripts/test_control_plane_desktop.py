@@ -150,7 +150,7 @@ class DesktopTests(unittest.TestCase):
         config["supported_coordinators"] = [fallback]
         self.assertEqual(self.host.prepare_ui()["state"], "UI_READY")
 
-    def test_builder_and_read_only_review_screen_routes(self):
+    def test_read_only_review_screen_route(self):
         self.configure()
         self.assignment["operations"] = ["BUILDER", "REVIEW"]
         packet = dict(builder_id="GLM", operation="REVIEW", repository=self.assignment["repository"],
@@ -179,6 +179,31 @@ class DesktopTests(unittest.TestCase):
             result = self.host.collect_ui(self.observed(p, "SESSION_OBSERVED"))
             self.assertEqual(result["state"], "SESSION_OBSERVED")
             self.assertEqual(result["grants"], [])
+            with self.assertRaises(Exception): self.send(p)
+
+    def test_builder_observation_after_main_advances_does_not_relaunch(self):
+        self.configure()
+        self.assignment["operations"] = ["BUILDER"]
+        packet = dict(builder_id="DEVIN", operation="BUILDER", repository=self.assignment["repository"],
+                      issue=19, task_id=self.assignment["task_id"], host_id=self.policy["host_id"],
+                      instance_id=self.policy["instance_id"], revision="r1", head=self.fixture.current_sha,
+                      ui_target=dict(app="Devin", account="subscription-test", session="writer-session", model="test", effort="test"))
+        self.policy["desktop"]["DEVIN"] = dict(self.policy["desktop"]["WORK"], target=packet["ui_target"],
+                                                 operations=["BUILDER"])
+        with patch.object(self.host, "assignment", return_value=self.assignment), \
+             patch.object(self.host, "record", return_value=({"packet": packet}, self.assignment["pointer"])):
+            p = self.host.run_adapter(self.binding)
+            # Before sending, even a prepared builder must reject a stale base.
+            self.fixture.current_sha = "b" * 40
+            with self.assertRaises(Exception): self.send(p)
+            self.fixture.current_sha = packet["head"]
+            self.send(p)
+            self.host.collect_ui(self.observed(p, "WAITING"))
+            self.fixture.current_sha = "b" * 40
+            result = self.host.collect_ui(self.observed(p, "SESSION_OBSERVED"))
+            self.assertEqual(result["state"], "SESSION_OBSERVED")
+            self.assertEqual(result["grants"], [])
+            self.assertFalse(self.host.run_adapter(self.binding)["send_allowed"])
             with self.assertRaises(Exception): self.send(p)
 
     def test_stale_source_before_send_stays_fenced(self):
