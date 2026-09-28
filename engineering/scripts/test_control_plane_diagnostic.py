@@ -343,6 +343,25 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT state FROM outbox WHERE id=?',
                              (result['request_id'],)).fetchone()[0], 'NOT_STARTED')
 
+    def test_existing_execution_reservation_cannot_bypass_uncertain_result_fence(self):
+        self.prepare(); self.claim()
+        self.request('/astra/diagnostic/result', self.answer())
+        self.store.reconcile_astra(self.action['request_id'], self.action['identity'],
+            self.action['work_session'], self.comments[102]['html_url'], consumer_fenced=True)
+        ordinary = flow.request(dict(self.action['subject'], task_pointer=flow.DIAGNOSTIC_ISSUE),
+                                'DISPATCH', 'builder', 'N/A')
+        self.store.reserve(ordinary)
+        result_id = flow.digest(['diagnostic-result', self.action['request_id']])
+        # Pre-fix ledgers could already contain an operational NOT_STARTED reservation.
+        with self.store.transaction() as db:
+            db.execute("UPDATE outbox SET state='UNKNOWN',valid=0 WHERE id=?", (result_id,))
+        send = Mock()
+        with self.assertRaises(flow.FlowError): self.store.send_once(ordinary, send, lambda _: True)
+        send.assert_not_called()
+        with self.store.transaction() as db:
+            self.assertEqual(db.execute('SELECT state FROM outbox WHERE id=?',
+                             (ordinary['request_id'],)).fetchone()[0], 'NOT_STARTED')
+
     def test_result_reservation_and_submitting_marker_each_fence_reconciliation(self):
         self.prepare(); self.claim()
         result = flow.diagnostic_result(self.action, self.answer())

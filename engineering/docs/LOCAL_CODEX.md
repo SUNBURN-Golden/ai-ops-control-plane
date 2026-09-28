@@ -252,6 +252,8 @@ separate GitHub result publication has finished. Preserve all tombstones and dis
 flags after completion; Issue #19 stays open until the full acceptance is verified.
 The collector rechecks the active claim in the same SQLite transaction that marks
 the result SUBMITTING; an earlier authority read cannot race operator reconciliation.
+Task fences are also rechecked in that pre-send transaction for existing execution
+reservations; a NOT_STARTED row inherited from an older ledger cannot bypass them.
 
 ### Live prerequisites still required after this source PR
 

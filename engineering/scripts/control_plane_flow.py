@@ -420,6 +420,45 @@ class Store:
             db.execute("UPDATE inbox SET state=? WHERE id=? AND state='PROCESSING'",
                        ("DONE" if succeeded else "BLOCKED", event_id))
 
+    def diagnostic_fence(self, db, action):
+        """Check admission and pre-send in the caller's existing serialized transaction."""
+        effective_kind = action.get("action_kind", action["kind"])
+        # Diagnostic admission shares this exact ledger, including pending ordinary
+        # sends/claims. Do not create a second authority or use a GitHub comment lock.
+        if effective_kind == "DIAGNOSTIC":
+            require(db.execute("SELECT 1 FROM sqlite_master WHERE name='astra_claims'").fetchone(),
+                    "initialize existing consumer table while intake is fenced")
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='graph_owners'").fetchone():
+                task = canonical([action["subject"]["repository"], action["subject"]["task_id"]])
+                require(db.execute("SELECT 1 FROM graph_owners WHERE task=?", (task,)).fetchone() is None,
+                        "existing graph writer ownership blocks diagnostic")
+        if (effective_kind in EXECUTION_KINDS and
+            db.execute("SELECT 1 FROM sqlite_master WHERE name='astra_claims'").fetchone()):
+            task_key = canonical([action["subject"]["repository"], action["subject"]["task_id"]])
+            for row in db.execute("SELECT * FROM astra_claims WHERE task_key=? AND state='CLAIMED'", (task_key,)):
+                if "DIAGNOSTIC" in {effective_kind, decode(row["body"])["kind"]}:
+                    require(row["request"] == action.get("action_request_id", action["request_id"]),
+                            "unresolved task consumer blocks diagnostic/operational replacement")
+        for row in db.execute("SELECT * FROM outbox WHERE valid=1 OR state IN ('SUBMITTING','UNKNOWN')"):
+            prior = decode(row["body"])
+            prior_kind = prior.get("action_kind", prior["kind"])
+            if (effective_kind in EXECUTION_KINDS and prior_kind == "DIAGNOSTIC_RESULT" and
+                all(prior["subject"][k] == action["subject"][k] for k in ("repository", "task_id"))):
+                # Ending the browser consumer does not resolve a separate
+                # pending/uncertain GitHub publication, even on an old ledger.
+                require(row["state"] == "CONFIRMED", "unresolved diagnostic result publication")
+            if ("DIAGNOSTIC" not in {effective_kind, prior_kind} or
+                effective_kind not in EXECUTION_KINDS or prior_kind not in EXECUTION_KINDS or
+                any(prior["subject"][k] != action["subject"][k] for k in ("repository", "task_id"))):
+                continue
+            prior_id = prior.get("action_request_id", prior["request_id"])
+            this_id = action.get("action_request_id", action["request_id"])
+            if prior_id == this_id:
+                continue
+            reconciled = db.execute("SELECT state FROM astra_claims WHERE request=?", (prior_id,)).fetchone()
+            require(reconciled is not None and reconciled["state"] == "RECONCILED" and
+                    row["state"] not in {"SUBMITTING", "UNKNOWN"}, "unresolved diagnostic/task delivery")
+
     def reserve(self, action):
         body, key = canonical(action), action["request_id"]
         with self.transaction() as db:
@@ -427,42 +466,7 @@ class Store:
             if old:
                 require(old["body"] == body, "request identity reused with different body")
                 return dict(old)
-            effective_kind = action.get("action_kind", action["kind"])
-            # Diagnostic admission shares this exact ledger, including pending ordinary
-            # sends/claims. Do not create a second authority or use a GitHub comment lock.
-            if effective_kind == "DIAGNOSTIC":
-                require(db.execute("SELECT 1 FROM sqlite_master WHERE name='astra_claims'").fetchone(),
-                        "initialize existing consumer table while intake is fenced")
-                if db.execute("SELECT 1 FROM sqlite_master WHERE name='graph_owners'").fetchone():
-                    task = canonical([action["subject"]["repository"], action["subject"]["task_id"]])
-                    require(db.execute("SELECT 1 FROM graph_owners WHERE task=?", (task,)).fetchone() is None,
-                            "existing graph writer ownership blocks diagnostic")
-            if (effective_kind in EXECUTION_KINDS and
-                db.execute("SELECT 1 FROM sqlite_master WHERE name='astra_claims'").fetchone()):
-                task_key = canonical([action["subject"]["repository"], action["subject"]["task_id"]])
-                for row in db.execute("SELECT * FROM astra_claims WHERE task_key=? AND state='CLAIMED'", (task_key,)):
-                    if "DIAGNOSTIC" in {effective_kind, decode(row["body"])["kind"]}:
-                        require(row["request"] == action.get("action_request_id", action["request_id"]),
-                                "unresolved task consumer blocks diagnostic/operational replacement")
-            for row in db.execute("SELECT * FROM outbox WHERE valid=1 OR state IN ('SUBMITTING','UNKNOWN')"):
-                prior = decode(row["body"])
-                prior_kind = prior.get("action_kind", prior["kind"])
-                if (effective_kind in EXECUTION_KINDS and prior_kind == "DIAGNOSTIC_RESULT" and
-                    all(prior["subject"][k] == action["subject"][k] for k in ("repository", "task_id"))):
-                    # Ending the browser consumer does not resolve a separate
-                    # pending/uncertain GitHub publication, even on an old ledger.
-                    require(row["state"] == "CONFIRMED", "unresolved diagnostic result publication")
-                if ("DIAGNOSTIC" not in {effective_kind, prior_kind} or
-                    effective_kind not in EXECUTION_KINDS or prior_kind not in EXECUTION_KINDS or
-                    any(prior["subject"][k] != action["subject"][k] for k in ("repository", "task_id"))):
-                    continue
-                prior_id = prior.get("action_request_id", prior["request_id"])
-                this_id = action.get("action_request_id", action["request_id"])
-                if prior_id == this_id:
-                    continue
-                reconciled = db.execute("SELECT state FROM astra_claims WHERE request=?", (prior_id,)).fetchone()
-                require(reconciled is not None and reconciled["state"] == "RECONCILED" and
-                        row["state"] not in {"SUBMITTING", "UNKNOWN"}, "unresolved diagnostic/task delivery")
+            self.diagnostic_fence(db, action)
             # An ambiguous old-scope request is not erased by HEAD/designation change.
             for row in db.execute("SELECT body FROM outbox WHERE state IN ('SUBMITTING','UNKNOWN')"):
                 previous = decode(row["body"])
@@ -578,6 +582,7 @@ class Store:
             self.invalidate(action["request_id"])
             return {"state": "STALE", "sent": False}
         with self.transaction() as db:
+            self.diagnostic_fence(db, action)  # existing reservations cannot bypass a later/legacy fence
             if action["kind"] == "DIAGNOSTIC_RESULT":
                 # Bind result admission and the send marker to the active claim
                 # under the same serialization primitive as operator reconciliation.
