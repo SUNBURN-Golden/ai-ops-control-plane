@@ -17,8 +17,9 @@ implementation and test/fix/retest inside each task. Code evaluates transitions.
 - One task has one writer session. Feedback carries exact failure pointers,
   acceptance pointer and allowed paths to that SAME session. No builder fallback.
 - Read-only reviewers use different confirmed sessions and nonauthor identities.
-  A Mac plan may name Cursor CLI/Grok and ZCode/GLM after both interfaces are
-  qualified. A CLI version check is insufficient. Do not label Cursor as GLM.
+  A plan may name Cursor CLI/Grok or GLM reviewer lanes only after each interface
+  is qualified on its host. A CLI version check is insufficient. Do not label
+  Cursor as GLM.
 - Grok Bot is not required. One explicit validated event invokes `advance` once,
   performs at most one adapter action, then exits. No polling, standing model,
   transcript reading or model-generated summaries. No raw Slack firehose.
@@ -134,8 +135,8 @@ No exactly-once claim is made across GitHub, SQLite, Slack and providers.
 1. Independent exact-source review; required CI or separately authorized substitute.
 2. Qualify the concrete collector and every adapter at exact digest: authentication,
    session creation/resume/termination, read-only isolation, host admission,
-   stale-subject rejection and UNKNOWN reconciliation. Existing Mac probes do not
-   establish these properties. Billing-blocked CI is not a PASS.
+   stale-subject rejection and UNKNOWN reconciliation. Billing-blocked CI is not
+   a PASS. The Mac host expansion was withdrawn (#32, #33); no Mac host is qualified.
 3. Fence existing dispatch routes; preserve flow/admission ledgers and owners.
    Register protected plan/observation identities and adapter evidence. Extend the
    EXISTING flow DB explicitly with `init`; do not start a parallel authority.
@@ -154,7 +155,7 @@ python3 engineering/scripts/control_plane_graph_cli.py advance --policy /protect
 unless the protected policy has explicit activation and source-audit evidence.
 A trusted webhook/local callback must authenticate the event then invoke it once;
 webhook content is only a refresh hint. No event listener is deployed here.
-Product flags, activation files, host settings and existing Mac PRs are unchanged.
+Product flags, activation files and host settings are unchanged.
 
 ## Slack status card (display connection)
 
