@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -358,7 +359,7 @@ class GithubApi:
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode(errors="replace")
             raise ControlPlaneError(f"GitHub API {method} {path} failed: {exc.code} {raw}") from exc
-        except (urllib.error.URLError, OSError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
             # The request may or may not have reached GitHub; callers keep the
             # last durable state and never treat this as a definite outcome.
             raise ControlPlaneError(f"GitHub API {method} {path} unavailable: {exc}") from exc
@@ -577,7 +578,10 @@ def require_fenced_attempt(record: Dict[str, Any]) -> None:
         return
     if state == "CONFIRMED":
         raise ControlPlaneError("retry refused: a CONFIRMED owner exists; reassignment is a separate fenced action")
-    host_state = host_request_state(record["launch_request_id"])
+    request = record.get("launch_request_id")
+    if not isinstance(request, str) or not request:
+        raise ControlPlaneError("control record has invalid launch_request_id")
+    host_state = host_request_state(request)
     if host_state not in {"RECONCILED", "FAILED_PRESTART"}:
         raise ControlPlaneError(
             f"retry refused: {state} attempt is not fenced (host state {host_state or 'NOT_FOUND'}); "

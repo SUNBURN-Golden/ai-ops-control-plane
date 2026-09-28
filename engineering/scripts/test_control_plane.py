@@ -643,6 +643,14 @@ class PrepareDispatchReplayTests(unittest.TestCase):
                                                          "launch_state": "FAILED_PRESTART"})], attempt=2)
                 self.assertIn("attempt_id", str(result["error"]))
                 result["api"].update_comment.assert_not_called()
+        for bad in (None, "", 7):
+            with self.subTest(launch_request_id=bad):
+                result = self.run_prepare([self.comment({**self.record, "launch_request_id": bad,
+                                                         "launch_state": "UNKNOWN"})],
+                                          attempt=2, host_state="RECONCILED")
+                self.assertIn("launch_request_id", str(result["error"]))
+                result["host"].assert_not_called()
+                result["api"].update_comment.assert_not_called()
 
 
 class CentralProfileTests(unittest.TestCase):
@@ -696,7 +704,8 @@ class GithubApiErrorTests(unittest.TestCase):
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
         response.read.return_value = b"not json"
-        for effect in (cp.urllib.error.URLError("dns"), TimeoutError("timed out"), ConnectionResetError("reset")):
+        for effect in (cp.urllib.error.URLError("dns"), TimeoutError("timed out"), ConnectionResetError("reset"),
+                       cp.http.client.IncompleteRead(b"partial")):
             with self.subTest(effect=type(effect).__name__), \
                  patch.object(cp.urllib.request, "urlopen", side_effect=effect):
                 with self.assertRaisesRegex(cp.ControlPlaneError, "unavailable"):
