@@ -250,6 +250,8 @@ consumer reconciliation and new task admission, even if an older ledger already
 records the consumer as reconciled. Ending the browser is not evidence that a
 separate GitHub result publication has finished. Preserve all tombstones and disable the dedicated diagnostic
 flags after completion; Issue #19 stays open until the full acceptance is verified.
+The collector rechecks the active claim in the same SQLite transaction that marks
+the result SUBMITTING; an earlier authority read cannot race operator reconciliation.
 
 ### Live prerequisites still required after this source PR
 

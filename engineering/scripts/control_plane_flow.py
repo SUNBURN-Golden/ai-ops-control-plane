@@ -578,6 +578,18 @@ class Store:
             self.invalidate(action["request_id"])
             return {"state": "STALE", "sent": False}
         with self.transaction() as db:
+            if action["kind"] == "DIAGNOSTIC_RESULT":
+                # Bind result admission and the send marker to the active claim
+                # under the same serialization primitive as operator reconciliation.
+                claim = db.execute("SELECT * FROM astra_claims WHERE request=?",
+                                   (action["diagnostic_request_id"],)).fetchone()
+                require(claim is not None and claim["state"] == "CLAIMED" and
+                        claim["actor"] == action["identity"] and claim["session"] == action["work_session"],
+                        "diagnostic claim changed before result send")
+                claimed = decode(claim["body"])
+                require(claimed.get("kind") == "DIAGNOSTIC" and claimed["subject"] == action["subject"] and
+                        action["request_id"] == digest(["diagnostic-result", claim["request"]]),
+                        "diagnostic result send binding changed")
             changed = db.execute("UPDATE outbox SET state='SUBMITTING' WHERE id=? AND valid=1 AND state='NOT_STARTED'",
                                  (action["request_id"],)).rowcount
             if changed != 1:

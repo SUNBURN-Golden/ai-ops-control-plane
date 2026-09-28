@@ -328,6 +328,37 @@ class DiagnosticTests(unittest.TestCase):
                     self.store.reserve(candidate)
         self.assertEqual(len(self.posts), 3)
 
+    def test_result_send_marker_rechecks_claim_atomically_after_earlier_validation(self):
+        self.prepare(); self.claim()
+        self.store.diagnostic_claim(self.action)  # collector's earlier authority read
+        self.store.reconcile_astra(self.action['request_id'], self.action['identity'],
+            self.action['work_session'], self.action['designation'], consumer_fenced=True)
+        send = Mock()
+        result = flow.diagnostic_result(self.action, self.answer())
+        # Even an earlier/successful current check cannot admit an ended claim.
+        with self.assertRaises(flow.FlowError):
+            self.store.send_once(result, send, lambda _: True)
+        send.assert_not_called()
+        with self.store.transaction() as db:
+            self.assertEqual(db.execute('SELECT state FROM outbox WHERE id=?',
+                             (result['request_id'],)).fetchone()[0], 'NOT_STARTED')
+
+    def test_result_reservation_and_submitting_marker_each_fence_reconciliation(self):
+        self.prepare(); self.claim()
+        result = flow.diagnostic_result(self.action, self.answer())
+        def try_reconcile():
+            with self.assertRaises(flow.FlowError):
+                self.store.reconcile_astra(self.action['request_id'], self.action['identity'],
+                    self.action['work_session'], self.action['designation'], consumer_fenced=True)
+        def current(_):
+            try_reconcile()
+            return True
+        def send(action):
+            try_reconcile()
+            return dict(accepted=True, request_id=action['request_id'])
+        self.assertEqual(self.store.send_once(result, send, current)['state'], 'CONFIRMED')
+        self.assertEqual(self.store.diagnostic_claim(self.action)['state'], 'CLAIMED')
+
     def test_send_response_loss_and_process_interruption_are_unknown(self):
         self.prepare()
         def interrupted(*args):
