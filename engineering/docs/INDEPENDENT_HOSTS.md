@@ -43,7 +43,8 @@ legacy task. An absent ownership ref alone never proves legacy work is idle.
 Use a new diagnostic issue; Issue19 remains the umbrella/history record.
 
 `heads/aiops-ownership/<sha256(lowercase repository, issue)>` is the shared record.
-The control branch has an empty source tree and minimal JSON commit messages;
+The control branch has one constant `.astra-control-format` marker and minimal
+JSON commit messages (GitHub rejects empty create-tree requests);
 it is never merged to main and never contains transcripts, secrets or live-ledger
 dumps. Initial ref creation chooses one owner. Subsequent transitions use a fresh
 unique mutation nonce, a commit whose sole parent is the observed tip, and

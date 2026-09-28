@@ -40,9 +40,14 @@ class GitApi:
             suffix = path[len(prefix):]
             if suffix == "ref/heads/main":
                 return self.fallback(method, path, body, **kwargs)
+            if method == "POST" and suffix == "blobs":
+                assert body == {"content": own.FORMAT_TEXT, "encoding": "utf-8"}
+                return {"sha": own.FORMAT_BLOB}
             if method == "POST" and suffix == "trees":
-                assert body == {"tree": []}
-                return {"sha": own.EMPTY_TREE}
+                if not body.get("tree"):
+                    raise HTTPError(path, 422, "Invalid tree info", {}, None)
+                assert body == {"tree": [{"path": ".astra-control-format", "mode": "100644", "type": "blob", "sha": own.FORMAT_BLOB}]}
+                return {"sha": own.CONTROL_TREE}
             if method == "POST" and suffix == "commits":
                 head = hashlib.sha1(own.canonical(body).encode()).hexdigest()
                 self.commits[head] = dict(sha=head, tree={"sha": body["tree"]}, message=body["message"],
@@ -84,6 +89,16 @@ class OwnershipTests(unittest.TestCase):
         self.api = GitApi()
         self.registry = own.Registry(self.api)
         self.assignment = assignment()
+
+    def test_nonempty_control_tree_matches_real_git_objects(self):
+        raw=own.FORMAT_TEXT.encode()
+        blob=hashlib.sha1(b"blob "+str(len(raw)).encode()+b"\x00"+raw).hexdigest()
+        tree=b"100644 .astra-control-format\x00"+bytes.fromhex(blob)
+        self.assertEqual(blob,own.FORMAT_BLOB)
+        self.assertEqual(hashlib.sha1(b"tree "+str(len(tree)).encode()+b"\x00"+tree).hexdigest(),own.CONTROL_TREE)
+        with self.assertRaises(HTTPError):
+            self.api.call("POST", self.registry.prefix+"trees", {"tree":[]})
+        self.registry.acquire(self.assignment)
 
     def test_two_hosts_only_one_owner(self):
         candidates = [self.assignment, assignment("grok", "22222222-2222-2222-2222-222222222222")]

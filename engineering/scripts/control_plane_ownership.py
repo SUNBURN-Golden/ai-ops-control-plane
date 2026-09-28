@@ -15,7 +15,9 @@ from urllib.error import HTTPError
 REPOSITORY = "BeautifulMind-JT/ai-ops-control-plane"
 PREFIX = "heads/aiops-ownership/"
 MARKER = "ASTRA_HOST_OWNERSHIP_V1\n"
-EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+FORMAT_TEXT = "ASTRA_HOST_OWNERSHIP_V1\n"
+FORMAT_BLOB = "caef76652d15a85bdc1d2a575e46dcbdade3fd35"
+CONTROL_TREE = "a711f42fb00d7d3a3f24d55218582b26c4a1dcb4"
 TERMINAL = {"FINISHED", "FAILED_PRESTART"}
 
 
@@ -72,7 +74,7 @@ class Registry:
         head = value["object"]["sha"]
         commit = self.api.call("GET", self.prefix + "commits/" + head)
         message = commit.get("message", "")
-        require(commit.get("sha") == head and commit.get("tree", {}).get("sha") == EMPTY_TREE and
+        require(commit.get("sha") == head and commit.get("tree", {}).get("sha") == CONTROL_TREE and
                 message.startswith(MARKER), "invalid ownership record")
         state = json.loads(message[len(MARKER):])
         require(state.get("schema") == 1 and state.get("repository", "").lower() == repository.lower() and
@@ -85,10 +87,16 @@ class Registry:
         ref = PREFIX + task_key(repository, issue)
         try:
             state = dict(state, mutation_id=uuid.uuid4().hex)
-            tree = self.api.call("POST", self.prefix + "trees", {"tree": []})
-            require(tree.get("sha") == EMPTY_TREE, "unexpected control tree")
+            # GitHub rejects create-tree with an empty entry list. A single
+            # constant format marker supplies a deterministic nonempty tree;
+            # task state remains in commit messages, never per-task source files.
+            blob = self.api.call("POST", self.prefix + "blobs", {"content": FORMAT_TEXT, "encoding": "utf-8"})
+            require(blob.get("sha") == FORMAT_BLOB, "unexpected control format blob")
+            tree = self.api.call("POST", self.prefix + "trees", {"tree": [
+                {"path": ".astra-control-format", "mode": "100644", "type": "blob", "sha": FORMAT_BLOB}]})
+            require(tree.get("sha") == CONTROL_TREE, "unexpected control tree")
             commit = self.api.call("POST", self.prefix + "commits", dict(
-                message=MARKER + canonical(state), tree=EMPTY_TREE,
+                message=MARKER + canonical(state), tree=CONTROL_TREE,
                 parents=[] if old_head is None else [old_head]))
             head = commit["sha"]
             if old_head is None:
@@ -136,7 +144,7 @@ class Registry:
             require(len(parents) == 1, "ownership history replaced or truncated")
             parent = parents[0]["sha"] if isinstance(parents[0], dict) else parents[0]
             old_commit = self.api.call("GET", self.prefix + "commits/" + parent)
-            require(old_commit.get("tree", {}).get("sha") == EMPTY_TREE and
+            require(old_commit.get("tree", {}).get("sha") == CONTROL_TREE and
                     old_commit.get("message", "").startswith(MARKER), "invalid ownership ancestor")
             older = json.loads(old_commit["message"][len(MARKER):])
             for field in ("owner", "assignment_digest", "repository", "issue", "epoch", "schema"):
