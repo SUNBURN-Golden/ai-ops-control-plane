@@ -50,6 +50,10 @@ LAUNCH_IDENTITY = ("repository", "task_id", "task_revision", "builder_id", "laun
 RUNTIME_PATHS = (
     "scripts/control_plane_codex_relay.py", "scripts/test_control_plane_codex_relay.py",
     ".github/control-plane/codex-relay.example.json", "docs/LOCAL_CODEX.md",
+    "scripts/control_plane_graph_slack.py", "scripts/test_control_plane_graph_slack.py",
+    "scripts/control_plane_graph.py", "scripts/control_plane_graph_cli.py",
+    "scripts/test_control_plane_graph.py", "docs/TASK_GRAPH.md",
+    ".github/control-plane/graph-policy.example.json",
     ".github/control-plane/projects.json",
     "scripts/control_plane.py", "scripts/control_plane_host.py",
     "scripts/control_plane_boundary.py", "scripts/control_plane_boundary_hook.sh",
