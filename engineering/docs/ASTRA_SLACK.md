@@ -10,13 +10,6 @@ it does not share Grok's personal browser or invent a Slack callback. The client
 and remaining Mac qualification gates are in [LOCAL_CODEX.md](LOCAL_CODEX.md).
 No browser response replaces authenticated GitHub result ingestion.
 
-Issue #19 qualification additionally supports the explicitly scoped DIAGNOSTIC
-bootstrap in [LOCAL_CODEX.md](LOCAL_CODEX.md#issue-19-diagnostic-only-bootstrap-source-disabled-until-qualified).
-It uses the same authority/ledger and confirmed projection/Slack notification,
-but separate expiring transport credentials and diagnostic claim/result routes.
-Its Issue comment is only DIAGNOSTIC_RESULT evidence, never a native audit review,
-User decision, operational live PASS or an automatic consumer release.
-
 ## Implemented sender
 
 1. Mechanical flow reads current GitHub gates. Ordinary A1/A2 review does not wake
