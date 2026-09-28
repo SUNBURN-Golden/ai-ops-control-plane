@@ -160,6 +160,11 @@ Use LAUNCH_REQUEST_ID as the provider idempotency key when supported.
 Confirmed receipt records CONFIRMED + OWNER_SESSION_ID + worker/attempt.
 Provider proof of no session permits FAILED_PRESTART; a configured retry event
 may reauthorize that same task only after the prior executor is fenced.
+The runtime retry event is a dispatch whose `expected_attempt_id` equals the
+record's ATTEMPT_ID + 1. It creates a new CLAIM_ID/LAUNCH_REQUEST_ID, keeps the
+prior attempt in `previous_attempts`, and is admitted only from NOT_STARTED,
+FAILED_PRESTART, or SUBMITTING/UNKNOWN that the host ledger reports as
+RECONCILED or FAILED_PRESTART. A CONFIRMED owner is never displaced.
 Ambiguous outcome records UNKNOWN and blocks relaunch until provider evidence
 or explicit User resolution proves the safe next step. Slack response loss
 never undoes a confirmed GitHub owner record.

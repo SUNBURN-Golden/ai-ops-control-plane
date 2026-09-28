@@ -395,20 +395,26 @@ class PrepareDispatchReplayTests(unittest.TestCase):
         return {"id": 1, "user": {"login": actor},
                 "body": cp.render_control_record(record)}
 
-    def run_prepare(self, comments, create_id=5):
+    def run_prepare(self, comments, create_id=5, create_actor="github-actions[bot]",
+                    attempt=None, host_state=None, delete_error=None):
         body = "\n".join(f"{k}: {v}" for k, v in self.envelope.items())
         api = Mock()
         api.issue.return_value = {"state": "open", "html_url": self.issue_url,
                                   "user": {"login": "owner"}, "body": body}
         api.comments.return_value = comments
-        api.create_comment.return_value = {"id": create_id}
+        api.create_comment.return_value = {"id": create_id, "user": {"login": create_actor}}
+        api.delete_comment.side_effect = delete_error
         cfg = {"repository": "owner/repo", "project": "KIX",
                "control_record_actor": "github-actions[bot]",
                "allowed_task_actors": ["owner"], "allowed_dispatch_actors": ["owner"]}
         env = {"GITHUB_TOKEN": "token", "GITHUB_ACTOR": "owner",
-               "GITHUB_TRIGGERING_ACTOR": "owner", "EXPECTED_TASK_ID": "T1",
-               "EXPECTED_TASK_REVISION": "1", "EXPECTED_BUILDER_ID": "DEVIN",
-               "EXPECTED_ISSUE_BODY_SHA256": hashlib.sha256(body.encode()).hexdigest()}
+               "GITHUB_TRIGGERING_ACTOR": "owner", "EXPECTED_TASK_ID": self.envelope["TASK_ID"],
+               "EXPECTED_TASK_REVISION": self.envelope["TASK_REVISION"],
+               "EXPECTED_BUILDER_ID": self.envelope["BUILDER_ID"],
+               "EXPECTED_ISSUE_BODY_SHA256": hashlib.sha256(body.encode()).hexdigest(),
+               "EXPECTED_ATTEMPT_ID": "" if attempt is None else str(attempt)}
+        status = lambda args: {"status": "FOUND" if host_state else "NOT_FOUND",
+                               "launch_request_id": args[2], "state": host_state}
         result = {"api": api}
         with tempfile.TemporaryDirectory() as tmp:
             packet = Path(tmp) / "packet.json"
@@ -417,6 +423,7 @@ class PrepareDispatchReplayTests(unittest.TestCase):
                  patch.object(cp, "validate_task"), \
                  patch.object(cp, "GithubApi", return_value=api), \
                  patch.object(cp, "host_preflight") as preflight, \
+                 patch.object(cp, "host_call", side_effect=status) as host, \
                  patch.object(cp, "write_github_output") as output, \
                  patch.dict(os.environ, env):
                 try:
@@ -426,8 +433,12 @@ class PrepareDispatchReplayTests(unittest.TestCase):
                     result["error"] = exc
             result["packet"] = packet.read_text() if packet.exists() else None
         result["preflight"] = preflight
+        result["host"] = host
         result["output"] = output
         return result
+
+    def written_records(self, result):
+        return [cp.parse_control_record(call.args[1]) for call in result["api"].update_comment.call_args_list]
 
     def test_unresolved_submitting_and_unknown_block_redispatch(self):
         for state in ("SUBMITTING", "UNKNOWN"):
@@ -500,6 +511,199 @@ class PrepareDispatchReplayTests(unittest.TestCase):
         packet = json.loads(result["packet"])
         self.assertEqual(packet["control_comment_id"], 5)
         self.assertEqual(packet["task_id"], "T1")
+
+    def test_record_written_under_another_login_is_removed_before_launch(self):
+        # A PAT writes as the user, not github-actions[bot]; finalize would later
+        # reject that record as foreign and strand the task in SUBMITTING.
+        result = self.run_prepare([], create_actor="BeautifulMind-JT")
+        self.assertIn("control_record_actor", str(result["error"]))
+        result["api"].delete_comment.assert_called_once_with(5)
+        result["api"].update_comment.assert_not_called()
+        result["preflight"].assert_not_called()
+        self.assertIsNone(result["packet"])
+
+    def test_undeletable_foreign_record_names_the_comment_to_remove(self):
+        result = self.run_prepare([], create_actor="BeautifulMind-JT",
+                                  delete_error=cp.ControlPlaneError("GitHub API DELETE failed"))
+        self.assertIn("delete NOT_STARTED comment 5 manually", str(result["error"]))
+        result["preflight"].assert_not_called()
+        self.assertIsNone(result["packet"])
+
+    def test_failed_prestart_error_names_next_attempt(self):
+        result = self.run_prepare([self.comment({**self.record, "launch_state": "FAILED_PRESTART"})])
+        self.assertIn("expected_attempt_id=2", str(result["error"]))
+
+    def test_explicit_retry_after_failed_prestart_starts_next_attempt(self):
+        failed = {**self.record, "launch_state": "FAILED_PRESTART", "last_error": "host max_active_sessions reached"}
+        result = self.run_prepare([self.comment(failed)], attempt=2)
+        self.assertIsNone(result["error"])
+        fresh, submitting = self.written_records(result)
+        self.assertEqual((fresh["attempt_id"], fresh["launch_state"]), (2, "NOT_STARTED"))
+        self.assertEqual((submitting["attempt_id"], submitting["launch_state"]), (2, "SUBMITTING"))
+        request = cp.stable_id("launch", "owner/repo", "T1", "1", 2)
+        self.assertEqual(submitting["launch_request_id"], request)
+        self.assertNotEqual(request, self.record["launch_request_id"])
+        self.assertEqual(submitting["claim_id"], cp.stable_id("claim", "owner/repo", "T1", "1", 2))
+        self.assertEqual(submitting["previous_attempts"], [{
+            "attempt_id": 1, "launch_request_id": "request-1", "task_revision": "1", "builder_id": "DEVIN",
+            "launch_state": "FAILED_PRESTART", "owner_session_id": None,
+            "last_error": "host max_active_sessions reached"}])
+        packet = json.loads(result["packet"])
+        self.assertEqual((packet["attempt_id"], packet["launch_request_id"]), (2, request))
+        result["preflight"].assert_called_once_with("DEVIN")
+        result["host"].assert_not_called()
+
+    def test_repeated_retry_dispatch_resolves_to_the_same_attempt(self):
+        second = {**self.record, "attempt_id": 2, "launch_request_id": "request-2",
+                  "previous_attempts": [{"attempt_id": 1}]}
+        confirmed = self.run_prepare([self.comment({**second, "launch_state": "CONFIRMED"})], attempt=2)
+        self.assertIsNone(confirmed["error"])
+        confirmed["output"].assert_called_once_with("launch_required", "false")
+        confirmed["api"].update_comment.assert_not_called()
+        for state in ("SUBMITTING", "UNKNOWN"):
+            with self.subTest(state=state):
+                blocked = self.run_prepare([self.comment({**second, "launch_state": state})], attempt=2)
+                self.assertIn(state, str(blocked["error"]))
+                blocked["api"].update_comment.assert_not_called()
+                blocked["preflight"].assert_not_called()
+        resumed = self.run_prepare([self.comment({**second, "launch_state": "NOT_STARTED"})], attempt=2)
+        self.assertIsNone(resumed["error"])
+        self.assertEqual(json.loads(resumed["packet"])["launch_request_id"], "request-2")
+
+    def test_retry_never_displaces_confirmed_owner(self):
+        result = self.run_prepare([self.comment({**self.record, "launch_state": "CONFIRMED",
+                                                 "owner_session_id": "session-1"})], attempt=2)
+        self.assertIn("CONFIRMED owner", str(result["error"]))
+        result["api"].update_comment.assert_not_called()
+        result["preflight"].assert_not_called()
+        self.assertIsNone(result["packet"])
+
+    def test_retry_of_unresolved_attempt_requires_host_fencing(self):
+        for state in ("SUBMITTING", "UNKNOWN"):
+            for host_state in (None, "SUBMITTING", "UNKNOWN", "CONFIRMED"):
+                with self.subTest(state=state, host_state=host_state):
+                    result = self.run_prepare([self.comment({**self.record, "launch_state": state})],
+                                              attempt=2, host_state=host_state)
+                    self.assertIn("not fenced", str(result["error"]))
+                    result["host"].assert_called_once_with(["status", "--launch-request-id", "request-1"])
+                    result["api"].update_comment.assert_not_called()
+                    result["preflight"].assert_not_called()
+                    self.assertIsNone(result["packet"])
+            for host_state in ("RECONCILED", "FAILED_PRESTART"):
+                with self.subTest(state=state, host_state=host_state):
+                    result = self.run_prepare([self.comment({**self.record, "launch_state": state})],
+                                              attempt=2, host_state=host_state)
+                    self.assertIsNone(result["error"])
+                    self.assertEqual(json.loads(result["packet"])["attempt_id"], 2)
+                    self.assertEqual(self.written_records(result)[-1]["previous_attempts"][0]["launch_state"], state)
+
+    def test_host_status_for_another_request_is_rejected(self):
+        with patch.object(cp, "host_call", return_value={"launch_request_id": "other", "state": "RECONCILED"}):
+            with self.assertRaisesRegex(cp.ControlPlaneError, "identity mismatch"):
+                cp.host_request_state("request-1")
+        with patch.object(cp, "host_call", return_value={"launch_request_id": "request-1", "state": 3}):
+            with self.assertRaises(cp.ControlPlaneError):
+                cp.host_request_state("request-1")
+
+    def test_retry_rebinds_pinned_revision_and_builder_but_not_task(self):
+        failed = {**self.record, "launch_state": "FAILED_PRESTART"}
+        self.envelope.update(TASK_REVISION="2", BUILDER_ID="GLM")
+        result = self.run_prepare([self.comment(failed)], attempt=2)
+        self.assertIsNone(result["error"])
+        packet = json.loads(result["packet"])
+        self.assertEqual((packet["task_revision"], packet["builder_id"], packet["attempt_id"]), ("2", "GLM", 2))
+        result["preflight"].assert_called_once_with("GLM")
+        # Without the explicit retry the same drift stays an identity mismatch.
+        self.assertIsNotNone(self.run_prepare([self.comment(failed)])["error"])
+        other_task = self.run_prepare([self.comment({**failed, "task_id": "T2"})], attempt=2)
+        self.assertIn("identity", str(other_task["error"]))
+        other_task["api"].update_comment.assert_not_called()
+
+    def test_attempt_number_must_name_current_or_next_attempt(self):
+        failed = self.comment({**self.record, "launch_state": "FAILED_PRESTART"})
+        for attempt in (3, 7):
+            with self.subTest(attempt=attempt):
+                result = self.run_prepare([failed], attempt=attempt)
+                self.assertIn("a retry names attempt 2", str(result["error"]))
+                result["api"].update_comment.assert_not_called()
+        self.assertIn("expected_attempt_id=2", str(self.run_prepare([failed], attempt=1)["error"]))
+        fresh = self.run_prepare([], attempt=2)
+        self.assertIn("first attempt", str(fresh["error"]))
+        fresh["api"].create_comment.assert_not_called()
+        self.assertIsNone(self.run_prepare([], attempt=1)["error"])
+
+    def test_malformed_attempt_inputs_are_rejected_before_any_write(self):
+        for raw in ("0", "-1", "abc", "1.0", " 1", "01", "1" * 10):
+            with self.subTest(raw=raw), patch.dict(os.environ, {"EXPECTED_ATTEMPT_ID": raw}):
+                with self.assertRaises(cp.ControlPlaneError):
+                    cp.expected_attempt_id()
+        for bad in (0, True, "1", None, 1.0):
+            with self.subTest(attempt_id=bad):
+                result = self.run_prepare([self.comment({**self.record, "attempt_id": bad,
+                                                         "launch_state": "FAILED_PRESTART"})], attempt=2)
+                self.assertIn("attempt_id", str(result["error"]))
+                result["api"].update_comment.assert_not_called()
+
+
+class CentralProfileTests(unittest.TestCase):
+    """Every central target shares ASTRA_CONTROL_GITHUB_TOKEN, hence one record author."""
+
+    def test_every_committed_profile_loads_with_one_record_actor(self):
+        profiles = cp.load_json(cp.CONFIG_PATH.with_name("projects.json"))
+        self.assertGreaterEqual(len(profiles), 4)
+        actors = set()
+        for target in profiles:
+            with self.subTest(target=target), patch.dict(os.environ, {"ASTRA_TARGET_REPOSITORY": target}):
+                actors.add(cp.load_config()["control_record_actor"])
+        self.assertEqual(len(actors), 1)
+        cp.validate_central_profiles()
+
+    def write_profiles(self, mutate):
+        directory = tempfile.TemporaryDirectory(dir=cp.ROOT)
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        (root / "config.json").write_text(cp.CONFIG_PATH.read_text())
+        profiles = cp.load_json(cp.CONFIG_PATH.with_name("projects.json"))
+        mutate(profiles)
+        (root / "projects.json").write_text(json.dumps(profiles))
+        return root / "config.json"
+
+    def test_divergent_record_actor_is_rejected(self):
+        def diverge(profiles):
+            profiles["BeautifulMind-JT/ZARI"]["control_record_actor"] = "github-actions[bot]"
+        with patch.object(cp, "CONFIG_PATH", self.write_profiles(diverge)):
+            with self.assertRaisesRegex(cp.ControlPlaneError, "control_record_actor must match"):
+                cp.validate_central_profiles()
+
+    def test_invalid_non_selected_profile_is_rejected(self):
+        mutations = (
+            lambda p: p["BeautifulMind-JT/maeum-gyeol"].update(enabled_builders=["UNKNOWN"]),
+            lambda p: p["BeautifulMind-JT/maeum-gyeol"].update(repository="BeautifulMind-JT/other"),
+            lambda p: p["BeautifulMind-JT/maeum-gyeol"].pop("control_record_actor"),
+            lambda p: p.update({"BeautifulMind-JT/extra": []}),
+            lambda p: p.clear(),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index), patch.object(cp, "CONFIG_PATH", self.write_profiles(mutate)):
+                with self.assertRaises(cp.ControlPlaneError):
+                    cp.validate_central_profiles()
+
+
+class GithubApiErrorTests(unittest.TestCase):
+    def test_network_and_decode_failures_become_control_plane_errors(self):
+        api = cp.GithubApi("owner/repo", "token")
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b"not json"
+        for effect in (cp.urllib.error.URLError("dns"), TimeoutError("timed out"), ConnectionResetError("reset")):
+            with self.subTest(effect=type(effect).__name__), \
+                 patch.object(cp.urllib.request, "urlopen", side_effect=effect):
+                with self.assertRaisesRegex(cp.ControlPlaneError, "unavailable"):
+                    api.issue(1)
+        with patch.object(cp.urllib.request, "urlopen", return_value=response):
+            with self.assertRaisesRegex(cp.ControlPlaneError, "invalid JSON"):
+                api.issue(1)
 
 
 class DisabledRuntimeTests(unittest.TestCase):

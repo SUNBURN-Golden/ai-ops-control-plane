@@ -284,6 +284,19 @@ class Ledger:
         finally:
             db.close()
 
+    def status(self, request):
+        # Read-only. RECONCILED and FAILED_PRESTART rows are terminal (finalize and
+        # reconcile only move active rows), so no in-flight lock is required.
+        if not isinstance(request, str) or not request.strip() or len(request) > 4096 or "\0" in request:
+            raise HostError("invalid launch_request_id")
+        db = self.connect()
+        try:
+            row = db.execute("SELECT state FROM launches WHERE request=?", (request,)).fetchone()
+        finally:
+            db.close()
+        return {"status": "FOUND" if row else "NOT_FOUND", "launch_request_id": request,
+                "state": row["state"] if row else None}
+
     def reconcile(self, request, session, evidence, *, no_session=False, sender_fenced=False):
         with self.inflight_lock(exclusive=True):
             return self._reconcile(request, session, evidence, no_session=no_session, sender_fenced=sender_fenced)
@@ -396,6 +409,7 @@ def main(argv=None):
     commands.add_parser("preflight").add_argument("--builder-id", choices=tuple(WRAPPERS), required=True)
     commands.add_parser("launch")
     commands.add_parser("init")
+    commands.add_parser("status").add_argument("--launch-request-id", required=True)
     reconcile_parser = commands.add_parser("reconcile")
     for flag in ("launch-request-id", "evidence"):
         reconcile_parser.add_argument("--" + flag, required=True)
@@ -420,6 +434,8 @@ def main(argv=None):
             result = preflight(args.builder_id, policy, ledger)
         elif args.command == "launch":
             result = launch(packet, policy, ledger)
+        elif args.command == "status":
+            result = ledger.status(args.launch_request_id)
         else:
             result = ledger.reconcile(args.launch_request_id, args.session_id, args.evidence,
                                       no_session=args.no_session, sender_fenced=args.sender_fenced)

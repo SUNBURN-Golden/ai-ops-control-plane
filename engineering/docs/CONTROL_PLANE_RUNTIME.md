@@ -42,7 +42,10 @@ GitHub 제어 토큰, 다른 builder의 credentials에 접근할 수 없어야 �
 control 계정의 HOME/secret store도 builder에 열지 않는다.
 
 runner의 sudo 허용은 고정 helper의 `launch`, 정확한 세 builder별
-`preflight --builder-id ...` command만으로 제한한다. shell, 임의 Python, 임의 인수,
+`preflight --builder-id ...` command, 읽기 전용
+`status --launch-request-id <24자리 hex>` command만으로 제한한다. `status`는 sudoers에서
+그 인수 형식만 허용하고(가능하면 정규식), ledger를 바꾸지 않는다. 이 항목이 없으면
+UNKNOWN/SUBMITTING 재시도만 fail-closed로 거부된다. shell, 임의 Python, 임의 인수,
 `init`, `reconcile`, root 실행을 허용하지 않는다. builder에는 이 sudo 권한이 없다.
 관리자만 DB를 최초 `init`한다. 손실된 DB를 빈 DB로 재생성해 복구하지 않는다.
 원 ledger와 외부 session을 대사하기 전 dispatch를 재개하지 않는다.
@@ -77,7 +80,25 @@ User가 승인한 operator만 원 request의 terminal session/취소·fencing �
 `reconcile --launch-request-id ... --session-id ... --evidence <GitHub URL>`을 실행한다.
 UNKNOWN에는 추정 session을 넣지 않는다. 살아 있는 launch helper와 해제는 경쟁하지
 못하도록 잠근다. 복구 가능한 기존 ticket은 owner를 유지한다. 해제는 재실행 허가가
-아니며, 재시도/재배정은 기존 governance의 별도 승인·fencing을 따른다.
+아니며, 재시도/재배정은 아래 명시적 재시도 절차를 따른다.
+
+## 명시적 재시도
+
+재시도는 dispatch 입력 `expected_attempt_id`에 control record의 `attempt_id + 1`을
+적는 경우에만 일어난다. 빈 값은 첫 시도(1) 또는 현재 시도의 재개다. 새 시도는 새
+`claim_id`/`launch_request_id`를 만들고, 이전 시도 요약을 `previous_attempts`에 남긴 뒤
+NOT_STARTED → SUBMITTING 순서를 그대로 밟는다. 같은 재시도 dispatch를 다시 보내면
+번호가 이미 현재 시도이므로 세 번째 시도가 생기지 않는다.
+
+| 이전 시도 상태 | 재시도 허용 조건 |
+|---|---|
+| NOT_STARTED | 항상 (송신 권한을 쓰지 않았음) |
+| FAILED_PRESTART | 항상 (session 없음이 확정됨) |
+| SUBMITTING / UNKNOWN | host `status`가 그 request를 RECONCILED 또는 FAILED_PRESTART로 보고할 때만 |
+| CONFIRMED | 거부 — 살아 있는 owner를 밀어내지 않는다 |
+
+재시도 envelope의 TASK_REVISION·BUILDER_ID는 dispatch 입력으로 고정된 현재 값이다.
+TASK_ID는 바꿀 수 없다. host ledger는 여전히 task당 활성 reservation 하나만 허용한다.
 session 생성 전 crash였으며 원 request의 미생성과 모든 sender의 fencing을
 operator가 입증한 경우에만 `--session-id` 대신 `--no-session --sender-fenced`를 쓴다.
 같은 exclusive lock과 durable evidence를 요구하며 알려진 session에는 사용할 수 없다.
