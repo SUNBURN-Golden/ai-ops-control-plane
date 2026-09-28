@@ -123,6 +123,85 @@ def verify_github(raw, headers, secret, allowed_repositories):
 SUBJECT = ("repository", "task_id", "revision", "head", "base", "policy_revision", "task_digest")
 DEPTH = {"A0": 0, "A1": 1, "A2": 2, "A3": 3}
 
+# A deliberately narrow, non-product qualification contract; not an audit gate.
+DIAGNOSTIC_REPO = "BeautifulMind-JT/ai-ops-control-plane"
+DIAGNOSTIC_ISSUE = f"https://github.com/{DIAGNOSTIC_REPO}/issues/19"
+DIAGNOSTIC_DOCUMENT = "engineering/docs/LOCAL_CODEX.md"
+EXECUTION_KINDS = {"DIAGNOSTIC", "AUDIT", "DECISION", "DISPATCH", "IMPLEMENT", "FEEDBACK", "REVIEW"}
+DIAGNOSTIC_QUESTION = (
+    "지정된 exact SHA의 engineering/docs/LOCAL_CODEX.md를 읽고, "
+    "claim 이후 응답 유실 시 허용되는 조치와 금지되는 조치를 "
+    "근거 포인터와 함께 짧게 답하라. "
+    "코드 수정·merge·activation·User 승인 대행은 하지 마라.")
+
+
+def diagnostic_request(revision, head, identity, session, designation):
+    require(isinstance(revision, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", revision),
+            "invalid diagnostic revision")
+    require(isinstance(head, str) and re.fullmatch(r"[a-f0-9]{40}", head), "invalid diagnostic SHA")
+    require(isinstance(identity, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", identity) and
+            identity.upper() not in {"CONFIG_REQUIRED", "PENDING", "UNKNOWN"}, "diagnostic consumer missing")
+    require(isinstance(session, str) and re.fullmatch(r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,100}", session),
+            "dedicated diagnostic Work URL required")
+    require(isinstance(designation, str) and re.fullmatch(
+        re.escape(DIAGNOSTIC_ISSUE) + r"#issuecomment-[1-9][0-9]*", designation),
+        "Issue 19 diagnostic authorization required")
+    scope = {"document": DIAGNOSTIC_DOCUMENT, "question": DIAGNOSTIC_QUESTION,
+             "capabilities": ["READ_PINNED_DOCUMENT", "ANSWER_DIAGNOSTIC", "RECORD_DIAGNOSTIC_EVIDENCE"]}
+    binding = dict(revision=revision, head=head, identity=identity, work_session=session, designation=designation)
+    action = dict(scope, kind="DIAGNOSTIC", identity=identity, work_session=session,
+                  designation=designation, task_pointer=DIAGNOSTIC_ISSUE, attempt_id=1, read_only=True,
+                  subject=dict(repository=DIAGNOSTIC_REPO, task_id="CP-LOCAL-001", revision=revision,
+                               head=head, base=head, policy_revision=digest(scope), task_digest=digest(binding)))
+    return dict(action, request_id=digest(action))
+
+
+def validate_diagnostic(action):
+    require(isinstance(action, dict), "diagnostic request missing")
+    try:
+        expected = diagnostic_request(action["subject"]["revision"], action["subject"]["head"],
+                                      action["identity"], action["work_session"], action["designation"])
+    except (KeyError, TypeError) as exc:
+        raise FlowError("incomplete diagnostic binding") from exc
+    require(canonical(action) == canonical(expected), "diagnostic scope/identity changed")
+    return action
+
+
+def diagnostic_result(action, value):
+    """Authenticate transport separately. This validates an observation, never a verdict."""
+    validate_diagnostic(action)
+    require(isinstance(value, dict) and set(value) == {
+        "kind", "request_id", "subject", "identity", "work_session", "observation"},
+        "invalid diagnostic result fields")
+    require(value["kind"] == "DIAGNOSTIC_RESULT" and all(
+        value[k] == action[k] for k in ("request_id", "subject", "identity", "work_session")),
+        "stale/wrong diagnostic result binding")
+    observation = value["observation"]
+    require(isinstance(observation, dict) and set(observation) == {
+        "answer", "evidence_pointers", "displayed_model", "displayed_effort", "internal_model_id"},
+        "invalid diagnostic observation")
+    require(observation["displayed_model"] == "GPT-6 Astra" and
+            observation["displayed_effort"] == "medium" and observation["internal_model_id"] is None,
+            "unqualified Work display or asserted internal model identity")
+    require(isinstance(observation["answer"], str) and 0 < len(observation["answer"].strip()) <= 12000,
+            "diagnostic answer missing/too large")
+    prefix = f"https://github.com/{DIAGNOSTIC_REPO}/blob/{action['subject']['head']}/{DIAGNOSTIC_DOCUMENT}"
+    pointers = observation["evidence_pointers"]
+    require(isinstance(pointers, list) and 1 <= len(pointers) <= 12 and all(
+        isinstance(p, str) and re.fullmatch(re.escape(prefix) + r"#L[1-9][0-9]*(?:-L[1-9][0-9]*)?", p)
+        for p in pointers), "diagnostic evidence must cite the pinned document")
+    return dict(value, diagnostic_request_id=action["request_id"],
+                request_id=digest(["diagnostic-result", action["request_id"]]),
+                provenance="AUTHENTICATED_CONSUMER_OBSERVATION_NOT_PROVIDER_ATTESTATION",
+                grants=[], live_acceptance="UNCHANGED")
+
+
+def diagnostic_outcome(value):
+    """A surviving pre-effect marker is uncertainty, never proof of no effect."""
+    if value.get("state") in {"CLAIMING", "SUBMITTING", "OBSERVING", "RESULT_SUBMITTING"}:
+        return dict(value, durable_state=value["state"], state="UNKNOWN")
+    return value
+
 
 def subject(snapshot):
     value = {k: snapshot[k] for k in SUBJECT}
@@ -151,6 +230,8 @@ def request(snapshot, kind, identity, designation):
 
 def verify_result(result, expected, authors, author_sessions):
     require(isinstance(result, dict), "result missing")
+    require(expected.get("kind") in {"REVIEW", "AUDIT"} and result.get("kind", expected["kind"]) == expected["kind"],
+            "non-review result cannot grant an operational gate")
     for key in ("subject", "request_id", "attempt_id", "identity", "designation"):
         require(result.get(key) == expected.get(key), "stale/mismatched result: " + key)
     # authenticated_actor is populated by the collector from GitHub, not the JSON body.
@@ -346,6 +427,37 @@ class Store:
             if old:
                 require(old["body"] == body, "request identity reused with different body")
                 return dict(old)
+            effective_kind = action.get("action_kind", action["kind"])
+            # Diagnostic admission shares this exact ledger, including pending ordinary
+            # sends/claims. Do not create a second authority or use a GitHub comment lock.
+            if effective_kind == "DIAGNOSTIC":
+                require(db.execute("SELECT 1 FROM sqlite_master WHERE name='astra_claims'").fetchone(),
+                        "initialize existing consumer table while intake is fenced")
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='graph_owners'").fetchone():
+                    task = canonical([action["subject"]["repository"], action["subject"]["task_id"]])
+                    require(db.execute("SELECT 1 FROM graph_owners WHERE task=?", (task,)).fetchone() is None,
+                            "existing graph writer ownership blocks diagnostic")
+            if (effective_kind in EXECUTION_KINDS and
+                db.execute("SELECT 1 FROM sqlite_master WHERE name='astra_claims'").fetchone()):
+                task_key = canonical([action["subject"]["repository"], action["subject"]["task_id"]])
+                for row in db.execute("SELECT * FROM astra_claims WHERE task_key=? AND state='CLAIMED'", (task_key,)):
+                    if "DIAGNOSTIC" in {effective_kind, decode(row["body"])["kind"]}:
+                        require(row["request"] == action.get("action_request_id", action["request_id"]),
+                                "unresolved task consumer blocks diagnostic/operational replacement")
+            for row in db.execute("SELECT * FROM outbox WHERE valid=1 OR state IN ('SUBMITTING','UNKNOWN')"):
+                prior = decode(row["body"])
+                prior_kind = prior.get("action_kind", prior["kind"])
+                if ("DIAGNOSTIC" not in {effective_kind, prior_kind} or
+                    effective_kind not in EXECUTION_KINDS or prior_kind not in EXECUTION_KINDS or
+                    any(prior["subject"][k] != action["subject"][k] for k in ("repository", "task_id"))):
+                    continue
+                prior_id = prior.get("action_request_id", prior["request_id"])
+                this_id = action.get("action_request_id", action["request_id"])
+                if prior_id == this_id:
+                    continue
+                reconciled = db.execute("SELECT state FROM astra_claims WHERE request=?", (prior_id,)).fetchone()
+                require(reconciled is not None and reconciled["state"] == "RECONCILED" and
+                        row["state"] not in {"SUBMITTING", "UNKNOWN"}, "unresolved diagnostic/task delivery")
             # An ambiguous old-scope request is not erased by HEAD/designation change.
             for row in db.execute("SELECT body FROM outbox WHERE state IN ('SUBMITTING','UNKNOWN')"):
                 previous = decode(row["body"])
@@ -378,7 +490,7 @@ class Store:
             require(row is not None and row["valid"] == 1 and row["state"] == "CONFIRMED",
                     "request not currently confirmed; reconcile delivery first")
             action = decode(row["body"])
-            require(action.get("kind") in {"AUDIT", "DECISION"}, "not an Astra request")
+            require(action.get("kind") in {"AUDIT", "DECISION", "DIAGNOSTIC"}, "not an Astra request")
             projection = db.execute("SELECT * FROM outbox WHERE id=?",
                                    (digest(["projection", request_id]),)).fetchone()
             require(projection is not None and projection["valid"] == 1 and
@@ -394,6 +506,9 @@ class Store:
         require(isinstance(actor, str) and actor == action.get("identity"), "wrong consumer identity")
         require(isinstance(session, str) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,160}", session),
                 "invalid consumer session")
+        if action.get("kind") == "DIAGNOSTIC":
+            validate_diagnostic(action)
+            require(session == action["work_session"], "wrong diagnostic conversation")
         key, body = action["request_id"], canonical(action)
         task_key = canonical([action["subject"]["repository"], action["subject"]["task_id"]])
         with self.transaction() as db:
@@ -412,6 +527,16 @@ class Store:
             db.execute("INSERT INTO astra_claims VALUES (?,?,?,?,?,'CLAIMED',NULL)",
                        (key, task_key, body, actor, session))
             return {"request_id": key, "start_allowed": True, "state": "CLAIMED"}
+
+    def diagnostic_claim(self, action):
+        """Read the existing authenticated claim; never acquire, expire or release it."""
+        validate_diagnostic(action)
+        with self.transaction() as db:
+            row = db.execute("SELECT * FROM astra_claims WHERE request=?", (action["request_id"],)).fetchone()
+            require(row is not None and row["state"] == "CLAIMED" and row["body"] == canonical(action) and
+                    row["actor"] == action["identity"] and row["session"] == action["work_session"],
+                    "diagnostic claim missing/reconciled or wrong binding")
+            return dict(row)
 
     def reconcile_astra(self, request_id, actor, session, evidence, *, consumer_fenced=False):
         """Operator-only release of a finished/never-started consumer; grants no PASS."""
@@ -504,4 +629,3 @@ message delivery; it never creates a semantic review/audit result.
         except Exception:
             self.store.end_event(event_id, False)
             raise
-

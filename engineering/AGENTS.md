@@ -380,6 +380,17 @@ exception does not authorize builder fallback. Existing delegated decisions
 retain their exact recorded scope.
 See docs/LOCAL_CODEX.md; disabled source registration is not live acceptance.
 
+Issue #19 also has a User-authorized DIAGNOSTIC-only bootstrap: one pinned
+document/question, source SHA/revision, consumer and dedicated Work conversation.
+It uses the existing claim authority and ledger, with separately scoped expiring
+transport authentication. Its authenticated consumer observation is recorded only
+as DIAGNOSTIC_RESULT, never a provider-signed model identity, audit PASS, User
+decision or operational live acceptance. It grants no builder, resume, merge or
+runtime/intake authority. Operational live-acceptance gates remain unchanged.
+No timeout, credential expiry or diagnostic result automatically releases a claim;
+UNKNOWN and duplicate fences persist. Source review is not permission to use the
+new path live; its deployment and exact request still require explicit qualification.
+
 Keep existing repository-specific review and safety gates. Measure validated
 task throughput, per-builder cost, Astra usage, Grok usage, User interventions,
 review findings and rework separately; do not claim savings without observations.
