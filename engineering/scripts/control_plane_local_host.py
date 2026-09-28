@@ -393,6 +393,8 @@ class Host:
         require(pair in [{"model": "gpt-5.6-sol", "effort": "max"},
                          {"model": "gpt-5.6-sol", "effort": "xhigh"}] and
                 pair in config.get("supported_coordinators", []), "unverified coordinator model/effort")
+        require(pair["effort"] == "max" or {"model": "gpt-5.6-sol", "effort": "max"} not in
+                config["supported_coordinators"], "use supported primary before selecting the alternative")
         require(isinstance(target, dict) and set(target) == {"app", "account", "session", "model", "effort"} and
                 all(isinstance(v, str) and 0 < len(v.strip()) <= 500 for v in target.values()),
                 "exact app/account/session/model/effort required")

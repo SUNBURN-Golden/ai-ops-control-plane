@@ -139,6 +139,17 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(policy["enabled"])
         self.assertEqual(policy["desktop"], {})
 
+    def test_alternative_only_when_primary_not_supported(self):
+        self.configure()
+        config = self.policy["desktop"]["WORK"]
+        fallback = dict(model="gpt-5.6-sol", effort="xhigh")
+        config["coordinator"] = fallback
+        config["supported_coordinators"].append(fallback)
+        with self.assertRaises(Exception): self.host.prepare_ui()
+        self.assertFalse(self.api.refs)
+        config["supported_coordinators"] = [fallback]
+        self.assertEqual(self.host.prepare_ui()["state"], "UI_READY")
+
     def test_builder_and_read_only_review_screen_routes(self):
         self.configure()
         self.assignment["operations"] = ["BUILDER", "REVIEW"]
