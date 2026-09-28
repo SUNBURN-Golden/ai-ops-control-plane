@@ -4,12 +4,6 @@ Slack carries requests and notifications. GitHub records the authoritative task,
 decision, exact SHA and audit. Grok Bot is not required to ask Astra or relay its
 answer. No shared browser session, raw Slack firehose or standing LLM routine.
 
-CP-LOCAL-001 adds an optional local Codex recipient transport after the same
-central claim. User explicitly authorized a dedicated cloud Work browser route;
-it does not share Grok's personal browser or invent a Slack callback. The client
-and remaining Mac qualification gates are in [LOCAL_CODEX.md](LOCAL_CODEX.md).
-No browser response replaces authenticated GitHub result ingestion.
-
 ## Implemented sender
 
 1. Mechanical flow reads current GitHub gates. Ordinary A1/A2 review does not wake

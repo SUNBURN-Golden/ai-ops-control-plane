@@ -31,7 +31,6 @@ pointers.
 | USER | Final authority: product scope, consequential architecture choice, risk acceptance, merge | Be silently substituted by an agent |
 | ASTRA | Principal Architect / Design Authority; architecture exceptions; explicitly required milestone, architecture and release audits | Become the routine ticket manager or default A1/A2 reviewer; implement audit fixes; audit a change it authored or modified |
 | GROK | Optional human-facing command relay to the mechanical control plane | Engineer, architect, reviewer, semantic router, event bus, polling daemon |
-| CODEX_COORDINATOR | User's local command/receipt relay; qualified browser transport to cloud Work Astra mid | Act as Astra/User, grant audit PASS from browser text, launch a second writer, silently change host or model |
 | BUILDER | One configured autonomous writer: DEVIN, GROK_BUILD, GLM or CURSOR; investigate → implement → test/debug → PR/evidence | Change approved architecture silently; write outside the assigned task/worktree; merge |
 | REVIEWER | Configured non-author read-only reviewer; may be a different builder lane or User-designated external lane | Modify the reviewed change or become a second writer |
 | CHEAP_WORKER | Explicitly authorized mechanical work | Become a second writer on a substantive task |
@@ -365,23 +364,9 @@ instruction authorizes engineering Astra consultation; unrelated root-domain
 approval rules remain in force. Slack delivery is not an audit or User decision.
 See docs/ASTRA_SLACK.md for consumer identity, duplicate protection and setup.
 
-Under CP-LOCAL-001, User authorizes local macOS Codex to deliver an existing
-claimed request to a dedicated cloud Work Astra mid conversation and collect
-its result pointer. This is a qualified transport exception, not a new authority
-or shared personal browser. Central consumer serialization remains mandatory.
-No recurring LLM session, automatic resend, unconfigured model fallback or
-browser-derived approval. User authorized gpt-5.6-sol/max with one alternative:
-gpt-5.6-sol/xhigh (Extra high), selected only before claim if max is unsupported
-and xhigh is supported in the qualified model catalog. Missing/hidden models or
-malformed/ambiguous catalog entries block; neither pair permits another model.
-Persist the selected pair with the request; never switch or resend after
-claim/send failure or uncertainty. This
-exception does not authorize builder fallback. Existing delegated decisions
-retain their exact recorded scope.
-See docs/LOCAL_CODEX.md; disabled source registration is not live acceptance.
-
 Keep existing repository-specific review and safety gates. Measure validated
 task throughput, per-builder cost, Astra usage, Grok usage, User interventions,
 review findings and rework separately; do not claim savings without observations.
 
 ---
+

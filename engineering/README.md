@@ -21,7 +21,6 @@ Project task/CI inputs are in projects/. Approved contracts remain in products.
 
 Engineering governance: AGENTS.md. Task shape: TASKS/TEMPLATE.md. Procedure: RUNBOOKS/DISPATCH.md.
 Builder setup: docs/BUILDER_LANES.md. Direct Astra requests: docs/ASTRA_SLACK.md.
-Local macOS coordinator and cloud Work Astra transport: docs/LOCAL_CODEX.md (disabled candidate).
 Grok is optional relay; mechanical code dispatches and builders own test/fix/retest.
 One task has one writer. Independent review is read-only. User authorizes merge.
 
