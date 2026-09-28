@@ -1,10 +1,36 @@
 name: Engineering source CI
 on:
   pull_request:
-    paths: ['engineering/**', 'tools/**', 'tests/**', '.github/workflows/*.yml']
+    paths:
+      - 'engineering/**'
+      - 'tools/**'
+      - 'tests/**'
+      - '.github/workflows/*.yml'
+      - 'bots/**'
+      - 'routines/**'
+      - 'schemas/**'
+      - 'workflows/**'
+      - 'knowledge/**'
+      - 'skills/**'
+      - 'docs/**'
+      - 'audits/**'
+      - '*.md'
   push:
     branches: [main, ops/cp-extract-001]
-    paths: ['engineering/**', 'tools/**', 'tests/**', '.github/workflows/*.yml']
+    paths:
+      - 'engineering/**'
+      - 'tools/**'
+      - 'tests/**'
+      - '.github/workflows/*.yml'
+      - 'bots/**'
+      - 'routines/**'
+      - 'schemas/**'
+      - 'workflows/**'
+      - 'knowledge/**'
+      - 'skills/**'
+      - 'docs/**'
+      - 'audits/**'
+      - '*.md'
 permissions:
   contents: read
 jobs:
@@ -18,8 +44,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: python3 -m pip install --disable-pip-version-check pyyaml==6.0.2
       - run: python3 -m unittest discover -s tests -v
       - run: python3 -m unittest discover -s engineering/scripts -p 'test_control_plane*.py'
       - run: bash -n engineering/scripts/control_plane_boundary_hook.sh && bash -n engineering/scripts/control_plane_boundary_probe.sh
-      - run: python3 engineering/scripts/control_plane.py validate-repo
-
+      - name: Validate every central target profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in $(python3 -c 'import json; print(" ".join(json.load(open("engineering/.github/control-plane/projects.json"))))'); do
+            ASTRA_TARGET_REPOSITORY="$target" python3 engineering/scripts/control_plane.py validate-repo
+          done
