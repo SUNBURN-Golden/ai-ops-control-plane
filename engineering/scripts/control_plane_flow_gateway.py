@@ -80,8 +80,9 @@ def diagnostic_config(policy):
     config = policy.get("diagnostic", {})
     flow.require(config.get("enabled") is True and config.get("source_review") == "PASS" and
                  flow.github_pointer(config.get("source_review_pointer")), "diagnostic source/scope not approved")
-    flow.require(type(config.get("credential_expires_at")) is int and
-                 time.time() < config["credential_expires_at"], "diagnostic credential expired/unconfigured")
+    expiry = "authorization_expires_at" if policy.get("authority_mode") == "INDEPENDENT_HOST" else "credential_expires_at"
+    flow.require(type(config.get(expiry)) is int and
+                 time.time() < config[expiry], "diagnostic authorization/credential expired/unconfigured")
     flow.validate_diagnostic(config.get("request"))
     return config
 
@@ -99,37 +100,39 @@ PASS text. Shared author/reviewer GitHub identities are conservatively rejected.
 
     def diagnostic_current(self, action):
         config = diagnostic_config(self.policy)
+        issue_number = flow.diagnostic_issue(action)
         flow.require(action == config["request"], "diagnostic request not authorized")
         authority, comment = self.bound_comment(flow.DIAGNOSTIC_REPO, config["authorization"],
                                                 "<!-- ASTRA_DIAGNOSTIC_AUTHORIZATION_V1 -->")
         flow.require(authority == dict(active=True, request=action,
                                       source_review_pointer=config["source_review_pointer"]) and
                      comment.get("html_url") == action["designation"] and
-                     comment.get("issue_url") == f"https://api.github.com/repos/{flow.DIAGNOSTIC_REPO}/issues/19",
+                     comment.get("issue_url") == f"https://api.github.com/repos/{flow.DIAGNOSTIC_REPO}/issues/{issue_number}",
                      "diagnostic authorization revoked or wrong issue")
-        issue = self.api.call("GET", f"repos/{flow.DIAGNOSTIC_REPO}/issues/19")
+        issue = self.api.call("GET", f"repos/{flow.DIAGNOSTIC_REPO}/issues/{issue_number}")
         main = self.api.call("GET", f"repos/{flow.DIAGNOSTIC_REPO}/git/ref/heads/main")
         flow.require(issue.get("state") == "open" and main.get("object", {}).get("sha") == action["subject"]["head"],
                      "diagnostic source SHA stale or issue closed")
         return True
 
     def diagnostic_publish(self, action, marker):
-        """Only Issue 19 comments. Never PR reviews, dispatches or approval records."""
+        """Only the pinned diagnostic issue. No reviews, dispatches or approvals."""
         body = marker + "\n" + flow.canonical(action)
-        comment = self.api.call("POST", f"repos/{flow.DIAGNOSTIC_REPO}/issues/19/comments", {"body": body})
+        issue_number = flow.diagnostic_issue(action)
+        comment = self.api.call("POST", f"repos/{flow.DIAGNOSTIC_REPO}/issues/{issue_number}/comments", {"body": body})
         actor = self.policy.get("projection_actor")
         flow.require(isinstance(actor, str) and actor not in {"", "CONFIG_REQUIRED"} and
                      comment.get("user", {}).get("login") == actor and comment.get("body") == body and
-                     comment.get("issue_url") == f"https://api.github.com/repos/{flow.DIAGNOSTIC_REPO}/issues/19" and
+                     comment.get("issue_url") == f"https://api.github.com/repos/{flow.DIAGNOSTIC_REPO}/issues/{issue_number}" and
                      isinstance(comment.get("html_url"), str) and re.fullmatch(
-                         re.escape(flow.DIAGNOSTIC_ISSUE) + r"#issuecomment-[1-9][0-9]*", comment["html_url"]),
+                         re.escape(f"https://github.com/{flow.DIAGNOSTIC_REPO}/issues/{issue_number}") + r"#issuecomment-[1-9][0-9]*", comment["html_url"]),
                      "unverified diagnostic GitHub publication receipt")
         return {"accepted": True, "request_id": action["request_id"], "pointer": comment["html_url"]}
 
     def diagnostic_notify(self, action, projection_receipt):
         self.diagnostic_current(action)
         pointer = self.projected_pointer(action, projection_receipt,
-                                        dict(repository=flow.DIAGNOSTIC_REPO, issue=19))
+                                        dict(repository=flow.DIAGNOSTIC_REPO, issue=flow.diagnostic_issue(action)))
         channel = diagnostic_config(self.policy).get("slack_channel")
         flow.require(isinstance(channel, str) and re.fullmatch(r"[CG][A-Z0-9]+", channel),
                      "dedicated diagnostic Slack channel missing")
@@ -475,7 +478,7 @@ can reconcile it; NOT_STARTED rows may be resumed by an explicit event.
             result["action"] = action
         return result
 
-    def prepare_diagnostic(self):
+    def prepare_diagnostic(self, *, local_delivery=False):
         """Operator-only explicit call. Not an HTTP command or consumer privilege."""
         action = diagnostic_config(self.policy)["request"]
         flow.require(len(self.diagnostic_secret) >= 32 and self.diagnostic_secret != self.consumer_secret,
@@ -493,6 +496,10 @@ can reconcile it; NOT_STARTED rows may be resumed by an explicit event.
         projected = flow.diagnostic_outcome(projected)
         if projected["state"] != "CONFIRMED":
             return dict(kind="DIAGNOSTIC", state="PROJECTION_" + projected["state"], grants=[])
+        if local_delivery:
+            flow.require(self.policy.get("authority_mode") == "INDEPENDENT_HOST", "local delivery requires host authority")
+            return flow.diagnostic_outcome(self.store.send_once(
+                action, lambda a: dict(projected["receipt"], request_id=a["request_id"]), current))
         return flow.diagnostic_outcome(self.store.send_once(
             action, lambda a: self.ports.diagnostic_notify(a, projected["receipt"]), current))
 
@@ -511,7 +518,7 @@ can reconcile it; NOT_STARTED rows may be resumed by an explicit event.
         self.ports.diagnostic_current(action)
         delivered, receipt = self.store.delivered_action(action["request_id"])
         flow.require(delivered == action, "diagnostic delivery binding changed")
-        self.ports.projected_pointer(action, receipt, dict(repository=flow.DIAGNOSTIC_REPO, issue=19))
+        self.ports.projected_pointer(action, receipt, dict(repository=flow.DIAGNOSTIC_REPO, issue=flow.diagnostic_issue(action)))
         if path == "/astra/diagnostic/claim":
             flow.require(isinstance(value, dict) and set(value) == {"request_id", "session_id"} and
                          value["request_id"] == action["request_id"] and value["session_id"] == action["work_session"],

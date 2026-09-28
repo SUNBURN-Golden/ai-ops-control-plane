@@ -112,10 +112,15 @@ def validate_policy(p):
     else:
         require(p.get("live_acceptance") == "PASS" and github_url(p.get("evidence_pointer")),
                 "Mac/browser/claim/result round-trip acceptance missing")
-    endpoint = urlsplit(p.get("claim_url", ""))
-    require(endpoint.scheme == "https" and endpoint.hostname and not endpoint.username and
-            not endpoint.password and endpoint.path == ("/astra/diagnostic/claim" if diagnostic else "/astra/claim") and
-            not endpoint.query and not endpoint.fragment, "invalid protected claim endpoint")
+    local = p.get("authority_mode") == "IN_PROCESS_HOST"
+    require(p.get("authority_mode", "HTTP_GATEWAY") in {"HTTP_GATEWAY", "IN_PROCESS_HOST"}, "unknown authority")
+    if local:
+        require(diagnostic and not p.get("claim_url"), "in-process transport is diagnostic-only; no remote endpoint")
+    else:
+        endpoint = urlsplit(p.get("claim_url", ""))
+        require(endpoint.scheme == "https" and endpoint.hostname and not endpoint.username and
+                not endpoint.password and endpoint.path == ("/astra/diagnostic/claim" if diagnostic else "/astra/claim") and
+                not endpoint.query and not endpoint.fragment, "invalid protected claim endpoint")
     cli = Path(p["codex_binary"])
     require(cli.is_absolute() and cli.is_file() and
             hashlib.sha256(cli.read_bytes()).hexdigest() == p.get("codex_sha256"),
@@ -324,13 +329,15 @@ def collect_observation(p, action, observation, secret, db, root, submit_fn):
             receipt.get("live_acceptance") == "UNCHANGED", "diagnostic collection not confirmed")
     pointer = receipt.get("receipt", {}).get("pointer")
     require(isinstance(pointer, str) and re.fullmatch(
-        re.escape(flow.DIAGNOSTIC_ISSUE) + r"#issuecomment-[1-9][0-9]*", pointer), "diagnostic evidence pointer missing")
+        re.escape(action["task_pointer"]) + r"#issuecomment-[1-9][0-9]*", pointer), "diagnostic evidence pointer missing")
     (root / "collector-receipt.json").write_text(canonical(receipt))
     return "DIAGNOSTIC_RECORDED"
 
 
 def deliver(p, request_id, secret, claim_fn=claim, send_fn=run_codex, submit_fn=transport_post):
     validate_policy(p)
+    require(p.get("authority_mode") != "IN_PROCESS_HOST" or (claim_fn is not claim and submit_fn is not transport_post),
+            "installed local controller required")
     selected = validate_model(p)  # choose once, before reservation or external side effects
     p = dict(p, **selected)
     require(len(secret) >= 32, "consumer credential unavailable")
@@ -388,6 +395,7 @@ def deliver(p, request_id, secret, claim_fn=claim, send_fn=run_codex, submit_fn=
 def collect_existing(p, request_id, secret, observe_fn=run_codex, submit_fn=transport_post):
     """Explicit one-shot read of a WAITING answer; no claim or message-send capability."""
     validate_policy(p)
+    require(p.get("authority_mode") != "IN_PROCESS_HOST" or submit_fn is not transport_post, "installed local collector required")
     require(p.get("mode") == "DIAGNOSTIC" and len(secret) >= 32, "diagnostic transport required")
     action = p["diagnostic_request"]
     require(request_id == action["request_id"], "request mismatch")
@@ -434,6 +442,7 @@ def main():
     try:
         policy = json.loads(private(args.policy).read_text())
         validate_policy(policy)
+        require(policy.get("authority_mode") != "IN_PROCESS_HOST", "use control_plane_local_host.py")
         if args.command == "check-config":
             result = {"status": "CONFIG_VALID", "live_test": "NOT_RUN",
                       "selected": validate_model(policy)}

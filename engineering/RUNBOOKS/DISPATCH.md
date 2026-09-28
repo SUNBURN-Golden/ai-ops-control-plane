@@ -18,6 +18,31 @@ This grants target eligibility only; activation/host/lane gates still apply.
 No default target. SOULBOUND is excluded.
 Never infer target, channel, builder or reviewer. Missing configuration blocks.
 
+## 1a. Host selection and shared ownership
+
+Read the pinned HOST_ID / HOST_INSTANCE_ID assignment on the canonical issue.
+Run on that host with its own protected local flow/admission ledger and adapters.
+A fresh Mac task never requires the Grok VM, its HMAC endpoint or its ledger.
+
+The independent-host target set additionally includes `BeautifulMind-JT/kix-commerce-apps`
+for User-authorized Mac development (2026-09-28). This route uses the explicit
+repository/issue/host assignment and qualified local adapters; it does not add a
+legacy projects.json registration or enable a deployed product runtime.
+
+Independent host commands use `control_plane_local_host.py`:
+User assignment -> local durable intent -> GitHub immutable owner / serialized
+one-shot action grant -> one qualified local adapter or Work transport.
+A different host/instance, missing local continuity, unresolved shared action,
+changed assignment or ambiguous GitHub write blocks execution. Never resend.
+New HEAD/revision/action IDs do not clear an older unresolved action.
+Terminal evidence ends an action but retains its owner and duplicate tombstones.
+There is no automatic or currently implemented host-transfer command.
+
+Legacy dispatchers stay limited to their existing registrations. Enrolling new
+independent-host tasks does not activate or expand those registrations. Do not
+feed the same issue to both routes. See docs/INDEPENDENT_HOSTS.md for the actual
+GitHub serialization primitive, credential boundary and local installation.
+
 ## 2. Activation preconditions
 
 Before automation is enabled, the mechanical layer must have:

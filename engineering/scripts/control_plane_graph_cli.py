@@ -161,6 +161,8 @@ class GithubGraphPorts:
         return dict(request_id=a['request_id'],accepted=True,pointer=result['html_url'])
 
     def route(self,a):
+        flow.require(self.policy.get('authority_mode') != 'INDEPENDENT_HOST',
+                     'independent-host graph bridge not qualified; use the local-host controller admission')
         # A qualified host adapter enforces host-global admission and per-task isolation.
         # This is not a CLI-help/probe adapter from PR22 and never installs one implicitly.
         config=self.policy['adapters'][a['lane']]

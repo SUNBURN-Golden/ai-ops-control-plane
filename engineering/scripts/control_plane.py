@@ -48,6 +48,8 @@ ALLOWED_LAUNCH_STATES = (
 HOST_COMMAND = ("/usr/bin/sudo", "-n", "-u", "astra-control", "/opt/astra/bin/astra-host-control")
 LAUNCH_IDENTITY = ("repository", "task_id", "task_revision", "builder_id", "launch_request_id", "attempt_id")
 RUNTIME_PATHS = (
+    "scripts/control_plane_ownership.py", "scripts/control_plane_local_host.py",
+    "scripts/test_control_plane_local_host.py", "docs/INDEPENDENT_HOSTS.md",
     "scripts/control_plane_codex_relay.py", "scripts/test_control_plane_codex_relay.py",
     ".github/control-plane/codex-relay.example.json", "docs/LOCAL_CODEX.md",
     "scripts/control_plane_graph_slack.py", "scripts/test_control_plane_graph_slack.py",
