@@ -24,6 +24,11 @@ Read the pinned HOST_ID / HOST_INSTANCE_ID assignment on the canonical issue.
 Run on that host with its own protected local flow/admission ledger and adapters.
 A fresh Mac task never requires the Grok VM, its HMAC endpoint or its ledger.
 
+The independent-host target set additionally includes `BeautifulMind-JT/kix-commerce-apps`
+for User-authorized Mac development (2026-09-28). This route uses the explicit
+repository/issue/host assignment and qualified local adapters; it does not add a
+legacy projects.json registration or enable a deployed product runtime.
+
 Independent host commands use `control_plane_local_host.py`:
 User assignment -> local durable intent -> GitHub immutable owner / serialized
 one-shot action grant -> one qualified local adapter or Work transport.

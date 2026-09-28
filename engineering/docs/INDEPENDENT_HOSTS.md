@@ -6,8 +6,13 @@ Mac Codex runs its own qualified builders and Work browser. The Grok computer
 runs its own builders. Neither is the other's required execution gateway.
 GitHub stores shared source, canonical tasks, assignment, action grants and results.
 Each host owns its own flow/admission databases, workspaces and provider sessions.
-Local admission is limited to the central repository and the four existing product
-repositories: KIX, ZARI, FILM UNIT and maeum-gyeol. SOULBOUND/unknown targets are rejected.
+Local admission permits the central repository, kix-protocol, kix-commerce-apps,
+ZARI, film-unit-mv-studio and maeum-gyeol. SOULBOUND/unknown targets are rejected.
+User added kix-commerce-apps on 2026-09-28 for independent Mac development with
+KIX protocol and ZARI. This does not change legacy projects.json registrations,
+product deployment flags or any existing host. A target entry alone does not
+grant ownership or qualify a provider: exact issue/host assignment, local source
+review, adapter qualification and shared action admission remain mandatory.
 Slack projects status; no Slack message or Issue comment is an atomic lock.
 
 ## Shared task ownership

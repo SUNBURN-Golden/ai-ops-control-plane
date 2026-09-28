@@ -212,6 +212,23 @@ class IndependentHostTests(unittest.TestCase):
         self.assertFalse(again["start_allowed"])
         self.assertEqual(self.sends, 1)
 
+    def test_commerce_assignment_accepted_without_legacy_vm_registration(self):
+        repo="BeautifulMind-JT/kix-commerce-apps"
+        self.assignment.update(repository=repo, pointer=f"https://github.com/{repo}/issues/19#issuecomment-8")
+        self.assignment_body="<!-- ASTRA_HOST_ASSIGNMENT_V1 -->\n"+local.flow.canonical(self.assignment)
+        self.binding.update(repository=repo,sha256=hashlib.sha256(self.assignment_body.encode()).hexdigest())
+        original=self.api.fallback
+        def api(method,path,body=None,**kwargs):
+            value=original(method,path,body,**kwargs)
+            if path.endswith("issues/comments/8"):
+                value["issue_url"]=f"https://api.github.com/repos/{repo}/issues/19"
+                value["html_url"]=self.assignment["pointer"]
+            return value
+        self.api.fallback=api
+        self.assertEqual(self.host.assignment()["repository"],repo)
+        self.assertEqual(self.api.refs,{})
+        self.assertFalse(any("projects.json" in path for _,path in self.api.calls))
+
     def test_soulbound_and_unknown_targets_rejected_before_shared_mutation(self):
         for repo in ("BeautifulMind-JT/beautiful-mind", "BeautifulMind-JT/unassigned"):
             self.binding["repository"]=repo

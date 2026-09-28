@@ -35,6 +35,7 @@ FILES = ("control_plane_local_host.py", "control_plane_ownership.py", "control_p
          "control_plane_flow_gateway.py", "control_plane_codex_relay.py")
 LANES = {"DEVIN", "GROK_BUILD", "CURSOR", "GLM"}
 TARGETS = {"BeautifulMind-JT/ai-ops-control-plane", "BeautifulMind-JT/kix-protocol",
+           "BeautifulMind-JT/kix-commerce-apps",
            "BeautifulMind-JT/ZARI", "BeautifulMind-JT/film-unit-mv-studio", "BeautifulMind-JT/maeum-gyeol"}
 
 
