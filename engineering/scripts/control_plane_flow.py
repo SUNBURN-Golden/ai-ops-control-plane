@@ -530,6 +530,7 @@ class Store:
                 require(previous["body"] == body and previous["actor"] == actor,
                         "consumer request identity collision")
                 return {"request_id": key, "start_allowed": False, "state": previous["state"]}
+            self.diagnostic_fence(db, action)  # a pre-fix delivered row is not a new-start exemption
             require(db.execute("SELECT 1 FROM astra_claims WHERE task_key=? AND state='CLAIMED'",
                                (task_key,)).fetchone() is None,
                     "previous task consumer unresolved; fence/reconcile before replacement")

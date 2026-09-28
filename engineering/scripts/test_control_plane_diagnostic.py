@@ -362,6 +362,25 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT state FROM outbox WHERE id=?',
                              (ordinary['request_id'],)).fetchone()[0], 'NOT_STARTED')
 
+    def test_existing_delivered_request_cannot_claim_through_uncertain_result_fence(self):
+        self.prepare(); self.claim()
+        self.request('/astra/diagnostic/result', self.answer())
+        self.store.reconcile_astra(self.action['request_id'], self.action['identity'],
+            self.action['work_session'], self.comments[102]['html_url'], consumer_fenced=True)
+        replacement = flow.diagnostic_request('diag-r2', 'b'*40, self.action['identity'],
+            'https://chatgpt.com/c/other', self.action['designation'])
+        self.store.send_once(replacement,
+            lambda a: dict(accepted=True, request_id=a['request_id']), lambda _: True)
+        # Model a previously delivered row retained across an upgrade, not a live edit.
+        with self.store.transaction() as db:
+            db.execute("UPDATE outbox SET state='UNKNOWN' WHERE id=?",
+                       (flow.digest(['diagnostic-result', self.action['request_id']]),))
+        with self.assertRaises(flow.FlowError):
+            self.store.claim_astra(replacement, replacement['identity'], replacement['work_session'])
+        with self.store.transaction() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM astra_claims WHERE request=?',
+                              (replacement['request_id'],)).fetchone())
+
     def test_result_reservation_and_submitting_marker_each_fence_reconciliation(self):
         self.prepare(); self.claim()
         result = flow.diagnostic_result(self.action, self.answer())
