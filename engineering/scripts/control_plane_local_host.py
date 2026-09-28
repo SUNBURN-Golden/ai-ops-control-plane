@@ -90,7 +90,8 @@ def initialize(root, host_id):
     policy = dict(schema_version=1, authority_mode="INDEPENDENT_HOST", **identity,
                   root=str(root), enabled=False, source_review="PENDING", source_review_pointer=None,
                   source_sha256=pins, user_actors=[], projection_actor=None,
-                  assignment_binding=None, diagnostic=None, relay=None, adapters={})
+                  assignment_binding=None, diagnostic=None, relay=None, adapters={}, desktop={},
+                  execution_transport="APP_SCREEN" if sys.platform == "darwin" else "CLI_ADAPTER")
     exclusive(root / "policy.json", flow.canonical(policy))
     return dict(state="LOCAL_PARTITION_CREATED_DISABLED", host_id=host_id,
                 instance_id=identity["instance_id"], policy=str(root / "policy.json"),
@@ -245,6 +246,9 @@ class Host:
         return claim, submit
 
     def work(self, *, collect=False, send_fn=relay.run_codex):
+        if self.policy.get("execution_transport") == "APP_SCREEN":
+            require(not collect, "use collect-ui with an observation from the existing conversation")
+            return self.prepare_ui()
         app, action = self.diagnostic_app()
         request_id = action["request_id"]
         policy = dict(self.policy["relay"], mode="DIAGNOSTIC", authority_mode="IN_PROCESS_HOST",
@@ -286,6 +290,8 @@ class Host:
 
     def run_adapter(self, binding):
         """Run one qualified local adapter, not the legacy VM's host helper."""
+        if self.policy.get("execution_transport") == "APP_SCREEN":
+            return self.prepare_ui(binding)
         authorized, _ = self.record(binding, "<!-- ASTRA_HOST_ACTION_V1 -->")
         assignment = self.assignment()
         packet = authorized["packet"]
@@ -334,6 +340,163 @@ class Host:
             self.state(action_id, "UNKNOWN", None)
             raise
 
+    def ui_current(self, packet, operation):
+        """Recheck canonical source immediately before admitting a screen effect."""
+        self.shared(self.assignment())
+        if operation == "WORK_DIAGNOSTIC":
+            app, action = self.diagnostic_app()
+            require(action == packet, "diagnostic changed")
+            app.ports.diagnostic_current(action)
+            self.store.diagnostic_claim(action)
+        elif operation == "REVIEW":
+            pr = self.api.call("GET", f"repos/{packet['repository']}/pulls/{packet['pr']}")
+            require(pr.get("state") == "open" and pr.get("head", {}).get("sha") == packet["head"],
+                    "stale review HEAD")
+        else:
+            main = self.api.call("GET", f"repos/{packet['repository']}/git/ref/heads/main")
+            require(main.get("object", {}).get("sha") == packet["head"], "stale implementation base")
+
+    def prepare_ui(self, binding=None):
+        """Prepare a desktop-tool envelope; never invoke a CLI or send to an app."""
+        assignment = self.assignment()
+        if binding is None:
+            app, packet = self.diagnostic_app()
+            operation, lane = "WORK_DIAGNOSTIC", "WORK"
+            action_id = packet["request_id"]
+            config = self.policy.get("desktop", {}).get(lane, {})
+            target = config.get("target", {})
+            require(target.get("session") == packet["work_session"] and
+                    target.get("model") == "GPT-6 Astra" and target.get("effort") == "medium",
+                    "dedicated Work target required")
+        else:
+            authorized, _ = self.record(binding, "<!-- ASTRA_HOST_ACTION_V1 -->")
+            packet = authorized["packet"]
+            operation, lane = packet["operation"], packet["builder_id"]
+            require(binding["repository"] == assignment["repository"] and binding["issue"] == assignment["issue"] and
+                    lane in LANES and operation in {"BUILDER", "REVIEW"} and all(
+                        packet.get(k) == assignment[k] for k in
+                        ("repository", "issue", "task_id", "host_id", "instance_id")), "desktop assignment mismatch")
+            require(operation != "REVIEW" or (packet.get("read_only") is True and
+                    type(packet.get("pr")) is int and packet["pr"] > 0), "read-only review PR required")
+            require(isinstance(packet.get("revision"), str) and packet["revision"] and
+                    re.fullmatch(r"[a-f0-9]{40}", packet.get("head", "")), "revision/HEAD required")
+            config = self.policy.get("desktop", {}).get(lane, {})
+            target = packet.get("ui_target", {})
+            require(target == config.get("target"), "authorized app target mismatch")
+            action_id = ownership.digest(packet)
+        require(config.get("execution_mode") == "APP_SCREEN" and
+                config.get("host_id") == self.policy["host_id"] and
+                config.get("instance_id") == self.policy["instance_id"] and
+                operation in config.get("operations", []) and
+                flow.github_pointer(config.get("isolation_evidence")), "desktop isolation/identity not qualified")
+        pair = config.get("coordinator")
+        require(pair in [{"model": "gpt-5.6-sol", "effort": "max"},
+                         {"model": "gpt-5.6-sol", "effort": "xhigh"}] and
+                pair in config.get("supported_coordinators", []), "unverified coordinator model/effort")
+        require(isinstance(target, dict) and set(target) == {"app", "account", "session", "model", "effort"} and
+                all(isinstance(v, str) and 0 < len(v.strip()) <= 500 for v in target.values()),
+                "exact app/account/session/model/effort required")
+        # This is an observation protocol, not provider attestation or a sandbox.
+        # A read-only reviewer needs independently enforced workspace/tool rights.
+        require(operation != "REVIEW" or config.get("read_only_enforced") is True,
+                "review isolation must be enforced, not just requested in a prompt")
+        grant = self.begin(action_id, operation, packet)
+        if not grant["start_allowed"]:
+            return dict(grant, send_allowed=False)
+        try:
+            if operation == "WORK_DIAGNOSTIC":
+                require(app.prepare_diagnostic(local_delivery=True)["state"] == "CONFIRMED",
+                        "diagnostic projection unresolved")
+                claim, _ = self.diagnostic_ports(app, packet)
+                require(claim(None, action_id, packet["work_session"], None)["start_allowed"],
+                        "diagnostic already claimed")
+            self.ui_current(packet, operation)
+            workspace = self.root / "workspaces" / action_id
+            workspace.mkdir(mode=0o700)
+            context = dict(transport="APP_SCREEN", target=dict(target, workspace=str(workspace)),
+                           binding=binding, configuration=config)
+            self.state(action_id, "UI_READY", context)
+            return dict(state="UI_READY", action_id=action_id, send_allowed=False,
+                        target=context["target"], packet=packet)
+        except BaseException:
+            self.state(action_id, "UNKNOWN", None)
+            raise
+
+    def ui_row(self, action_id):
+        with self.store.transaction() as db:
+            row = db.execute("SELECT * FROM host_actions WHERE id=? AND active=1", (action_id,)).fetchone()
+        require(row is not None, "active desktop action missing")
+        context = flow.decode(row["receipt"])
+        require(isinstance(context, dict) and context.get("transport") == "APP_SCREEN",
+                "not a desktop action; reconcile existing state")
+        require(row["assignment"] == flow.canonical(self.assignment()), "assignment changed")
+        packet = flow.decode(row["payload"])
+        lane = "WORK" if row["operation"] == "WORK_DIAGNOSTIC" else packet["builder_id"]
+        require(context["configuration"] == self.policy.get("desktop", {}).get(lane), "desktop policy changed")
+        if context["binding"] is not None:
+            authorized, _ = self.record(context["binding"], "<!-- ASTRA_HOST_ACTION_V1 -->")
+            require(authorized["packet"] == packet, "action authorization changed")
+        return row, context, packet
+
+    def send_ui(self, observation):
+        """Consume the one send permit BEFORE the desktop coordinator types/clicks.
+
+        A lost return/crash consumes the permit too. Never reconstruct a permit
+        from SQLite, shell output history, a timeout or a provider error.
+        """
+        action_id = observation["action_id"]
+        row, context, packet = self.ui_row(action_id)
+        require(observation.get("target") == context["target"] and observation.get("input_ready") is True,
+                "fresh visible target/input verification required")
+        self.ui_current(packet, row["operation"])
+        with self.store.transaction() as db:
+            updated = db.execute("UPDATE host_actions SET state='UNKNOWN' WHERE id=? AND active=1 AND state='UI_READY'",
+                                 (action_id,)).rowcount
+            require(updated == 1, "permit already consumed; inspect existing session only")
+        return dict(state="SUBMITTING", action_id=action_id, send_allowed=True, target=context["target"],
+                    packet=packet, instruction="Use the verified app screen once; never replay this response")
+
+    def collect_ui(self, observation):
+        """Persist an authenticated coordinator observation, never an approval."""
+        action_id = observation["action_id"]
+        row, context, packet = self.ui_row(action_id)
+        require(observation.get("target") == context["target"], "wrong observed app/session/workspace")
+        outcome = observation.get("outcome")
+        require(outcome in {"UNKNOWN", "WAITING", "ANSWER", "SESSION_OBSERVED"}, "invalid screen outcome")
+        if row["operation"] == "WORK_DIAGNOSTIC":
+            require(outcome != "SESSION_OBSERVED", "Work requires a diagnostic answer")
+            if outcome == "ANSWER":
+                flow.diagnostic_result(packet, observation.get("diagnostic_result"))
+        else:
+            require(outcome != "ANSWER", "builder observation cannot issue a diagnostic/audit verdict")
+        self.ui_current(packet, row["operation"])
+        fingerprint = flow.digest(observation)
+        with self.store.transaction() as db:
+            current = db.execute("SELECT state,receipt FROM host_actions WHERE id=? AND active=1", (action_id,)).fetchone()
+            previous = flow.decode(current["receipt"])
+            if current["state"] in {"DIAGNOSTIC_RECORDED", "SESSION_OBSERVED"}:
+                require(previous.get("observation_digest") == fingerprint, "result already recorded")
+                return dict(state=current["state"], action_id=action_id, duplicate=True, grants=[])
+            require(current["state"] in {"UNKNOWN", "WAITING"}, "not an observable desktop action")
+            # Durable intent precedes collection/publication. Crash blocks replay.
+            db.execute("UPDATE host_actions SET state='RESULT_SUBMITTING' WHERE id=?", (action_id,))
+        try:
+            state = outcome
+            if outcome == "ANSWER":
+                app, action = self.diagnostic_app()
+                _, submit = self.diagnostic_ports(app, action)
+                result = submit(None, "result", observation["diagnostic_result"], None)
+                require(result["state"] == "CONFIRMED", "publication unresolved")
+                state = "DIAGNOSTIC_RECORDED"
+            context = dict(context, observation_digest=fingerprint, observation=observation,
+                           provenance="COORDINATOR_SCREEN_OBSERVATION_NOT_PROVIDER_ATTESTATION")
+            self.state(action_id, state, context)
+            return dict(state=state, action_id=action_id, grants=[], live_acceptance="UNCHANGED")
+        except BaseException:
+            # Preserve context; collector's own outbox fences any publication retry.
+            self.state(action_id, "UNKNOWN", context)
+            raise
+
     def finish(self, binding):
         evidence, pointer = self.record(binding, "<!-- ASTRA_HOST_TERMINAL_V1 -->")
         assignment = self.assignment(terminal=True)
@@ -378,11 +541,13 @@ class Host:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("init", "check", "work-diagnostic", "collect-diagnostic", "run-adapter", "finish"))
+    parser.add_argument("command", choices=("init", "check", "work-diagnostic", "collect-diagnostic", "run-adapter", "finish",
+                                            "prepare-ui", "send-ui", "collect-ui"))
     parser.add_argument("--root", type=Path)
     parser.add_argument("--host-id")
     parser.add_argument("--policy", type=Path)
     parser.add_argument("--binding", type=Path)
+    parser.add_argument("--observation", type=Path)
     args = parser.parse_args()
     os.umask(0o077)
     try:
@@ -395,13 +560,19 @@ def main():
             else:
                 api = gateway.Api(os.environ.pop("ASTRA_HOST_GITHUB_TOKEN", ""), os.environ.pop("ASTRA_HOST_SLACK_TOKEN", ""))
                 host = Host(policy, api)
-                if args.command in {"work-diagnostic", "collect-diagnostic"}:
+                if args.command == "prepare-ui":
+                    result = host.prepare_ui(flow.decode(private(args.binding).read_text()) if args.binding else None)
+                elif args.command in {"send-ui", "collect-ui"}:
+                    observation = flow.decode(private(args.observation).read_text())
+                    result = (host.send_ui if args.command == "send-ui" else host.collect_ui)(observation)
+                elif args.command in {"work-diagnostic", "collect-diagnostic"}:
                     result = host.work(collect=args.command == "collect-diagnostic")
                 else:
                     binding = flow.decode(private(args.binding).read_text())
                     result = (host.run_adapter if args.command == "run-adapter" else host.finish)(binding)
         print(flow.canonical(result))
-        return 2 if result.get("state") in {"UNKNOWN", "SUBMITTING", "CLAIMING", "OBSERVING"} else 0
+        return 2 if not result.get("send_allowed") and result.get("state") in {
+            "UNKNOWN", "SUBMITTING", "CLAIMING", "OBSERVING", "RESULT_SUBMITTING"} else 0
     except Exception:
         print(flow.canonical(dict(state="BLOCKED", instruction="inspect protected local state; never replay UNKNOWN")))
         return 2

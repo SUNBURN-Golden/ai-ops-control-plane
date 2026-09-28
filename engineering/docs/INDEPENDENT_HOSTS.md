@@ -81,6 +81,13 @@ administrator resistance or automatic disaster recovery is made.
 
 ## Native install and Work diagnostic
 
+For new Mac installations the default is `execution_transport=APP_SCREEN`:
+Codex operates the actual logged-in app/browser with desktop computer-use tools.
+It does not need to start a second Codex CLI or prove a ZCode headless interface.
+See **Mac app-screen transport** below for the executable protocol. The existing
+CLI transport remains explicit/compatible for older installations and other
+hosts. This does not change Grok Bot, the Grok computer, or any existing policy.
+
 Run as the dedicated local controller account. A private user-owned installation
 is supported; root, sudo, a listening server and the old VM are not required.
 Do not share this account's control credentials with untrusted model processes.
@@ -101,7 +108,7 @@ silently repaired. Inspect existing local sessions before qualifying this host;
 new partition creation is not proof that other manually launched local writers
 have stopped. `max_active_sessions=1` applies inside this controller.
 
-Fill the private policy with actual values:
+For the existing CLI transport, fill the private policy with actual values:
 - `enabled`, source-review PASS/evidence, `user_actors`, projection actor;
 - `assignment_binding`: repository, issue, comment_id, actor, SHA256;
 - `diagnostic`: enabled, source-review evidence, explicit request authorization,
@@ -146,7 +153,9 @@ test/debug/retest and PR creation without per-step approval.
 Each DEVIN/GROK_BUILD/CURSOR/GLM adapter must be independently qualified on this
 host/instance, exact executable hash, allowed operations and durable execution
 mode. Version/doctor tests do not qualify it. CURSOR is a harness; specify its
-actual model. GLM via ZCode needs a supported headless interface, not GUI presence.
+actual model. A CLI-mode GLM adapter needs a supported headless interface;
+Mac APP_SCREEN uses the actual ZCode screen instead. GUI presence alone still
+does not prove a completed request or credential/workspace isolation.
 No automatic provider fallback or subscription purchase. Reviewers are read-only
 and non-author; existing review/A3/merge gates remain in force.
 
@@ -162,6 +171,100 @@ publication_resolved. Work publication and local consumer fences are checked too
 Only then does it free the local slot and mark the shared action terminal.
 No owner-transfer command is implemented; legacy handoff remains blocked until a
 separately reviewed fenced transfer is supplied. This does not block fresh Mac work.
+
+## Mac app-screen transport
+
+This is a split-phase desktop coordinator protocol, not a Python GUI driver or
+an unattended daemon. The installed controller validates ownership and state;
+Codex's computer-use tools read/type/click the actual selected app. There is no
+shell/AppleScript UI bypass and no hidden CLI/model fallback. Logged-in app
+subscriptions are used without copying their credentials. Grok Bot is not a
+builder or browser driver and is not changed by this route.
+
+New Mac `init` policies remain **disabled** with empty `desktop` registrations.
+Existing installs are never migrated or activated implicitly. After reviewed
+source installation, explicit APP_SCREEN configuration names `desktop.WORK`
+or a builder lane (`DEVIN`, `GROK_BUILD`, `CURSOR`, `GLM`). Each registration has:
+
+- `execution_mode: APP_SCREEN`, exact `host_id` / `instance_id`, `operations`;
+- `target`: exactly `app`, `account` (non-secret account label), `session`
+  (stable conversation/session locator), `model` and `effort`;
+- `isolation_evidence`: GitHub pointer to verified controller-credential and
+  task-workspace isolation; reviewers also require `read_only_enforced: true`;
+- `coordinator`: `{model: gpt-5.6-sol, effort: max}`, or the approved `xhigh`
+  alternative chosen **before claim**; `supported_coordinators` records pairs
+  actually observed in the dedicated coordinator environment's model list.
+
+These are protected operator configuration assertions, not cryptographic proof
+or a sandbox implementation. An app that has unrestricted access to controller
+credentials is not qualified merely because it is logged in. A review prompt
+saying "read-only" does not enforce read-only rights. No privileged settings,
+Docker-socket exposure or sandbox removal is authorized to satisfy these fields.
+Do not invent evidence, supported models, sessions or account labels.
+
+WORK target `session` must be the diagnostic's dedicated Work URL, with displayed
+`GPT-6 Astra` / `medium`. Internal model ID remains unverified/null. Builder action
+authorization additionally contains `ui_target` equal to that lane's target.
+CURSOR retains CURSOR identity even when its selected model is Grok; never call
+it native GROK_BUILD. Reviewer sessions must not have participated in writing.
+
+The existing assignment, diagnostic authorization, source-review and protected
+GitHub credential requirements still apply. No CLI binary/hash/catalog, HTTP
+gateway, VM, HMAC credential or Slack delivery is required for APP_SCREEN.
+General intake, graph activation, product permissions and merge gates do not
+change. Do not enable them to test this transport.
+
+One invocation at each step; no polling or standing model session:
+
+1. Inspect the actual app/account/model and existing sessions. Select a dedicated
+   session without submitting the job. Prepare its exact binding and isolation.
+2. Run `prepare-ui --policy <private-policy>` for Work, or add
+   `--binding <private-action-binding>` for a builder/reviewer. The ordinary
+   `work-diagnostic` / `run-adapter` entrypoints also return this preparation when
+   APP_SCREEN is selected. Preparation reserves existing local/shared admission,
+   projects/claims Work when applicable, and creates a unique empty task directory.
+   It returns `UI_READY`, the authorized packet and target including `workspace`.
+   **This is not permission to send.** Provision/check the task checkout and
+   enforced reviewer rights within that directory; never reuse another workspace.
+3. Read the actual app again using desktop tools. Verify app, account, exact
+   existing session, model/effort, task workspace and available input. Save a
+   private observation containing `action_id`, the exact returned `target`, and
+   `input_ready: true`. Do not synthesize this from configuration without reading
+   the screen. Run `send-ui --policy ... --observation <private-observation>`.
+4. Only a **newly returned** `send_allowed: true` permits entering/submitting the
+   exact packet once with desktop tools. The controller has already committed
+   UNKNOWN before returning this one-shot permit. Verify the target is unchanged
+   immediately before typing; if focus/navigation changed, stop and reconcile,
+   not retry. Do not expose private policy, auth material or control paths to the
+   app; only the job packet and isolated workspace are app-facing.
+5. Read the same session. Run `collect-ui --policy ... --observation ...` with
+   `action_id`, identical `target`, and `outcome`: UNKNOWN (ambiguous), WAITING
+   (visible in-progress request), SESSION_OBSERVED (builder/reviewer), or ANSWER
+   (Work only, plus the existing `diagnostic_result` schema). Session/request
+   visibility and the exact submitted packet must be checked by the coordinator;
+   the Python layer cannot authenticate a screenshot or identify what was typed.
+   Capture result pointers in the canonical GitHub task. Work publication uses
+   the existing authenticated collector and durable outbox, not copied text
+   posted as a fabricated success receipt.
+6. WAITING permits a later bounded read of the same session, not another send.
+   UNKNOWN permits evidence-based observation of the existing session, never
+   resend/new ID/model replacement. A crash during RESULT_SUBMITTING requires
+   separate reconciliation; do not replay collection based on elapsed time.
+   Existing `finish` with exact sender/session/publication fence evidence is
+   still required; collecting an answer never releases ownership automatically.
+
+The one-shot guarantee covers controller-issued permits for cooperative desktop
+coordinators, not arbitrary replay of a previously printed permit or manual app
+use outside this protocol. Lost command output consumes its permit. Persisted
+policy/authorization bindings cannot be swapped after preparation. Concurrent
+send requests get at most one permit; successful result replay is idempotent and
+changed results are rejected. Browser observations grant no audit PASS, User
+decision, builder authority, merge or live-acceptance promotion.
+
+Source tests exercise this protocol with fake UI observations and GitHub. They
+do not establish that the actual apps were driven, read-only isolation exists,
+or a live Work roundtrip passed. A3 architecture review and per-host qualification
+remain separate gates before live use.
 
 ## Graph and deployment status
 

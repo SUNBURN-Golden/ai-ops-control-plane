@@ -194,7 +194,8 @@ class IndependentHostTests(unittest.TestCase):
         self.binding = dict(repository=own.REPOSITORY, issue=19, comment_id=8, actor="user",
                             sha256=hashlib.sha256(self.assignment_body.encode()).hexdigest())
         self.policy.update(enabled=True, source_review="PASS", source_review_pointer=self.fixture.review,
-                           user_actors=["user"], projection_actor="mechanical", assignment_binding=self.binding)
+                           user_actors=["user"], projection_actor="mechanical", assignment_binding=self.binding,
+                           execution_transport="CLI_ADAPTER")
         self.policy["diagnostic"] = copy.deepcopy(self.fixture.policy["diagnostic"])
         self.policy["diagnostic"]["authorization_expires_at"] = int(time.time()) + 3600
         self.policy["relay"] = dict(self.fixture.relay_policy, authority_mode="IN_PROCESS_HOST", claim_url=None, state_directory=str(self.root/"relay"),
