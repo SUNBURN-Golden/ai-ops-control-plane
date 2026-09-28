@@ -6,6 +6,8 @@ Mac Codex runs its own qualified builders and Work browser. The Grok computer
 runs its own builders. Neither is the other's required execution gateway.
 GitHub stores shared source, canonical tasks, assignment, action grants and results.
 Each host owns its own flow/admission databases, workspaces and provider sessions.
+Local admission is limited to the central repository and the four existing product
+repositories: KIX, ZARI, FILM UNIT and maeum-gyeol. SOULBOUND/unknown targets are rejected.
 Slack projects status; no Slack message or Issue comment is an atomic lock.
 
 ## Shared task ownership

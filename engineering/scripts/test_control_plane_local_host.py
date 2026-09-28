@@ -212,6 +212,13 @@ class IndependentHostTests(unittest.TestCase):
         self.assertFalse(again["start_allowed"])
         self.assertEqual(self.sends, 1)
 
+    def test_soulbound_and_unknown_targets_rejected_before_shared_mutation(self):
+        for repo in ("BeautifulMind-JT/beautiful-mind", "BeautifulMind-JT/unassigned"):
+            self.binding["repository"]=repo
+            with self.assertRaises(Exception): self.host.assignment()
+        self.assertEqual(self.api.refs,{})
+        self.assertEqual(self.api.calls,[])
+
     def test_direct_work_succeeds_without_slack(self):
         original = self.api.fallback
         def offline_slack(method, path, body=None, **kwargs):

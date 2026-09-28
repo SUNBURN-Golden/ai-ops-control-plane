@@ -34,6 +34,8 @@ require = flow.require
 FILES = ("control_plane_local_host.py", "control_plane_ownership.py", "control_plane_flow.py",
          "control_plane_flow_gateway.py", "control_plane_codex_relay.py")
 LANES = {"DEVIN", "GROK_BUILD", "CURSOR", "GLM"}
+TARGETS = {"BeautifulMind-JT/ai-ops-control-plane", "BeautifulMind-JT/kix-protocol",
+           "BeautifulMind-JT/ZARI", "BeautifulMind-JT/film-unit-mv-studio", "BeautifulMind-JT/maeum-gyeol"}
 
 
 def private(path, *, directory=False):
@@ -139,6 +141,7 @@ class Host:
 
     def assignment(self, *, terminal=False):
         binding = self.policy["assignment_binding"]
+        require(binding["repository"] in TARGETS, "target repository outside approved independent-host scope")
         value, pointer = self.record(binding, "<!-- ASTRA_HOST_ASSIGNMENT_V1 -->")
         require(value.get("repository") == binding["repository"] and value.get("issue") == binding["issue"] and
                 value.get("host_id") == self.policy["host_id"] and value.get("instance_id") == self.policy["instance_id"] and
