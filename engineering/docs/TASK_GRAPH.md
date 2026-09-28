@@ -9,12 +9,9 @@ implementation and test/fix/retest inside each task. Code evaluates transitions.
 
 - GitHub stores the User-approved graph/task revisions, decisions, significant
   findings and current-SHA candidate evidence. Comments are records, not locks.
-- Each host's own protected flow SQLite database serializes its graph delivery.
-  Never copy it to another host or dispatch the same task from two hosts. A qualified
-  adapter must also enforce existing host-global admission across every caller. Independent-host graph adapters
-  must additionally acquire the GitHub ownership/action grant described in
-  INDEPENDENT_HOSTS.md. Existing legacy graph adapters are not automatically qualified
-  for the new route; use the local-host controller until that bridge is qualified.
+- One host's existing protected flow SQLite database serializes graph delivery.
+  Never copy it to another host or create a second active dispatcher. A qualified
+  adapter must also enforce existing host-global admission across every caller.
 - `max_active_sessions=1` remains mandatory. Independent nodes need no semantic
   edge, but this capacity policy still schedules their execution sequentially.
 - One task has one writer session. Feedback carries exact failure pointers,

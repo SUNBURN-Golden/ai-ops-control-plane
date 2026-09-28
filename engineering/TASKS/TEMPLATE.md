@@ -71,18 +71,6 @@ NO_CHANGE_ALLOWED | NON_CODE_EVIDENCE.
 Other AUDIT_FLOOR values: A0 | A2 | A3.
 A0 requires the runbook's final qualification.
 
-## Independent-host assignment (when selected)
-
-HOST_ID:
-HOST_INSTANCE_ID:
-HOST_ASSIGNMENT_POINTER:
-OWNERSHIP_REF:
-
-Host assignment is canonical-issue scoped, not a new task identity per revision.
-Local execution state stays on the assigned host. Shared ownership/grant state
-stays on the reserved GitHub control ref. Old-host connectivity is not a fresh-task
-prerequisite. Legacy task import/handoff requires separate fenced evidence.
-
 ## Dispatch references
 
 CONTROL_RECORD_POINTER:

@@ -1,8 +1,3 @@
-Independent hosts use [INDEPENDENT_HOSTS.md](INDEPENDENT_HOSTS.md) for direct
-local Work transport and shared GitHub ownership. The HTTP gateway procedure
-below is optional legacy transport, not a required remote Mac dependency.
-Slack remains a status/notification surface, never a lock or audit authority.
-
 # Direct Slack requests to Astra
 
 Slack carries requests and notifications. GitHub records the authoritative task,
@@ -17,7 +12,7 @@ No browser response replaces authenticated GitHub result ingestion.
 
 Issue #19 qualification additionally supports the explicitly scoped DIAGNOSTIC
 bootstrap in [LOCAL_CODEX.md](LOCAL_CODEX.md#issue-19-diagnostic-only-bootstrap-source-disabled-until-qualified).
-It uses the selected host authority/ledger and confirmed projection/Slack notification,
+It uses the same authority/ledger and confirmed projection/Slack notification,
 but separate expiring transport credentials and diagnostic claim/result routes.
 Its Issue comment is only DIAGNOSTIC_RESULT evidence, never a native audit review,
 User decision, operational live PASS or an automatic consumer release.

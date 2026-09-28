@@ -9,7 +9,7 @@ import commit 55240a610688a5fe7f4883e250b0ffab6c126fdb.
 source-manifest.json records import-time blobs; provenance/ and history/ are historical evidence,
 not current installation digests or transferred deployment approvals.
 
-Optional GitHub Actions runtime: repository-root .github/workflows/control-plane-runtime.yml.
+Central runtime: repository-root .github/workflows/control-plane-runtime.yml.
 Nested engineering/.github/workflows are non-executing source copies.
 ASTRA_TARGET_REPOSITORY explicitly selects projects.json; no default target.
 KIX, ZARI, FILM UNIT and MAEUM_GYEOL retain deployment_enabled=true.
@@ -21,8 +21,7 @@ Project task/CI inputs are in projects/. Approved contracts remain in products.
 
 Engineering governance: AGENTS.md. Task shape: TASKS/TEMPLATE.md. Procedure: RUNBOOKS/DISPATCH.md.
 Builder setup: docs/BUILDER_LANES.md. Direct Astra requests: docs/ASTRA_SLACK.md.
-Independent Mac/Linux execution: docs/INDEPENDENT_HOSTS.md.
-Work Astra transport: docs/LOCAL_CODEX.md. Neither requires the Grok VM for fresh Mac tasks.
+Local macOS coordinator and cloud Work Astra transport: docs/LOCAL_CODEX.md (disabled candidate).
 Grok is optional relay; mechanical code dispatches and builders own test/fix/retest.
 One task has one writer. Independent review is read-only. User authorizes merge.
 
@@ -36,5 +35,4 @@ Live activation requires exact source/host verification and evidence under CUTOV
 Never reset existing admission/flow ledgers or replay UNKNOWN while deploying a new source.
 
 Approved graph/correction loop: docs/TASK_GRAPH.md (source-only, disabled).
-It uses the selected host's flow ledger; deployment requires qualified adapters and collector.
-Legacy graph routes must not dispatch new independent-host tasks without the shared ownership guard.
+It uses the existing flow ledger; deployment requires qualified adapters and collector.

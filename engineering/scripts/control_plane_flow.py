@@ -135,10 +135,7 @@ DIAGNOSTIC_QUESTION = (
     "코드 수정·merge·activation·User 승인 대행은 하지 마라.")
 
 
-def diagnostic_request(revision, head, identity, session, designation, *, issue=19, task_id="CP-LOCAL-001"):
-    require(type(issue) is int and issue > 0, "canonical diagnostic issue required")
-    require(isinstance(task_id, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", task_id), "diagnostic task ID required")
-    task_pointer = f"https://github.com/{DIAGNOSTIC_REPO}/issues/{issue}"
+def diagnostic_request(revision, head, identity, session, designation):
     require(isinstance(revision, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", revision),
             "invalid diagnostic revision")
     require(isinstance(head, str) and re.fullmatch(r"[a-f0-9]{40}", head), "invalid diagnostic SHA")
@@ -147,31 +144,23 @@ def diagnostic_request(revision, head, identity, session, designation, *, issue=
     require(isinstance(session, str) and re.fullmatch(r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,100}", session),
             "dedicated diagnostic Work URL required")
     require(isinstance(designation, str) and re.fullmatch(
-        re.escape(task_pointer) + r"#issuecomment-[1-9][0-9]*", designation),
-        "same-issue diagnostic authorization required")
+        re.escape(DIAGNOSTIC_ISSUE) + r"#issuecomment-[1-9][0-9]*", designation),
+        "Issue 19 diagnostic authorization required")
     scope = {"document": DIAGNOSTIC_DOCUMENT, "question": DIAGNOSTIC_QUESTION,
              "capabilities": ["READ_PINNED_DOCUMENT", "ANSWER_DIAGNOSTIC", "RECORD_DIAGNOSTIC_EVIDENCE"]}
     binding = dict(revision=revision, head=head, identity=identity, work_session=session, designation=designation)
     action = dict(scope, kind="DIAGNOSTIC", identity=identity, work_session=session,
-                  designation=designation, task_pointer=task_pointer, attempt_id=1, read_only=True,
-                  subject=dict(repository=DIAGNOSTIC_REPO, task_id=task_id, revision=revision,
+                  designation=designation, task_pointer=DIAGNOSTIC_ISSUE, attempt_id=1, read_only=True,
+                  subject=dict(repository=DIAGNOSTIC_REPO, task_id="CP-LOCAL-001", revision=revision,
                                head=head, base=head, policy_revision=digest(scope), task_digest=digest(binding)))
     return dict(action, request_id=digest(action))
-
-
-def diagnostic_issue(action):
-    match = re.fullmatch(re.escape(f"https://github.com/{DIAGNOSTIC_REPO}/issues/") + r"([1-9][0-9]*)",
-                         action.get("task_pointer", ""))
-    require(match is not None, "canonical central diagnostic issue required")
-    return int(match.group(1))
 
 
 def validate_diagnostic(action):
     require(isinstance(action, dict), "diagnostic request missing")
     try:
         expected = diagnostic_request(action["subject"]["revision"], action["subject"]["head"],
-                                      action["identity"], action["work_session"], action["designation"],
-                                      issue=diagnostic_issue(action), task_id=action["subject"]["task_id"])
+                                      action["identity"], action["work_session"], action["designation"])
     except (KeyError, TypeError) as exc:
         raise FlowError("incomplete diagnostic binding") from exc
     require(canonical(action) == canonical(expected), "diagnostic scope/identity changed")
@@ -201,7 +190,7 @@ def diagnostic_result(action, value):
     require(isinstance(pointers, list) and 1 <= len(pointers) <= 12 and all(
         isinstance(p, str) and re.fullmatch(re.escape(prefix) + r"#L[1-9][0-9]*(?:-L[1-9][0-9]*)?", p)
         for p in pointers), "diagnostic evidence must cite the pinned document")
-    return dict(value, task_pointer=action["task_pointer"], diagnostic_request_id=action["request_id"],
+    return dict(value, diagnostic_request_id=action["request_id"],
                 request_id=digest(["diagnostic-result", action["request_id"]]),
                 provenance="AUTHENTICATED_CONSUMER_OBSERVATION_NOT_PROVIDER_ATTESTATION",
                 grants=[], live_acceptance="UNCHANGED")
