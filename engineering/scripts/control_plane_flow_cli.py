@@ -27,9 +27,24 @@ def main():
     for flag in ('request-id', 'actor', 'session', 'evidence'):
         reconcile.add_argument('--' + flag, required=True)
     reconcile.add_argument('--consumer-fenced', action='store_true')
+    diagnostic = commands.add_parser('diagnostic-request', help='render a narrow binding; grants no authority')
+    for flag in ('revision', 'head', 'identity', 'session', 'designation'):
+        diagnostic.add_argument('--' + flag, required=True)
+    prepare = commands.add_parser('prepare-diagnostic', help='operator-only projection/notification on the existing ledger')
+    prepare.add_argument('--policy', type=Path, required=True)
     args = parser.parse_args()
     try:
-        if args.command == 'qualify-lane':
+        if args.command == 'diagnostic-request':
+            result = flow.diagnostic_request(args.revision, args.head, args.identity, args.session, args.designation)
+        elif args.command == 'prepare-diagnostic':
+            spec = importlib.util.spec_from_file_location('gateway', Path(__file__).with_name('control_plane_flow_gateway.py'))
+            gateway = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(gateway)
+            try:
+                result = gateway.create_app(args.policy).prepare_diagnostic()
+            except gateway.flow.FlowError as exc:
+                raise flow.FlowError('diagnostic preparation blocked') from exc
+        elif args.command == 'qualify-lane':
             result = flow.qualify_lane(flow.decode(args.report.read_bytes()),
                                        flow.decode(args.approval.read_bytes()), args.runtime_sha)
         elif args.command == 'init-consumer-ledger':
@@ -51,7 +66,7 @@ def main():
             result = {'status': 'HOST_REPORTED_PREFLIGHT', 'builder': args.builder,
                       'report_digest': flow.digest(report), 'production_enabled': False}
         print(flow.canonical(result))
-        return 0
+        return 2 if result.get('state') in {'UNKNOWN', 'SUBMITTING', 'STALE', 'PROJECTION_UNKNOWN', 'PROJECTION_STALE'} else 0
     except (flow.FlowError, OSError, ValueError, subprocess.SubprocessError):
         print(flow.canonical({'status': 'BLOCKED', 'production_enabled': False}))
         return 2
@@ -59,4 +74,3 @@ def main():
 
 if __name__ == '__main__':
     raise SystemExit(main())
-

@@ -35,7 +35,7 @@ remains User or an explicit scoped delegation, not a browser answer.
 
 `scripts/control_plane_codex_relay.py` is portable stdlib Python. It does not install
 a runner, start builders, copy ledgers or change host settings. Its only network
-write is a single authenticated POST to the existing `/astra/claim`; a qualified
+write in operational mode is a single authenticated POST to the existing `/astra/claim`; a qualified
 Codex browser session performs the user-authorized Work message delivery.
 
 1. The existing mechanical layer creates and durably projects AUDIT/DECISION,
@@ -132,6 +132,141 @@ No standing routine, periodic page refresh or Slack firehose. Use explicit comma
 or qualified completion event. If a Work answer is unfinished, return its pointer
 and keep the claim. Completion collection transport is still a deployment gate;
 do not invent an event callback or keep a Codex reasoning session watching the page.
+
+## Issue 19 diagnostic-only bootstrap (source, disabled until qualified)
+
+User separately authorized the non-product `DIAGNOSTIC` request/result contract.
+It fixes Issue #19 / task CP-LOCAL-001, the exact source SHA, revision, consumer,
+fresh dedicated Work URL, `engineering/docs/LOCAL_CODEX.md`, and the diagnostic
+question. Its deterministic request ID includes those bindings and the explicit
+Issue #19 authorization pointer. Only read-document, answer and record-evidence
+capabilities exist. It cannot be changed into AUDIT/DECISION, issue a product
+PASS or User decision, launch a builder, resume work, merge or activate anything.
+
+This mode does **not** require prior `live_acceptance=PASS`. It requires reviewed
+source, explicit per-request User authorization, protected policy and dedicated
+authentication instead. The operational policy validator still requires live
+PASS. Neither a diagnostic answer nor its collector receipt changes that value.
+
+### Existing authority, not a second Mac ledger
+
+The existing `control_plane_flow_gateway.Ingress` serves two additional routes:
+
+- `POST /astra/diagnostic/claim`: permission for exactly one bound Work send.
+- `POST /astra/diagnostic/result`: one authenticated observation to Issue #19.
+
+Only those routes can operate with the global flow `enabled=false`. Every normal
+webhook, Slack command and operational claim remains behind the original gate.
+An operator calls `control_plane_flow_cli.py prepare-diagnostic --policy <protected-flow-policy>`
+explicitly; the consumer credential cannot prepare/register requests or run the
+operator's reconciliation command. Preparation uses the **existing** flow ledger,
+outbox and `astra_claims` table, never `Store(..., initialize=True)`. Missing ledger
+or unmigrated consumer table blocks. The existing operator may initialize the
+consumer table once while intake is fenced; no ingress performs schema upgrades.
+Do not clone a ledger, create a competing authority or use a GitHub comment lock.
+Diagnostic admission checks pending ordinary/diagnostic deliveries, consumer
+claims and, when present, graph writer ownership. Existing host admission and
+sessions must also be checked by the operator; the event ledger does not replace
+the host's admission authority or authorize taking over its jobs.
+
+### Protected configuration and authentication
+
+Keep the existing flow policy, ledger path, source installation checks and
+GitHub/Slack transport credentials. Leave all global/lane activation fields
+unchanged. Its new `diagnostic` block defaults disabled and requires:
+
+- `source_review=PASS` and `source_review_pointer`: actual independent source
+  review, not a fabricated live-acceptance result;
+- `request`: the complete output of `diagnostic-request --revision ... --head ...
+  --identity ... --session https://chatgpt.com/c/... --designation <Issue19-comment>`;
+- `authorization`: `{actor, comment_id, sha256}` pinning an explicitly authorized
+  User comment in Issue #19. Its body is `<!-- ASTRA_DIAGNOSTIC_AUTHORIZATION_V1 -->`
+  followed by newline and JSON `{active:true, request:<exact request>, source_review_pointer:<pointer>}`;
+- `credential_expires_at`: an integer UTC Unix expiry; `slack_channel`: the
+  dedicated notification channel, not an audit-approval or auto-consumption trigger.
+
+To resolve the self-pointer, an operator can reserve the authorization comment
+first, render the binding with its actual URL, then save the final authorized body
+and pin its SHA-256. A placeholder is not authorization. A body/actor/issue edit,
+revocation, closed Issue #19 or moved remote main SHA blocks preparation, claim
+and collection. Each actual invocation re-reads that GitHub authority.
+
+Provision `ASTRA_FLOW_DIAGNOSTIC_CONSUMER_SECRET` only into the existing protected
+gateway and relay transport processes (at least 32 bytes, distinct from the
+operational consumer key). It is scoped by protected policy to **one exact request**,
+consumer and Work URL and permits only claim/result. Do not place it in policy,
+model/browser environment, prompts or GitHub. Authentication uses HMAC-SHA256 of
+`path + "\n" + timestamp + "." + raw_json`; the existing timestamp/signature
+headers are used. Timestamp age is limited to 300 seconds. Path binding prevents
+cross-operation replay. Credential expiry never expires/releases the claim.
+
+The separate owner-only relay policy uses `mode=DIAGNOSTIC`,
+`diagnostic_source_review=PASS`, `source_review_pointer`, `diagnostic_request`,
+the diagnostic claim URL and exactly one matching `work_sessions` entry. Other
+binary, subscription, model/catalog, state-directory and browser qualification
+requirements are unchanged. Keep `live_acceptance=PENDING` and the historical
+disabled draft unchanged. Both policy flags stay disabled until deployment and
+the one-request authorization are actually qualified. This document is not either.
+
+### One-shot execution, collection and uncertainty
+
+Preparation reserves the request under SQLite serialization, projects the exact
+action to GitHub and verifies its actor/body/issue, then confirms normal Slack
+delivery. Only then can the diagnostic consumer claim. No fake receipts or manual
+ledger inserts are a supported preparation path. Relay persists CLAIMING/model
+before claim, SUBMITTING before browser send, and RESULT_SUBMITTING before result
+submission. The model/browser never receives the transport credential or writes
+the GitHub result; the protected gateway publishes it.
+
+An immediate answer is submitted once. An unfinished answer records WAITING.
+Only an explicit `collect-diagnostic --policy ... --request-id ...` performs one
+read-only inspection of that same conversation with the persisted coordinator
+model/effort; it does not claim, send, continue, reload, poll or start a new Work
+conversation. Failure/UNKNOWN never chooses another model, request or session.
+Actual browser/tool restrictions remain an installation qualification gate; the
+prompt and a filesystem sandbox are not browser permission enforcement.
+
+The collector validates request ID, complete subject/revision/SHA, authenticated
+consumer, claimed Work URL, current User binding and document evidence pointers.
+The only result type is `DIAGNOSTIC_RESULT`, projected as an Issue #19 comment with
+marker `<!-- ASTRA_DIAGNOSTIC_RESULT_V1 -->`. The outbox result key is deterministically
+derived from the original `diagnostic_request_id`; it cannot become a PR review.
+An identical duplicate returns existing state without publishing twice; changed
+content is rejected. Provenance is **an authenticated consumer's observation of
+the designated conversation**, not provider attestation or cryptographic proof of
+model identity. Record visible `GPT-6 Astra` / `medium`; `internal_model_id=null`
+means unverified. The receipt explicitly grants nothing and leaves live acceptance
+unchanged, even if free-form answer text contains the word PASS.
+
+Lost claim/send/result responses remain UNKNOWN. A process killed before it can
+write UNKNOWN leaves its pre-effect marker intact; subsequent diagnostic calls
+report UNKNOWN with that `durable_state` and never repeat the side effect. This
+also applies to a killed GitHub/Slack publication. No timer, expiry or disabled
+credential releases ownership. Confirmed collection also does **not** auto-release
+the consumer: the operator must verify the actual session ended and reconcile
+using its bound Work URL and durable evidence. Do not fence a still-running or
+UNKNOWN consumer. A pending/uncertain diagnostic result publisher also blocks
+consumer reconciliation and new task admission, even if an older ledger already
+records the consumer as reconciled. Ending the browser is not evidence that a
+separate GitHub result publication has finished. Preserve all tombstones and disable the dedicated diagnostic
+flags after completion; Issue #19 stays open until the full acceptance is verified.
+The collector rechecks the active claim in the same SQLite transaction that marks
+the result SUBMITTING; an earlier authority read cannot race operator reconciliation.
+Task fences are also rechecked in that pre-send transaction for existing execution
+reservations; a NOT_STARTED row inherited from an older ledger cannot bypass them.
+New consumer claims recheck the same fences even for an already delivered request.
+
+### Live prerequisites still required after this source PR
+
+An operator must install the independently reviewed source in the **existing
+authority**, pin its hashes and ledger, supply its scoped GitHub/Slack credentials,
+provision the expiring diagnostic transport secret on both endpoints, record the
+exact authorization binding, qualify the dedicated browser/Codex transport and
+create/identify a supported fresh Work conversation. Then perform the single live
+diagnostic and verify its GitHub result. No remote SSH address is intrinsically
+required. Missing execution principal/credential or a missing original authority
+is a deployment blocker, not permission to construct a replacement ledger/server.
+Offline tests/source review are not live acceptance or an activation command.
 
 ## Host boundary
 
