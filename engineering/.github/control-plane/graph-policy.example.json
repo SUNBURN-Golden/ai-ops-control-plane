@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "enabled": false,
+  "source_audit": "PENDING",
+  "activation_pointer": null,
+  "ledger_path": "CONFIG_REQUIRED_EXISTING_FLOW_DATABASE",
+  "user_actors": [],
+  "collector_actors": [],
+  "plan": {
+    "repository": "BeautifulMind-JT/ai-ops-control-plane",
+    "issue": 0,
+    "comment_id": 0,
+    "actor": "CONFIG_REQUIRED",
+    "sha256": "CONFIG_REQUIRED"
+  },
+  "observations": {},
+  "adapters": {},
+  "slack_display": {
+    "enabled": false,
+    "source_audit": "PENDING",
+    "approval_pointer": null,
+    "publisher_user_id": "CONFIG_REQUIRED",
+    "request_channel_ids": [],
+    "targets": {}
+  }
+}
