@@ -1,26 +1,8 @@
-Independent hosts use [INDEPENDENT_HOSTS.md](INDEPENDENT_HOSTS.md) for direct
-local Work transport and shared GitHub ownership. The HTTP gateway procedure
-below is optional legacy transport, not a required remote Mac dependency.
-Slack remains a status/notification surface, never a lock or audit authority.
-
 # Direct Slack requests to Astra
 
 Slack carries requests and notifications. GitHub records the authoritative task,
 decision, exact SHA and audit. Grok Bot is not required to ask Astra or relay its
 answer. No shared browser session, raw Slack firehose or standing LLM routine.
-
-CP-LOCAL-001 adds an optional local Codex recipient transport after the same
-central claim. User explicitly authorized a dedicated cloud Work browser route;
-it does not share Grok's personal browser or invent a Slack callback. The client
-and remaining Mac qualification gates are in [LOCAL_CODEX.md](LOCAL_CODEX.md).
-No browser response replaces authenticated GitHub result ingestion.
-
-Issue #19 qualification additionally supports the explicitly scoped DIAGNOSTIC
-bootstrap in [LOCAL_CODEX.md](LOCAL_CODEX.md#issue-19-diagnostic-only-bootstrap-source-disabled-until-qualified).
-It uses the selected host authority/ledger and confirmed projection/Slack notification,
-but separate expiring transport credentials and diagnostic claim/result routes.
-Its Issue comment is only DIAGNOSTIC_RESULT evidence, never a native audit review,
-User decision, operational live PASS or an automatic consumer release.
 
 ## Implemented sender
 

@@ -44,14 +44,5 @@
     "enabled": false,
     "identity": null,
     "decision_identity": null
-  },
-  "diagnostic": {
-    "enabled": false,
-    "source_review": "PENDING",
-    "source_review_pointer": null,
-    "credential_expires_at": 0,
-    "authorization": null,
-    "request": null,
-    "slack_channel": null
   }
 }

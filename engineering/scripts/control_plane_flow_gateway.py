@@ -75,18 +75,6 @@ def unwrap(body, marker):
     return value
 
 
-def diagnostic_config(policy):
-    """Separate source-reviewed, explicitly scoped bootstrap; no operational grant."""
-    config = policy.get("diagnostic", {})
-    flow.require(config.get("enabled") is True and config.get("source_review") == "PASS" and
-                 flow.github_pointer(config.get("source_review_pointer")), "diagnostic source/scope not approved")
-    expiry = "authorization_expires_at" if policy.get("authority_mode") == "INDEPENDENT_HOST" else "credential_expires_at"
-    flow.require(type(config.get(expiry)) is int and
-                 time.time() < config[expiry], "diagnostic authorization/credential expired/unconfigured")
-    flow.validate_diagnostic(config.get("request"))
-    return config
-
-
 class GithubPorts:
     """Read pinned User task bindings, current PR and full required CI from GitHub.
 
@@ -97,52 +85,6 @@ PASS text. Shared author/reviewer GitHub identities are conservatively rejected.
 """
     def __init__(self, api, policy):
         self.api, self.policy = api, policy
-
-    def diagnostic_current(self, action):
-        config = diagnostic_config(self.policy)
-        issue_number = flow.diagnostic_issue(action)
-        flow.require(action == config["request"], "diagnostic request not authorized")
-        authority, comment = self.bound_comment(flow.DIAGNOSTIC_REPO, config["authorization"],
-                                                "<!-- ASTRA_DIAGNOSTIC_AUTHORIZATION_V1 -->")
-        flow.require(authority == dict(active=True, request=action,
-                                      source_review_pointer=config["source_review_pointer"]) and
-                     comment.get("html_url") == action["designation"] and
-                     comment.get("issue_url") == f"https://api.github.com/repos/{flow.DIAGNOSTIC_REPO}/issues/{issue_number}",
-                     "diagnostic authorization revoked or wrong issue")
-        issue = self.api.call("GET", f"repos/{flow.DIAGNOSTIC_REPO}/issues/{issue_number}")
-        main = self.api.call("GET", f"repos/{flow.DIAGNOSTIC_REPO}/git/ref/heads/main")
-        flow.require(issue.get("state") == "open" and main.get("object", {}).get("sha") == action["subject"]["head"],
-                     "diagnostic source SHA stale or issue closed")
-        return True
-
-    def diagnostic_publish(self, action, marker):
-        """Only the pinned diagnostic issue. No reviews, dispatches or approvals."""
-        body = marker + "\n" + flow.canonical(action)
-        issue_number = flow.diagnostic_issue(action)
-        comment = self.api.call("POST", f"repos/{flow.DIAGNOSTIC_REPO}/issues/{issue_number}/comments", {"body": body})
-        actor = self.policy.get("projection_actor")
-        flow.require(isinstance(actor, str) and actor not in {"", "CONFIG_REQUIRED"} and
-                     comment.get("user", {}).get("login") == actor and comment.get("body") == body and
-                     comment.get("issue_url") == f"https://api.github.com/repos/{flow.DIAGNOSTIC_REPO}/issues/{issue_number}" and
-                     isinstance(comment.get("html_url"), str) and re.fullmatch(
-                         re.escape(f"https://github.com/{flow.DIAGNOSTIC_REPO}/issues/{issue_number}") + r"#issuecomment-[1-9][0-9]*", comment["html_url"]),
-                     "unverified diagnostic GitHub publication receipt")
-        return {"accepted": True, "request_id": action["request_id"], "pointer": comment["html_url"]}
-
-    def diagnostic_notify(self, action, projection_receipt):
-        self.diagnostic_current(action)
-        pointer = self.projected_pointer(action, projection_receipt,
-                                        dict(repository=flow.DIAGNOSTIC_REPO, issue=flow.diagnostic_issue(action)))
-        channel = diagnostic_config(self.policy).get("slack_channel")
-        flow.require(isinstance(channel, str) and re.fullmatch(r"[CG][A-Z0-9]+", channel),
-                     "dedicated diagnostic Slack channel missing")
-        message = self.astra_message(action, pointer)
-        receipt = self.api.call("POST", "chat.postMessage", dict(message, channel=channel,
-                                unfurl_links=False, unfurl_media=False), slack=True)
-        flow.require(receipt.get("ok") is True and receipt.get("channel") == channel and
-                     isinstance(receipt.get("ts"), str) and re.fullmatch(r"[0-9]{10,}\.[0-9]{6}", receipt["ts"]),
-                     "ambiguous diagnostic Slack delivery")
-        return dict(accepted=True, request_id=action["request_id"], channel=channel, ts=receipt["ts"])
 
     def registration(self, repository, issue):
         key = f"{repository}#{issue}"
@@ -366,9 +308,6 @@ PASS text. Shared author/reviewer GitHub identities are conservatively rejected.
                   "GitHub control record": pointer,
                   "Result authority": "authenticated GitHub result; Slack delivery is not approval",
                   "User decision required": action["kind"] == "DECISION"}
-        if action["kind"] == "DIAGNOSTIC":
-            fields["Result authority"] = "DIAGNOSTIC_RESULT observation only; no audit/decision/activation grant"
-            fields["Work conversation"] = action["work_session"]
         # JSON scalar encoding prevents multiline field injection. plain_text blocks
         # and escaped fallback text prevent user-controlled pointers/labels from pinging bots.
         text = "\n".join(key + ": " + flow.canonical(value) for key, value in fields.items())
@@ -440,12 +379,10 @@ class Ingress:
 A failed/uncertain processing attempt is never retried by a timer. An operator
 can reconcile it; NOT_STARTED rows may be resumed by an explicit event.
 """
-    def __init__(self, store, ports, policy, slack_secret, github_secret, executor=None, consumer_secret=b"",
-                 diagnostic_secret=b""):
+    def __init__(self, store, ports, policy, slack_secret, github_secret, executor=None, consumer_secret=b""):
         self.store, self.ports, self.policy = store, ports, policy
         self.slack_secret, self.github_secret = slack_secret, github_secret
         self.consumer_secret = consumer_secret
-        self.diagnostic_secret = diagnostic_secret
         self.executor = executor or ThreadPoolExecutor(max_workers=2, thread_name_prefix="astra-event")
         self.slots = threading.BoundedSemaphore(16)
 
@@ -465,7 +402,6 @@ can reconcile it; NOT_STARTED rows may be resumed by an explicit event.
         flow.require(isinstance(value, dict) and set(value) == {"request_id", "session_id"},
                      "unexpected consumer command")
         action, receipt = self.store.delivered_action(value["request_id"])
-        flow.require(action["kind"] in {"AUDIT", "DECISION"}, "operational credential cannot consume diagnostic")
         # The authenticated identity comes from protected policy, never the message.
         actor = configured.get("identity" if action["kind"] == "AUDIT" else "decision_identity")
         flow.require(isinstance(actor, str) and actor not in {"", "CONFIG_REQUIRED", "PENDING"}
@@ -477,66 +413,6 @@ can reconcile it; NOT_STARTED rows may be resumed by an explicit event.
         if result["start_allowed"]:
             result["action"] = action
         return result
-
-    def prepare_diagnostic(self, *, local_delivery=False):
-        """Operator-only explicit call. Not an HTTP command or consumer privilege."""
-        action = diagnostic_config(self.policy)["request"]
-        flow.require(len(self.diagnostic_secret) >= 32 and self.diagnostic_secret != self.consumer_secret,
-                     "separate diagnostic transport credential required")
-        self.ports.diagnostic_current(action)
-        self.store.reserve(action)  # task fence before any projection/notification
-        projection = dict(action, kind="PROJECTION", action_kind="DIAGNOSTIC",
-                          action_request_id=action["request_id"],
-                          request_id=flow.digest(["projection", action["request_id"]]))
-        def publish(_):
-            receipt = self.ports.diagnostic_publish(action, "<!-- ASTRA_FLOW_ACTION_V1 -->")
-            return dict(receipt, request_id=projection["request_id"])
-        current = lambda _: self.ports.diagnostic_current(action)
-        projected = self.store.send_once(projection, publish, current)
-        projected = flow.diagnostic_outcome(projected)
-        if projected["state"] != "CONFIRMED":
-            return dict(kind="DIAGNOSTIC", state="PROJECTION_" + projected["state"], grants=[])
-        if local_delivery:
-            flow.require(self.policy.get("authority_mode") == "INDEPENDENT_HOST", "local delivery requires host authority")
-            return flow.diagnostic_outcome(self.store.send_once(
-                action, lambda a: dict(projected["receipt"], request_id=a["request_id"]), current))
-        return flow.diagnostic_outcome(self.store.send_once(
-            action, lambda a: self.ports.diagnostic_notify(a, projected["receipt"]), current))
-
-    def diagnostic_command(self, path, raw, headers):
-        config = diagnostic_config(self.policy)
-        secret = self.diagnostic_secret
-        flow.require(len(secret) >= 32 and secret != self.consumer_secret, "diagnostic credential unavailable/shared")
-        stamp = headers.get("x-astra-timestamp", "")
-        flow.require(re.fullmatch(r"[0-9]{1,12}", stamp) and abs(time.time() - int(stamp)) <= 300,
-                     "stale diagnostic command")
-        signature = hmac.new(secret, path.encode() + b"\n" + stamp.encode() + b"." + raw, hashlib.sha256).hexdigest()
-        flow.require(hmac.compare_digest(signature, headers.get("x-astra-signature", "")),
-                     "unauthenticated diagnostic command")
-        value = flow.decode(raw)
-        action = config["request"]
-        self.ports.diagnostic_current(action)
-        delivered, receipt = self.store.delivered_action(action["request_id"])
-        flow.require(delivered == action, "diagnostic delivery binding changed")
-        self.ports.projected_pointer(action, receipt, dict(repository=flow.DIAGNOSTIC_REPO, issue=flow.diagnostic_issue(action)))
-        if path == "/astra/diagnostic/claim":
-            flow.require(isinstance(value, dict) and set(value) == {"request_id", "session_id"} and
-                         value["request_id"] == action["request_id"] and value["session_id"] == action["work_session"],
-                         "wrong diagnostic claim binding")
-            result = self.store.claim_astra(action, action["identity"], value["session_id"])
-            if result["start_allowed"]:
-                result["action"] = action
-            return result
-        flow.require(path == "/astra/diagnostic/result", "diagnostic credential scope denied")
-        result_action = flow.diagnostic_result(action, value)
-        self.store.diagnostic_claim(action)
-        def current(_):
-            self.store.diagnostic_claim(action)
-            return self.ports.diagnostic_current(action)
-        result = self.store.send_once(result_action, lambda a: self.ports.diagnostic_publish(
-            a, "<!-- ASTRA_DIAGNOSTIC_RESULT_V1 -->"), current)
-        return dict(flow.diagnostic_outcome(result), kind="DIAGNOSTIC_RESULT", diagnostic_request_id=action["request_id"],
-                    grants=[], live_acceptance="UNCHANGED")
 
     def work(self, event_id, command):
         if command["operation"] == "refresh_repository":
@@ -559,21 +435,13 @@ can reconcile it; NOT_STARTED rows may be resumed by an explicit event.
 
     def __call__(self, environ, start_response):
         try:
-            if environ.get("PATH_INFO") not in {"/astra/diagnostic/claim", "/astra/diagnostic/result"}:
-                flow.require(self.policy.get("enabled") is True, "event flow disabled")
-            else:
-                diagnostic_config(self.policy)
+            flow.require(self.policy.get("enabled") is True, "event flow disabled")
             flow.require(environ.get("REQUEST_METHOD") == "POST", "POST required")
             length = int(environ.get("CONTENT_LENGTH", "0"))
             flow.require(0 < length <= 1048576, "invalid body length")
             raw = environ["wsgi.input"].read(length)
             flow.require(len(raw) == length, "truncated body")
             headers = {k[5:].replace("_", "-").lower(): v for k, v in environ.items() if k.startswith("HTTP_")}
-            if environ.get("PATH_INFO") in {"/astra/diagnostic/claim", "/astra/diagnostic/result"}:
-                result = self.diagnostic_command(environ["PATH_INFO"], raw, headers)
-                start_response("200 OK", [("Content-Type", "application/json")])
-                return [flow.canonical(result).encode()]
-            flow.require(self.policy.get("enabled") is True, "event flow disabled")
             if environ.get("PATH_INFO") == "/astra/claim":
                 result = self.claim_consumer(raw, headers)
                 start_response("200 OK", [("Content-Type", "application/json")])
@@ -616,11 +484,8 @@ def create_app(policy_path):
     flow.require(stat.S_ISREG(info.st_mode) and info.st_uid in {0, os.geteuid()} and
                  not info.st_mode & 0o022 and info.st_nlink == 1, "unprotected policy")
     policy = flow.decode(path.read_text())
-    if policy.get("enabled") is True:
-        flow.require(policy.get("deployment_audit") == "PASS" and
-                     flow.github_pointer(policy.get("deployment_approval_pointer")), "deployment not approved")
-    else:
-        diagnostic_config(policy)  # only the two diagnostic routes become reachable
+    flow.require(policy.get("enabled") is True and policy.get("deployment_audit") == "PASS" and
+                 flow.github_pointer(policy.get("deployment_approval_pointer")), "deployment not approved")
     for filename in ("control_plane_flow.py", "control_plane_flow_gateway.py"):
         file = Path(__file__).with_name(filename)
         info = file.lstat()
@@ -629,14 +494,9 @@ def create_app(policy_path):
         flow.require(hashlib.sha256(file.read_bytes()).hexdigest() == policy["source_sha256"][filename],
                      "installed gateway source differs from approved source")
     # Secret injection belongs to the isolated service account, never builder env.
-    if policy.get("enabled") is True:
-        flow.require(all(len(os.environ.get(k, "")) >= 16 for k in (
-            "ASTRA_FLOW_SLACK_SIGNING_SECRET", "ASTRA_FLOW_GITHUB_WEBHOOK_SECRET")),
-            "operational signing credentials unavailable")
     api = Api(os.environ["ASTRA_FLOW_GITHUB_TOKEN"], os.environ["ASTRA_FLOW_SLACK_TOKEN"])
     store = flow.Store(policy["ledger_path"])
     return Ingress(store, GithubPorts(api, policy), policy,
-                   os.environ.get("ASTRA_FLOW_SLACK_SIGNING_SECRET", "").encode(),
-                   os.environ.get("ASTRA_FLOW_GITHUB_WEBHOOK_SECRET", "").encode(),
-                   consumer_secret=os.environ.get("ASTRA_FLOW_ASTRA_CONSUMER_SECRET", "").encode(),
-                   diagnostic_secret=os.environ.get("ASTRA_FLOW_DIAGNOSTIC_CONSUMER_SECRET", "").encode())
+                   os.environ["ASTRA_FLOW_SLACK_SIGNING_SECRET"].encode(),
+                   os.environ["ASTRA_FLOW_GITHUB_WEBHOOK_SECRET"].encode(),
+                   consumer_secret=os.environ.get("ASTRA_FLOW_ASTRA_CONSUMER_SECRET", "").encode())
