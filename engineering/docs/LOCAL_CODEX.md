@@ -1,12 +1,20 @@
-# macOS Codex coordinator / cloud Work Astra mid
+# macOS independent host / cloud Work Astra mid
 
 CP-LOCAL-001: https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/19
-User authorized this design on 2026-09-27. Source candidate, not an installed Mac.
+User corrected the host design on 2026-09-28: Mac is a separate execution computer.
+**Default: [INDEPENDENT_HOSTS.md](INDEPENDENT_HOSTS.md)** — local controller,
+local ledger, direct Work transport, GitHub shared ownership. No old VM/SSH,
+remote claim endpoint, HMAC provisioning or root-owned service is required.
+Each host qualifies its own builders and browser capabilities.
+
+The HTTP endpoint procedures below describe the **optional legacy gateway route**.
+They are not prerequisites for installing or running the independent Mac path.
+Source implementation is not a claim of live qualification.
 
 ## Roles and cost
 
-Mac Codex relays explicit commands, collects pointers and operates the qualified
-cloud Work browser. It is not the builder, architect, independent auditor or User.
+Mac Codex coordinates its own qualified builders, relays explicit commands, collects pointers and operates the qualified
+cloud Work browser. It does not become the ticket's writer, architect, independent auditor or User by coordinating it.
 User explicitly selected gpt-5.6-sol / max on 2026-09-27, superseding the earlier
 gpt-6-sol / ultra selection ([User decision](https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/19#issuecomment-5856142120)).
 The disabled example records that choice; it is not proof
@@ -31,7 +39,7 @@ architecture gate. Author conflicts require a designated non-author substitute.
 Codex delivers findings literally; the same builder fixes them. Merge authority
 remains User or an explicit scoped delegation, not a browser answer.
 
-## Implemented client
+## Optional legacy HTTP client
 
 `scripts/control_plane_codex_relay.py` is portable stdlib Python. It does not install
 a runner, start builders, copy ledgers or change host settings. Its only network
@@ -64,7 +72,7 @@ After verified completion/fencing, reconcile the central consumer using its real
 Work URL and durable evidence under the existing operator procedure. Do not delete
 the local tombstone to resend. A still-running answer is WAITING, not failure.
 
-## Mac setup and acceptance
+## Shared model/browser qualification
 
 There is no authenticated Mac execution in the current cloud session. The inspected
 cloud browser was logged out of ChatGPT; this is not evidence about the user's Mac.
@@ -133,7 +141,7 @@ or qualified completion event. If a Work answer is unfinished, return its pointe
 and keep the claim. Completion collection transport is still a deployment gate;
 do not invent an event callback or keep a Codex reasoning session watching the page.
 
-## Issue 19 diagnostic-only bootstrap (source, disabled until qualified)
+## Optional legacy HTTP diagnostic bootstrap
 
 User separately authorized the non-product `DIAGNOSTIC` request/result contract.
 It fixes Issue #19 / task CP-LOCAL-001, the exact source SHA, revision, consumer,
@@ -270,10 +278,17 @@ Offline tests/source review are not live acceptance or an activation command.
 
 ## Host boundary
 
-This Mac is a coordinator client of the existing central ledger. It does not replace
-the current Linux host. Existing systemd/sudo/Linux builder adapters are not native
-macOS adapters. A later host migration needs its own drain/fence, ledger continuity,
-installation and canary evidence; two independent admission ledgers are forbidden.
+Mac and the Grok computer are independent execution hosts. Each owns its own
+runtime state; only canonical task assignment/ownership and engineering truth
+are shared through GitHub. Do not copy another host's flow/admission databases.
+Fresh Mac tasks do not depend on the old host being reachable. Existing-task
+handoff still needs ended-session/fenced-writer evidence; it is not automatic.
+
+For direct local diagnostics, a newly assigned central issue may replace Issue19
+as the canonical diagnostic task. The document/question/capabilities stay narrow;
+request, result, projection, authorization and ownership must name that same issue.
+Old Issue19 bindings remain historical and are never silently retargeted.
+
 All four target deployment flags stay true. Global runtime stays disabled/PENDING.
 SOULBOUND remains excluded. Existing host settings and installed sessions are untouched.
 

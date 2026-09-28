@@ -31,7 +31,7 @@ pointers.
 | USER | Final authority: product scope, consequential architecture choice, risk acceptance, merge | Be silently substituted by an agent |
 | ASTRA | Principal Architect / Design Authority; architecture exceptions; explicitly required milestone, architecture and release audits | Become the routine ticket manager or default A1/A2 reviewer; implement audit fixes; audit a change it authored or modified |
 | GROK | Optional human-facing command relay to the mechanical control plane | Engineer, architect, reviewer, semantic router, event bus, polling daemon |
-| CODEX_COORDINATOR | User's local command/receipt relay; qualified browser transport to cloud Work Astra mid | Act as Astra/User, grant audit PASS from browser text, launch a second writer, silently change host or model |
+| CODEX_COORDINATOR | Independent local host coordinator; dispatch qualified local builders and transport scoped requests to Work Astra mid | Act as Astra/User, grant audit PASS from browser text, launch a second writer, silently change host or model |
 | BUILDER | One configured autonomous writer: DEVIN, GROK_BUILD, GLM or CURSOR; investigate → implement → test/debug → PR/evidence | Change approved architecture silently; write outside the assigned task/worktree; merge |
 | REVIEWER | Configured non-author read-only reviewer; may be a different builder lane or User-designated external lane | Modify the reviewed change or become a second writer |
 | CHEAP_WORKER | Explicitly authorized mechanical work | Become a second writer on a substantive task |
@@ -45,6 +45,28 @@ decision and a durable GitHub pointer.
 
 Builder and reviewer identity are canonical task/control-record fields.
 Grok never chooses either by reading code, prose or model performance.
+
+## 2a. Independent compute hosts
+
+Mac Codex and the Grok computer are peer execution hosts. Each owns its local
+flow/admission database, adapters, workspaces and credentials. GitHub is the
+shared task/source/decision authority; an old VM is not a mandatory gateway for
+fresh work assigned to another host. No shared SQLite mount or ledger copying.
+
+Canonical repository + issue ownership and one-shot action grants are serialized
+by GitHub control refs under `heads/aiops-ownership/`, not issue-comment existence.
+Host/instance enrollment is explicitly pinned to a User record. New local actions
+retain global unresolved-action fences, including after local-state loss. No TTL,
+force update, deletion, model fallback or automatic reassignment. Legacy work
+requires a separately verified fenced handoff; fresh host-assigned work does not
+require contact with an unrelated old host. Current implementation has no handoff
+command and never interprets missing ownership as permission to adopt legacy work.
+
+Control credentials belong only to the protected coordinator; builders/reviewers
+and browser transports cannot mutate ownership refs. Control commits contain only
+minimal task ownership facts, no files on main, secrets, transcripts or source.
+Independent-host procedure: docs/INDEPENDENT_HOSTS.md. Installation and provider
+qualification are per host; registering one host never qualifies another.
 
 ## 3. Mechanical control layer is mandatory
 
@@ -368,7 +390,8 @@ See docs/ASTRA_SLACK.md for consumer identity, duplicate protection and setup.
 Under CP-LOCAL-001, User authorizes local macOS Codex to deliver an existing
 claimed request to a dedicated cloud Work Astra mid conversation and collect
 its result pointer. This is a qualified transport exception, not a new authority
-or shared personal browser. Central consumer serialization remains mandatory.
+or shared personal browser. Consumer serialization remains mandatory: the independent host uses its local
+claim plus the shared GitHub action grant; the legacy transport uses its gateway.
 No recurring LLM session, automatic resend, unconfigured model fallback or
 browser-derived approval. User authorized gpt-5.6-sol/max with one alternative:
 gpt-5.6-sol/xhigh (Extra high), selected only before claim if max is unsupported
@@ -382,8 +405,9 @@ See docs/LOCAL_CODEX.md; disabled source registration is not live acceptance.
 
 Issue #19 also has a User-authorized DIAGNOSTIC-only bootstrap: one pinned
 document/question, source SHA/revision, consumer and dedicated Work conversation.
-It uses the existing claim authority and ledger, with separately scoped expiring
-transport authentication. Its authenticated consumer observation is recorded only
+The legacy HTTP route uses its existing claim authority and expiring transport authentication.
+The independent-host route uses that host's local flow ledger and shared GitHub
+ownership, with in-process transport; it does not need the old gateway or HMAC provisioning. Its authenticated consumer observation is recorded only
 as DIAGNOSTIC_RESULT, never a provider-signed model identity, audit PASS, User
 decision or operational live acceptance. It grants no builder, resume, merge or
 runtime/intake authority. Operational live-acceptance gates remain unchanged.
