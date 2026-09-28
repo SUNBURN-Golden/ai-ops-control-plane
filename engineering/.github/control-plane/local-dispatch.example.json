@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "enabled": false,
+  "token_path": "/var/lib/astra/local-dispatch/github-token",
+  "lock_dir": "/var/lib/astra/local-dispatch/locks"
+}

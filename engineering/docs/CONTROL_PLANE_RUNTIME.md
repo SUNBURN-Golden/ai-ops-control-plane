@@ -106,6 +106,36 @@ operator가 입증한 경우에만 `--session-id` 대신 `--no-session --sender-
 timeout은 미생성 증거가 아니다. 해당 옵션은 operator의 증거 확인을 자동 대체하지 않는다.
 GitHub task에는 reconciliation evidence와 control projection을 남긴다.
 
+## 로컬 발송 경로 (GitHub Actions 없이)
+
+`scripts/control_plane_local.py`는 `control-plane-runtime.yml`과 같은
+validate-repo → prepare → launch → finalize 순서를 control host에서 직접 실행한다.
+GitHub는 REST API로만 쓰며 Actions 실행 시간을 쓰지 않는다. User 결정(2026-09-28)에 따라
+GitHub credential은 User 개인 토큰 하나이며, record 작성자·dispatch actor 모두 그 토큰의
+login(`GET /user`)이다. 이 결정은 `AGENTS.md` §11의 전용 identity 권고보다 우선한다.
+
+```sh
+# runner와 같은 Unix 계정으로, main checkout에서 실행
+python3 -I engineering/scripts/control_plane_local.py preflight --target BeautifulMind-JT/kix-protocol
+python3 -I engineering/scripts/control_plane_local.py dispatch --target BeautifulMind-JT/kix-protocol \
+  --issue-number 12 --expected-task-id T-12 --expected-task-revision r1 \
+  --expected-builder-id DEVIN --expected-issue-body-sha256 <64 hex> [--expected-attempt-id 2]
+```
+
+- 기존 gate는 모두 그대로다: `activation.json`(runtime_enabled/승인), `activated_runtime_sha`와
+  `RUNTIME_PATHS`, host admission ledger, 명시적 재시도 규칙, record 작성자 검증.
+- 추가 gate: root 소유 `/etc/astra/local-dispatch.json`의 `enabled=true`
+  (예시 `.github/control-plane/local-dispatch.example.json`, 기본 false), checkout이 `main`,
+  토큰 파일은 실행 계정 소유 0600, lock 디렉터리는 실행 계정 소유 0700.
+- workflow concurrency group 대신 task별 `flock`이 한 번에 한 발송만 허용한다.
+  launch가 예외로 끝나도 finalize는 항상 실행해 정확한 결과(또는 UNKNOWN)를 기록한다.
+- host helper는 runner UID만 launch/preflight/status를 허용하므로 runner와 같은 계정으로 실행한다.
+  builder UID는 토큰 파일을 읽을 수 없어야 한다.
+- 발송 경로는 한 번에 하나만 쓴다. 로컬 경로를 켜면 self-hosted runner의 runtime workflow는
+  쓰지 않는다. 두 경로가 겹쳐도 같은 task·revision·attempt는 같은 `launch_request_id`이고 host
+  ledger가 request당 한 번·task당 활성 reservation 하나만 허용하므로 두 번 보내지는 않는다.
+  다만 중복 control record가 남아 reconciliation 전까지 그 task가 막힌다.
+
 ## Wrapper contract
 
 ```text

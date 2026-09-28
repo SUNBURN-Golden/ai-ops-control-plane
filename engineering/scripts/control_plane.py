@@ -68,6 +68,8 @@ RUNTIME_PATHS = (
     "docs/BUILDER_LANES.md", "docs/ASTRA_SLACK.md",
     "scripts/test_control_plane_boundary.py",
     "scripts/control_plane_install.py", "scripts/test_control_plane_install.py",
+    "scripts/control_plane_local.py", "scripts/test_control_plane_local.py",
+    ".github/control-plane/local-dispatch.example.json",
     ".github/control-plane/config.json", ".github/control-plane/host-policy.example.json",
     ".github/control-plane/boundary-policy.example.json",
     ".github/workflows/control-plane-runtime.yml", ".github/workflows/control-plane-ci.yml",
