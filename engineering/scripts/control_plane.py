@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -741,13 +742,6 @@ def prepare_dispatch(issue_number: int, packet_path: Path, expected: Optional[Di
     # Duplicates return before provider preflight or any model invocation.
     host_preflight(envelope["BUILDER_ID"])
 
-    # Under the workflow's per-task concurrency lock, consume the one existing
-    # pending action by durably moving NOT_STARTED -> SUBMITTING before any
-    # external builder wrapper can run.
-    record["launch_state"] = "SUBMITTING"
-    record["last_error"] = None
-    api.update_comment(comment["id"], render_control_record(record))
-
     packet = {
         "schema_version": 2,
         "role": "WRITER",
@@ -766,12 +760,30 @@ def prepare_dispatch(issue_number: int, packet_path: Path, expected: Optional[Di
         "launch_request_id": record["launch_request_id"],
         "attempt_id": record["attempt_id"],
         "control_comment_id": comment["id"],
+        # Keys this session's delivery signer (docs/PROGRAM_MODE.md section 6); only the writer lane
+        # and the host ledger ever read it, so no other lane can sign this attempt's delivery.
+        "delivery_nonce": secrets.token_hex(16),
     }
-    packet_path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Packet first: if it cannot be written, the record stays NOT_STARTED and nothing is stranded.
+    write_private_json(packet_path, packet)
+
+    # Under the workflow's per-task concurrency lock, consume the one existing
+    # pending action by durably moving NOT_STARTED -> SUBMITTING before any
+    # external builder wrapper can run.
+    record["launch_state"] = "SUBMITTING"
+    record["last_error"] = None
+    api.update_comment(comment["id"], render_control_record(record))
     write_github_output("launch_required", "true")
     write_github_output("builder_id", envelope["BUILDER_ID"])
     write_github_output("launch_request_id", record["launch_request_id"])
     write_github_output("control_comment_id", str(comment["id"]))
+
+
+def write_private_json(path: Path, value: Dict[str, Any]) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)  # the mode argument applies only when the file is new
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
 def bound_result(result: dict, expected: dict) -> dict:

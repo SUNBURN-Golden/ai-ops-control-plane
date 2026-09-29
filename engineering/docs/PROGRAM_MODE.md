@@ -194,17 +194,33 @@ flowchart TD
   - 판정은 `head_sha`에 묶인다.
   - 리뷰 세션 동안 같은 작업의 WRITER 입장은 막힌다.
 
-**판정 결속 (P2 구현, 사전 리뷰 반영)**
-- 모든 레인이 같은 토큰으로 글을 쓰므로, 작성자 이름만으로는 누가 판정했는지 알 수 없다. `review_request_id`도 공개 정보로 계산할 수 있다.
-- 그래서 `operation=review`가 리뷰마다 비밀 nonce(32 hex)를 새로 만든다.
-  - nonce는 리뷰어 packet(mode 0600)에만 들어간다. control record에는 그 해시만 남는다.
-  - 판정 줄은 `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...> depth=<A1|A2> contract_change=<NO|YES> nonce=<nonce>`다.
-- reap이 판정을 **고정(pin)**한다. 아래가 모두 맞아야 한다.
-  - evidence가 리뷰한 PR의 리뷰 URL이다.
-  - 그 리뷰의 `commit_id`가 리뷰한 head다.
-  - 리뷰 시각이 그 리뷰어 예약의 host 시각 이후다.
-  - 판정 줄의 id, head, nonce 해시가 기록과 맞다.
-- merge-check은 PR에 올라온 리뷰를 세지 않는다. 고정된 판정만, 서로 다른 비작성자 레인 기준으로 센다.
+**판정 결속: 세션 서명과 host 고정 (P2 구현, 재검토 반영)**
+- 모든 레인이 같은 GitHub 계정으로 글을 쓴다. 그래서 GitHub에 있는 글(이슈 본문, control record 댓글, 리뷰 본문)은 어느 레인이든 고칠 수 있다. **gate 판단은 이 글을 근거로 쓰지 않는다.**
+- 근거는 세 가지뿐이다.
+  - host ledger(레인 UID는 쓸 수 없다)
+  - host가 기록한 `plan_commit`의 plan
+  - 살아 있는 PR 상태
+- control record는 사람과 현장 소장이 보는 투영(projection)이다.
+- **세션 서명**
+  - 발송할 때마다 비밀 키(32 hex)를 새로 만든다. 작성자 packet에는 `delivery_nonce`, 리뷰어 packet에는 `review_nonce`로 들어간다.
+  - packet은 mode 0600이다. 키는 그 세션의 레인 UID와 host ledger만 읽는다.
+  - adapter는 세션 디렉터리(0700) 안에 서명 도구 `signer.py`(0600)를 둔다. 모델은 이 도구를 실행해 나온 한 줄을 그대로 올린다.
+  - 판정 줄: `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...> depth=<A1|A2> contract_change=<NO|YES> mac=<HMAC-SHA256>`
+  - 전달 줄: `ASTRA_DELIVERY_V1 pr=<n> head=<sha> mac=<HMAC-SHA256>`
+  - 키는 공개되지 않는다. 그래서 다른 레인은 이 줄을 만들거나 고칠 수 없다. 작성자도 리뷰 판정을 만들 수 없고, 다른 작업의 전달 줄을 옮겨 써도 검증되지 않는다.
+- **host 고정 (write-once)**
+  - host `reap`이 저장된 packet의 키로 MAC을 검증한다.
+  - 리뷰 판정은 그 세션의 review id와 head를 가리켜야 한다.
+  - 검증된 내용은 해제 기록에 한 번만 고정된다. 다시 부를 때는 같은 evidence와 같은 줄이어야 한다. 다르면 거부한다.
+- **review id**
+  - 저장소, 작업, 전달한 작성자 시도의 host launch id, head, 슬롯으로 정한다.
+- **merge-check이 세는 것**
+  - host `task-status`의 리뷰어 행 중, 이번 전달의 review id로 고정된 판정만 센다.
+  - 판정을 낸 레인은 서로 달라야 하고, 그 작업의 작성자 레인(host 기록)이 아니어야 한다.
+  - PR에 올라온 글이나 control record의 `reviews[]`는 세지 않는다.
+- **판정 없이 끝난 리뷰어**
+  - 판정 없이 끝난 리뷰어는 차단 댓글(BLOCKED 등)을 evidence로 reap한다. 운영자가 reconcile할 수도 있다. 그다음 같은 슬롯을 attempt+1로 다시 발송한다.
+  - 그 review id로 올라온 판정이 PR에 이미 있으면, 차단 댓글로 reap할 수 없다. 판정을 버리지 못하게 하기 위해서다.
 
 ## 5. 질문 경로와 작은 설계 예외
 
@@ -244,12 +260,19 @@ v2의 wrapper `--session-status` 안은 **폐기했다.** P3 조사 결과, 세 
 adapter의 `status.json`은 참고용이다.
 
 **산출물 고정 (P2 구현)**
-- 작성자 reap의 evidence는 이 작업 이슈의 댓글 URL이어야 한다. 그 댓글은 이번 시도의 host 예약 시각 이후에 쓰여야 한다(`status`의 `reserved_at`).
-- `ASTRA_DELIVERY_V1`이면 PR 번호와 head를 control record의 `delivery`로 고정한다. 리뷰와 merge-check은 이 고정값만 쓴다.
+- 작성자 reap의 evidence는 이 작업 이슈의 댓글 URL이어야 한다.
+  - 그 댓글은 이번 시도의 host 예약 시각 이후에 쓰여야 한다(`status`의 `reserved_at`).
+  - 서명된 전달 줄은 정확히 하나여야 한다.
+- 전달 줄이면 host가 검증한 뒤 PR 번호와 head를 고정한다(§4.2). 리뷰와 merge-check은 이 host 고정값만 쓴다.
+- **PR 하나는 작업 하나의 전달물이다.** 다른 작업이 이미 고정한 PR을 전달하면 host가 거부한다. 거부하지 않으면 그 PR의 실제 작성자가 두 번째 작업의 "비작성자" 리뷰어가 될 수 있다.
 - 고정 뒤 PR head가 바뀌면 리뷰를 발송하지 않는다. 작성자가 다시 전달해야 한다.
-- 새 시도는 `delivery`와 `reviews[]`를 이어받지 않는다.
+- 새 시도는 이전 시도의 전달과 리뷰를 이어받지 않는다.
+- 작업 소유 레인(owner lane)은 host 기록의 첫 작성자 세션 레인이다.
+- **의존 노드**
+  - `start`와 merge-check은 `depends_on` 노드가 DONE인지 기계적으로 확인한다.
+  - DONE은 그 노드에 고정된 전달 PR이 전달된 head 그대로 병합된 경우다. PR이 없는 노드는 이슈가 completed로 닫힌 경우다.
 
-**host `reap --launch-request-id <id> --evidence <URL>`**
+**host `reap --launch-request-id <id> --evidence <URL> [--pin-stdin]`** (서명 줄은 stdin의 `{"pin": "<line>"}`)
 - runner가 sudo로 호출할 수 있는 새 명령이다. 인수 형식은 status와 같이 제한한다.
 - 아래가 모두 참일 때만 `RECONCILED`로 바꾼다. resolution은 `SESSION_TERMINAL_VERIFIED`다.
   - 해당 행이 CONFIRMED다. WRITER와 REVIEWER 모두 해당한다.
@@ -471,10 +494,24 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 - ChatGPT Astra가 Slack 결정 채널을 보고 GitHub에 답하도록 설정한다.
 - Routine API 토큰을 GitHub secret에 등록한다.
 - M1(병합 위임)을 결정한다.
+- **M4(레인 토큰 권한)**를 결정한다. 지금은 모든 레인이 병합할 수 있는 개인 토큰을 쓴다. 레인이 계산된 gate를 거치지 않고 직접 병합하지 못하게 하려면 둘 중 하나를 고른다(§13).
+  - 레인별 병합 불가 신원
+  - 우회할 수 없는 branch protection
 
 ## 13. 남는 위험
 
-- **단일 토큰:** 역할 간 신원이 분리되지 않는다. 리뷰어의 읽기 전용도 강제되지 않는다(§4).
+- **단일 토큰:** 역할 간 GitHub 신원이 분리되지 않는다. 리뷰어의 읽기 전용도 강제되지 않는다(§4).
+  - gate 판단은 이 위험에서 분리했다(§4.2). 서명 키는 세션 레인 UID와 host만 읽는다. merge-check은 host 고정값, plan, 살아 있는 PR만 본다. 그래서 GitHub 글을 고쳐도 READY_FOR_MERGE는 바뀌지 않는다.
+  - **남는 것:** 병합할 수 있는 토큰을 가진 레인은 계산된 gate를 거치지 않고 PR을 직접 병합하거나 기본 브랜치에 push할 수 있다. 이것은 control plane이 막을 수 없다. 막으려면 둘 중 하나가 필요하다(`AGENTS.md` §11).
+    - 레인별 GitHub 신원을 쓰되 병합과 관리자 권한을 주지 않는다.
+    - 레인 토큰이 우회할 수 없는 branch protection을 건다.
+  - 이것은 User 결정 사항이다(M4, §12).
+- **CURSOR:** program mode에서 선택하지 않는다(`PROGRAM_LANES`). 지금 adapter는 schema v1 packet만 받고 systemd user manager가 필요하다. 그래서 reap의 레인 UID 정지 확인을 통과할 수 없다. v2 packet을 파일이나 stdin으로 받게 되면 M3에 따라 추가한다.
+- **레인 UID 정지 확인의 전제:** 이 확인은 세 가지를 전제한다.
+  - helper의 PID namespace가 `/proc`의 namespace와 같다(`NSpid` 1단계).
+  - 레인 UID에 subuid/subgid 범위가 없다.
+  - 레인 프로세스는 helper의 launch에서 시작된다.
+  - 앞의 두 가지는 reap마다 확인하고, 맞지 않으면 거부한다. 세 번째는 supervisor 가져오기(P3)에서 확인한다.
 - **동시성 상향:** 동시 세션이 1개에서 4개로 늘어, 실패도 동시에 여러 건 날 수 있다. ledger, boundary, 제품별 직렬화는 그대로 유지한다.
 - **Routine API와 실행 한도:** API는 실험 기능이다. 사건 유실이나 실행 거절이 생길 수 있어 지연을 보장하지 않는다(§8.1). 상태 기반 실행과 STALE 표시로 안전하게 멈추게 한다.
 - **스스로 끝나지 않는 세션:** 그 레인만 막힌다(§3.3). 운영자가 처리한다.

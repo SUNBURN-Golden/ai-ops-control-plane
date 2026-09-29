@@ -10,10 +10,12 @@ import argparse
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 import re
 from pathlib import Path
+import pwd
 import sqlite3
 import stat
 import subprocess
@@ -36,6 +38,14 @@ ROLES = ("WRITER", "REVIEWER")
 SAFE_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 REQUEST_RE = re.compile(r"[0-9a-f]{24}")
+NONCE_RE = re.compile(r"[0-9a-f]{32}")
+REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+# Session-signed marker lines (docs/PROGRAM_MODE.md section 4.2). The MAC key is the
+# packet's secret nonce, readable only by the session's own lane UID and this ledger.
+REVIEW_PIN_RE = re.compile(r"ASTRA_REVIEW_V1 review=([0-9a-f]{24}) head=([0-9a-f]{40}) "
+                           r"verdict=(PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED) depth=(A[0-3]) "
+                           r"contract_change=(NO|YES) mac=([0-9a-f]{64})")
+DELIVERY_PIN_RE = re.compile(r"ASTRA_DELIVERY_V1 pr=([1-9][0-9]{0,9}) head=([0-9a-f]{40}) mac=([0-9a-f]{64})")
 OPERATOR_ONLY = {"init", "reconcile", "migrate", "materialize-resolve"}
 MATERIALIZE_STATES = ("SUBMITTING", "CREATED", "UNKNOWN", "ABANDONED")
 CLEAN_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
@@ -203,6 +213,64 @@ def validate_packet(packet, policy):
     canonical(packet)
 
 
+def pin_mac(nonce, fields):
+    return hmac.new(bytes.fromhex(nonce), "|".join(fields).encode(), hashlib.sha256).hexdigest()
+
+
+def verify_pin(row, line):
+    """Verify a session-signed marker line against the stored packet. None pins nothing."""
+    if line is None:
+        return {"kind": "NONE"}
+    if not isinstance(line, str) or len(line) > 512:
+        raise HostError("invalid pin line")
+    packet = parse_json(row["packet"])
+    if row["role"] == "REVIEWER":
+        match, nonce = REVIEW_PIN_RE.fullmatch(line), packet.get("review_nonce")
+        if not match:
+            raise HostError("a reviewer pin must be exactly one ASTRA_REVIEW_V1 line")
+        review, head, verdict, depth, change, mac = match.groups()
+        if review != packet.get("review_request_id") or head != packet.get("head_sha"):
+            raise HostError("review pin does not name this session's review request and head")
+        fields = ("ASTRA_REVIEW_V1", review, head, verdict, depth, change)
+        pin = {"kind": "REVIEW", "review": review, "head": head, "verdict": verdict, "depth": depth,
+               "contract_change": change}
+    else:
+        match, nonce = DELIVERY_PIN_RE.fullmatch(line), packet.get("delivery_nonce")
+        if not match:
+            raise HostError("a writer pin must be exactly one ASTRA_DELIVERY_V1 line")
+        pr, head, mac = match.groups()
+        fields = ("ASTRA_DELIVERY_V1", packet["launch_request_id"], pr, head)
+        pin = {"kind": "DELIVERY", "pr": int(pr), "head": head}
+    if not isinstance(nonce, str) or not NONCE_RE.fullmatch(nonce):
+        raise HostError("launch packet has no signing nonce; the pin cannot be verified")
+    if not hmac.compare_digest(pin_mac(nonce, fields), mac):
+        raise HostError("pin MAC does not verify with this session's key")
+    return pin
+
+
+def iso(ts):
+    # Floored to the second, the resolution GitHub timestamps have.
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(ts)))
+
+
+def row_view(row):
+    """Public view of one launch row. Never includes the packet or its nonces."""
+    packet = parse_json(row["packet"]) if row["packet"] else {}
+    view = {"launch_request_id": row["request"], "state": row["state"], "role": row["role"], "lane": row["lane"],
+            "repository": row["repository"], "task": row["task"], "attempt_id": packet.get("attempt_id"),
+            "owner_lane": packet.get("owner_lane"), "reserved_at": iso(row["created"]), "reserved_ts": row["created"]}
+    if row["role"] == "REVIEWER":
+        view.update(review_request_id=row["review_key"], head_sha=packet.get("head_sha"),
+                    pr_number=packet.get("pr_number"))
+    if row["evidence"]:
+        evidence = parse_json(row["evidence"])
+        view.update(resolution=evidence.get("resolution"), pin=evidence.get("pin"),
+                    evidence=evidence.get("terminal_evidence"))
+        if isinstance(evidence.get("at"), (int, float)):
+            view.update(released_at=iso(evidence["at"]), released_ts=evidence["at"])
+    return view
+
+
 def result_for(packet, outcome, reason=None, session_id=None):
     result = {key: packet[key] for key in IDENTITY}
     result.update(outcome=outcome, session_id=session_id)
@@ -238,6 +306,39 @@ def safe_key(value, name):
     return value
 
 
+def own_pid_namespace_is_procs(status="/proc/self/status"):
+    """True when this process's PID namespace is the one the /proc mount shows (NSpid has one level).
+
+    Lanes are started by this helper's launch, so they live in this namespace or below it,
+    and every process in those namespaces is visible in this /proc.
+    """
+    try:
+        for line in Path(status).read_text(encoding="utf-8").splitlines():
+            if line.startswith("NSpid:"):
+                return len(line.split()[1:]) == 1
+    except OSError:
+        return False
+    return False
+
+
+def has_subordinate_ids(uid, files=("/etc/subuid", "/etc/subgid")):
+    """True when the lane may map subordinate IDs (its user-namespace processes would use other host UIDs)."""
+    try:
+        names = {str(uid), pwd.getpwuid(uid).pw_name}
+    except KeyError:
+        names = {str(uid)}
+    for path in files:
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True  # cannot prove absence
+        if any(line.split(":", 1)[0].strip() in names for line in text.splitlines() if ":" in line):
+            return True
+    return False
+
+
 def proc_hides_processes(mountinfo="/proc/self/mountinfo"):
     """True unless the topmost /proc mount is procfs without hidepid (other users' processes visible)."""
     try:
@@ -264,9 +365,9 @@ def live_processes(uid, proc="/proc"):
     or parsed makes the scan unverifiable (fail closed), never "absent".
     """
     found = []
-    for entry in os.scandir(proc):
-        if not entry.name.isdecimal():
-            continue
+    with os.scandir(proc) as entries:
+        pids = [entry for entry in entries if entry.name.isdecimal()]
+    for entry in pids:
         try:
             text = Path(entry.path, "status").read_text(encoding="utf-8", errors="replace")
         except (FileNotFoundError, ProcessLookupError):
@@ -291,9 +392,13 @@ def live_processes(uid, proc="/proc"):
 def lane_quiescence(lane, policy):
     if proc_hides_processes():
         raise HostError("/proc hides processes (hidepid); lane quiescence cannot be verified")
+    if not own_pid_namespace_is_procs():
+        raise HostError("/proc is not this helper's PID namespace; lane quiescence cannot be verified")
     uid = policy["builder_uids"].get(lane)
     if type(uid) is not int:
         raise HostError("lane has no registered builder UID")
+    if has_subordinate_ids(uid):
+        raise HostError("lane UID has subordinate uid/gid ranges; its user-namespace processes would be invisible")
     return live_processes(uid)
 
 
@@ -411,6 +516,10 @@ class Ledger:
                 if previous["packet"] != body:
                     raise HostError("launch_request_id reused with a different packet")
                 db.commit()
+                if previous["state"] == "RECONCILED":
+                    # The stored result names a session that is gone; replaying it would revive it.
+                    return False, result_for(packet, "FAILED_PRESTART",
+                                             "request already released on the host; a resume is a new attempt")
                 return False, parse_json(previous["result"])
             task = (packet["repository"], packet["task_id"])
             reason = None
@@ -469,17 +578,27 @@ class Ledger:
             raise HostError("invalid launch_request_id")
         db = self.connect()
         try:
-            row = db.execute("SELECT state, evidence, created FROM launches WHERE request=?", (request,)).fetchone()
+            row = db.execute("SELECT * FROM launches WHERE request=?", (request,)).fetchone()
         finally:
             db.close()
-        result = {"status": "FOUND" if row else "NOT_FOUND", "launch_request_id": request,
-                  "state": row["state"] if row else None}
-        if row:
-            # Host clock, floored to the second: nothing the session wrote can predate its reservation.
-            result["reserved_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(row["created"])))
-        if row and row["evidence"]:
-            result["resolution"] = parse_json(row["evidence"]).get("resolution")
-        return result
+        if row is None:
+            return {"status": "NOT_FOUND", "launch_request_id": request, "state": None}
+        # reserved_at is host time: nothing the session wrote can predate its reservation.
+        return {"status": "FOUND", **row_view(row)}
+
+    def task_status(self, repository, task):
+        """Read-only: every launch row of one task, the host record merge readiness is computed from."""
+        if not isinstance(repository, str) or not REPOSITORY_RE.fullmatch(repository):
+            raise HostError("invalid repository")
+        if not isinstance(task, str) or not task.strip() or len(task) > 256 or "\0" in task:
+            raise HostError("invalid task")
+        db = self.connect()
+        try:
+            rows = db.execute("SELECT * FROM launches WHERE repository=? AND task=? ORDER BY created, request",
+                              (repository, task)).fetchall()
+        finally:
+            db.close()
+        return {"status": "OK", "repository": repository, "task": task, "rows": [row_view(row) for row in rows]}
 
     def lanes(self, policy):
         """Read-only lane board source: active reservations per registered lane."""
@@ -495,8 +614,11 @@ class Ledger:
                            "active": [row for row in active if row["lane"] == lane]}
                           for lane in WRAPPERS if lane in policy["builder_uids"]]}
 
-    def reap(self, request, evidence, policy, *, quiescence=lane_quiescence):
-        """Retire a CONFIRMED session when its lane UID has no live process. Idempotent."""
+    def reap(self, request, evidence, policy, *, pin=None, quiescence=None):
+        """Retire a CONFIRMED session when its lane UID has no live process; pin its signed marker.
+
+        Write-once: a repeated reap must present the same evidence and pin, and gets the stored result.
+        """
         if not isinstance(request, str) or not REQUEST_RE.fullmatch(request):
             raise HostError("invalid launch_request_id")
         if not evidence_url(evidence):
@@ -511,28 +633,39 @@ class Ledger:
                 stored = parse_json(row["evidence"] or "{}")
                 if stored.get("resolution") != "SESSION_TERMINAL_VERIFIED":
                     raise HostError("request was reconciled by an operator, not reaped")
+                if stored.get("terminal_evidence") != evidence or stored.get("pin") != verify_pin(row, pin):
+                    raise HostError("reap is write-once: this session was released with different evidence or pin")
                 db.commit()
                 return {"status": "RECONCILED", "resolution": "SESSION_TERMINAL_VERIFIED",
                         "launch_request_id": request, "session_id": stored.get("session_id"),
-                        "evidence": stored.get("terminal_evidence"), "repeated": True}
+                        "evidence": stored.get("terminal_evidence"), "pin": stored.get("pin"), "repeated": True}
             if row["state"] != "CONFIRMED":
                 raise HostError(f"only a CONFIRMED session can be reaped (state {row['state']}); "
                                 "UNKNOWN/SUBMITTING stay operator-only")
             session = parse_json(row["result"]).get("session_id")
             if not isinstance(session, str) or not session.strip():
                 raise HostError("confirmed row lacks its session id")
-            pids = quiescence(row["lane"], policy)
+            pinned = verify_pin(row, pin)
+            if pinned["kind"] == "DELIVERY":
+                # One PR is the delivery of one task: otherwise the author of a PR could review it
+                # as a "non-owner" lane of the second task.
+                for other in db.execute("SELECT task, evidence FROM launches WHERE repository=? AND role='WRITER' "
+                                        "AND state='RECONCILED' AND task<>? AND evidence IS NOT NULL",
+                                        (row["repository"], row["task"])).fetchall():
+                    if (parse_json(other["evidence"]).get("pin") or {}).get("pr") == pinned["pr"]:
+                        raise HostError(f"PR {pinned['pr']} is already the delivery of task {other['task']}")
+            pids = (quiescence or lane_quiescence)(row["lane"], policy)
             if pids:
                 raise HostError(f"lane {row['lane']} still has {len(pids)} live process(es); session not terminal")
             at = self.clock()
             record = {"resolution": "SESSION_TERMINAL_VERIFIED", "session_id": session,
                       "verifier": "LANE_UID_QUIESCENT", "lane": row["lane"], "role": row["role"],
-                      "terminal_evidence": evidence, "at": at}
+                      "terminal_evidence": evidence, "pin": pinned, "at": at}
             db.execute("UPDATE launches SET state='RECONCILED', evidence=? WHERE request=? AND state='CONFIRMED'",
                        (canonical(record), request))
             db.commit()
             return {"status": "RECONCILED", "resolution": "SESSION_TERMINAL_VERIFIED", "launch_request_id": request,
-                    "session_id": session, "evidence": evidence, "repeated": False}
+                    "session_id": session, "evidence": evidence, "pin": pinned, "repeated": False}
         finally:
             db.close()
 
@@ -792,6 +925,9 @@ def main(argv=None):
     commands.add_parser("launch")
     commands.add_parser("init")
     commands.add_parser("migrate").add_argument("--to", type=int, required=True)
+    task_parser = commands.add_parser("task-status")
+    for flag in ("repository", "task"):
+        task_parser.add_argument("--" + flag, required=True)
     status_parser = commands.add_parser("status")
     which = status_parser.add_mutually_exclusive_group(required=True)
     which.add_argument("--launch-request-id")
@@ -799,6 +935,8 @@ def main(argv=None):
     reap_parser = commands.add_parser("reap")
     for flag in ("launch-request-id", "evidence"):
         reap_parser.add_argument("--" + flag, required=True)
+    reap_parser.add_argument("--pin-stdin", action="store_true",
+                             help='read {"pin": "<signed marker line>"} from stdin')
     reconcile_parser = commands.add_parser("reconcile")
     for flag in ("launch-request-id", "evidence"):
         reconcile_parser.add_argument("--" + flag, required=True)
@@ -829,10 +967,10 @@ def main(argv=None):
     args, packet = parser.parse_args(argv), None
     os.umask(0o077)
     try:
-        if args.command == "launch":
+        if args.command == "launch" or getattr(args, "pin_stdin", False):
             raw = sys.stdin.read(1024 * 1024 + 1)
             if len(raw) > 1024 * 1024:
-                raise HostError("launch packet too large")
+                raise HostError("stdin document too large")
             packet = parse_json(raw)
         policy = load_host_policy(args.command)
         ledger = Ledger(policy["ledger_path"])
@@ -848,7 +986,12 @@ def main(argv=None):
         elif args.command == "status":
             result = ledger.lanes(policy) if args.lanes else ledger.status(args.launch_request_id)
         elif args.command == "reap":
-            result = ledger.reap(args.launch_request_id, args.evidence, policy)
+            pin = packet.get("pin") if packet is not None else None
+            if args.pin_stdin and (set(packet) != {"pin"} or not isinstance(pin, str)):
+                raise HostError('reap --pin-stdin expects exactly {"pin": "<line>"}')
+            result = ledger.reap(args.launch_request_id, args.evidence, policy, pin=pin)
+        elif args.command == "task-status":
+            result = ledger.task_status(args.repository, args.task)
         elif args.command == "materialize-begin":
             result = ledger.materialize_begin(args.program, args.node, args.repository, args.plan_commit, policy)
         elif args.command == "materialize-finish":

@@ -50,6 +50,10 @@ class AdmissionTests(unittest.TestCase):
         self.calls.append(value["launch_request_id"])
         return subprocess.CompletedProcess([], 0, json.dumps(host.result_for(value, "CONFIRMED", session_id="session-" + value["launch_request_id"])))
 
+    def assertReleasedRefusal(self, result):
+        self.assertEqual((result["outcome"], result["session_id"]), ("FAILED_PRESTART", None))
+        self.assertIn("already released", result["reason"])
+
     def state(self, request="request-0"):
         db = sqlite3.connect(self.path)
         try:
@@ -129,7 +133,7 @@ class AdmissionTests(unittest.TestCase):
         self.assertIsNone(result["session_id"])
         self.assertEqual(self.state(), "RECONCILED")
         # The first result is retained: replay never authorizes another send.
-        self.assertEqual(host.launch(packet(), self.policy, self.ledger, self.invoke)["outcome"], "UNKNOWN")
+        self.assertReleasedRefusal(host.launch(packet(), self.policy, self.ledger, self.invoke))
         self.assertEqual(self.calls, [])
         self.assertEqual(host.launch(packet(1), self.policy, self.ledger, self.invoke)["outcome"], "CONFIRMED")
         db = sqlite3.connect(self.path)
@@ -215,7 +219,8 @@ class AdmissionTests(unittest.TestCase):
             self.ledger.reconcile("request-0", "wrong", "https://github.com/owner/ops/issues/13")
         self.ledger.reconcile("request-0", original["session_id"], "https://github.com/owner/ops/issues/13")
         self.assertEqual(self.state(), "RECONCILED")
-        self.assertEqual(host.launch(packet(), self.policy, self.ledger, self.invoke), original)
+        # A released request is never replayed: its stored CONFIRMED names a session that is gone.
+        self.assertReleasedRefusal(host.launch(packet(), self.policy, self.ledger, self.invoke))
         self.assertEqual(host.launch(packet(5, task_id="T-0"), self.policy, self.ledger, self.invoke)["outcome"], "CONFIRMED")
         self.assertEqual(len(self.calls), 2)
 
@@ -237,7 +242,7 @@ class AdmissionTests(unittest.TestCase):
         with self.assertRaises(host.HostError):
             self.ledger.reconcile("request-0", "operator-found-session", "PENDING")
         self.ledger.reconcile("request-0", "operator-found-session", "https://github.com/owner/ops/issues/13")
-        self.assertEqual(host.launch(packet(), self.policy, self.ledger, self.invoke)["outcome"], "UNKNOWN")
+        self.assertReleasedRefusal(host.launch(packet(), self.policy, self.ledger, self.invoke))
         self.assertEqual(self.calls, [])
 
     def test_adapter_inherits_fence_after_helper_descriptor_closes(self):
@@ -331,6 +336,8 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(rejected["outcome"], "FAILED_PRESTART")
         self.assertEqual(self.ledger.status("request-1"),
                          {"status": "FOUND", "launch_request_id": "request-1", "state": "FAILED_PRESTART",
+                          "role": "WRITER", "lane": "DEVIN", "repository": "owner/repo1", "task": "T-1",
+                          "attempt_id": 1, "owner_lane": None, "reserved_ts": self.ledger.clock(),
                           "reserved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(self.ledger.clock())))})
         self.assertEqual(self.ledger.status("request-0")["state"], "CONFIRMED")
         self.assertEqual(self.ledger.status("never-sent"),
@@ -637,6 +644,159 @@ class ProgramModeHostTests(unittest.TestCase):
                         host.authorize_identity(self.policy, command)
             with patch.dict(os.environ, {"SUDO_UID": "1060"}), self.assertRaises(host.HostError):
                 host.authorize_identity(self.policy, "reap")
+
+    # ------------------------------------------------------------ signed, write-once pins
+
+    def signed_review(self, value, verdict="PASS", depth="A1", change="NO", nonce=None, **fields):
+        fields = {"review": value["review_request_id"], "head": value["head_sha"], **fields}
+        mac = host.pin_mac(nonce or value["review_nonce"],
+                           ("ASTRA_REVIEW_V1", fields["review"], fields["head"], verdict, depth, change))
+        return (f"ASTRA_REVIEW_V1 review={fields['review']} head={fields['head']} verdict={verdict} "
+                f"depth={depth} contract_change={change} mac={mac}")
+
+    def signed_delivery(self, value, pr=7, head=HEAD, nonce=None):
+        mac = host.pin_mac(nonce or value["delivery_nonce"], ("ASTRA_DELIVERY_V1", value["launch_request_id"],
+                                                              str(pr), head))
+        return f"ASTRA_DELIVERY_V1 pr={pr} head={head} mac={mac}"
+
+    def reaped_writer(self):
+        w = writer(delivery_nonce="1" * 32)
+        self.launch(w)
+        return w
+
+    def test_reap_pins_a_verified_delivery_and_review(self):
+        w = self.reaped_writer()
+        done = self.ledger.reap(w["launch_request_id"], EVIDENCE, self.policy, pin=self.signed_delivery(w),
+                                quiescence=lambda lane, policy: [])
+        self.assertEqual(done["pin"], {"kind": "DELIVERY", "pr": 7, "head": HEAD})
+        r = reviewer(review_nonce="2" * 32)
+        self.launch(r)
+        verdict = self.ledger.reap(r["launch_request_id"], EVIDENCE, self.policy, pin=self.signed_review(r, "FAIL"),
+                                   quiescence=lambda lane, policy: [])
+        self.assertEqual((verdict["pin"]["kind"], verdict["pin"]["verdict"]), ("REVIEW", "FAIL"))
+        rows = self.ledger.task_status("owner/repo0", "T-0")["rows"]
+        self.assertEqual([(row["role"], row["pin"]["kind"]) for row in rows], [("WRITER", "DELIVERY"),
+                                                                               ("REVIEWER", "REVIEW")])
+        self.assertEqual(rows[1]["head_sha"], HEAD)
+        # Neither status nor task-status ever discloses a signing key.
+        for text in (json.dumps(rows), json.dumps(self.ledger.status(r["launch_request_id"]))):
+            self.assertNotIn("1" * 32, text)
+            self.assertNotIn("2" * 32, text)
+
+    def test_forged_or_mismatched_pins_are_refused_before_release(self):
+        w = self.reaped_writer()
+        r = reviewer(review_nonce="2" * 32)
+        cases = [
+            (w, self.signed_delivery(w, nonce="9" * 32), "MAC"),                 # another session's key
+            (w, self.signed_delivery(w).replace("pr=7", "pr=8"), "MAC"),          # edited after signing
+            (w, "ASTRA_DELIVERY_V1 pr=7 head=" + HEAD, "exactly one ASTRA_DELIVERY_V1"),
+            (w, self.signed_review(reviewer(review_nonce="2" * 32)), "writer pin"),
+        ]
+        for value, pin, expected in cases:
+            with self.subTest(expected=expected, pin=pin[:40]), self.assertRaisesRegex(host.HostError, expected):
+                self.ledger.reap(value["launch_request_id"], EVIDENCE, self.policy, pin=pin,
+                                 quiescence=lambda lane, policy: [])
+        self.assertEqual(self.ledger.status(w["launch_request_id"])["state"], "CONFIRMED")
+        self.reap(w)
+        self.launch(r)
+        for pin, expected in ((self.signed_review(r).replace("verdict=PASS", "verdict=FAIL"), "MAC"),
+                              (self.signed_review(r, head="b" * 40), "review request and head"),
+                              (self.signed_review(r, review="e" * 24), "review request and head")):
+            with self.subTest(expected=expected), self.assertRaisesRegex(host.HostError, expected):
+                self.ledger.reap(r["launch_request_id"], EVIDENCE, self.policy, pin=pin,
+                                 quiescence=lambda lane, policy: [])
+        self.assertEqual(self.ledger.status(r["launch_request_id"])["state"], "CONFIRMED")
+
+    def test_one_pr_is_the_delivery_of_one_task(self):
+        first = self.reaped_writer()
+        self.ledger.reap(first["launch_request_id"], EVIDENCE, self.policy, pin=self.signed_delivery(first),
+                         quiescence=lambda lane, policy: [])
+        second = writer(1, "GROK_BUILD", repository="owner/repo0", task_id="T-other", delivery_nonce="3" * 32)
+        self.launch(second)
+        with self.assertRaisesRegex(host.HostError, "already the delivery of task T-0"):
+            self.ledger.reap(second["launch_request_id"], EVIDENCE, self.policy, pin=self.signed_delivery(second),
+                             quiescence=lambda lane, policy: [])
+        done = self.ledger.reap(second["launch_request_id"], EVIDENCE, self.policy,
+                                pin=self.signed_delivery(second, pr=8), quiescence=lambda lane, policy: [])
+        self.assertEqual(done["pin"]["pr"], 8)
+
+    def test_a_packet_without_a_nonce_cannot_pin(self):
+        w = writer()  # no delivery_nonce
+        self.launch(w)
+        with self.assertRaisesRegex(host.HostError, "no signing nonce"):
+            self.ledger.reap(w["launch_request_id"], EVIDENCE, self.policy,
+                             pin=self.signed_delivery(w, nonce="1" * 32), quiescence=lambda lane, policy: [])
+        self.assertEqual(self.reap(w)["pin"], {"kind": "NONE"})  # released, with nothing pinned
+
+    def test_reap_is_write_once(self):
+        w = self.reaped_writer()
+        pin = self.signed_delivery(w)
+        self.ledger.reap(w["launch_request_id"], EVIDENCE, self.policy, pin=pin, quiescence=lambda lane, policy: [])
+        again = self.ledger.reap(w["launch_request_id"], EVIDENCE, self.policy, pin=pin,
+                                 quiescence=lambda lane, policy: [1])  # repeat never re-checks the lane
+        self.assertEqual((again["repeated"], again["pin"]["pr"]), (True, 7))
+        for evidence, other in ((EVIDENCE + "0", pin), (EVIDENCE, self.signed_delivery(w, pr=8)), (EVIDENCE, None)):
+            with self.subTest(evidence=evidence, other=other), self.assertRaisesRegex(host.HostError, "write-once"):
+                self.ledger.reap(w["launch_request_id"], evidence, self.policy, pin=other,
+                                 quiescence=lambda lane, policy: [])
+
+    def test_released_request_is_never_replayed(self):
+        w = self.reaped_writer()
+        self.reap(w)
+        replay = self.launch(w)
+        self.assertEqual((replay["outcome"], replay["session_id"]), ("FAILED_PRESTART", None))
+        self.assertEqual(self.ledger.status(w["launch_request_id"])["state"], "RECONCILED")
+
+    def test_task_status_validates_its_arguments(self):
+        for repository, task in (("no-slash", "T"), ("o/r", ""), ("o/r", "x" * 257), ("o/r", "a\0b")):
+            with self.subTest(repository=repository, task=task), self.assertRaises(host.HostError):
+                self.ledger.task_status(repository, task)
+        self.assertEqual(self.ledger.task_status("owner/repo0", "T-9")["rows"], [])
+
+    def test_reap_and_task_status_commands(self):
+        w = self.reaped_writer()
+        document = json.dumps({"pin": self.signed_delivery(w)})
+        with patch.object(host, "load_host_policy", return_value=self.policy), \
+             patch.object(host, "lane_quiescence", return_value=[]), \
+             patch("sys.stdin", io.StringIO(document)), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(host.main(["reap", "--launch-request-id", w["launch_request_id"], "--evidence", EVIDENCE,
+                                        "--pin-stdin"]), 0)
+        self.assertEqual(json.loads(stdout.getvalue())["pin"]["kind"], "DELIVERY")
+        with patch.object(host, "load_host_policy", return_value=self.policy), \
+             patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(host.main(["task-status", "--repository", "owner/repo0", "--task", "T-0"]), 0)
+        self.assertEqual(json.loads(stdout.getvalue())["rows"][0]["pin"]["head"], HEAD)
+        with patch.object(host, "load_host_policy", return_value=self.policy), \
+             patch("sys.stdin", io.StringIO('{"pin": "x", "extra": 1}')), patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(host.main(["reap", "--launch-request-id", w["launch_request_id"], "--evidence", EVIDENCE,
+                                        "--pin-stdin"]), 2)
+
+    # ------------------------------------------------------------ quiescence preconditions
+
+    def test_pid_namespace_must_be_the_proc_namespace(self):
+        status = Path(self.temp.name) / "status"
+        for text, expected in (("NSpid:\t4242\n", True), ("NSpid:\t4242\t7\n", False), ("Name:\tx\n", False)):
+            with self.subTest(text=text):
+                status.write_text(text)
+                self.assertIs(host.own_pid_namespace_is_procs(str(status)), expected)
+        self.assertFalse(host.own_pid_namespace_is_procs(str(status) + ".missing"))
+
+    def test_subordinate_id_ranges_block_quiescence(self):
+        subuid = Path(self.temp.name) / "subuid"
+        subuid.write_text("someone:100000:65536\n1030:200000:65536\n")
+        self.assertTrue(host.has_subordinate_ids(1030, (str(subuid),)))
+        self.assertFalse(host.has_subordinate_ids(1040, (str(subuid),)))
+        self.assertFalse(host.has_subordinate_ids(1040, (str(subuid) + ".missing",)))
+        with patch.object(host, "proc_hides_processes", return_value=False), \
+             patch.object(host, "own_pid_namespace_is_procs", return_value=True), \
+             patch.object(host, "has_subordinate_ids", return_value=True), \
+             self.assertRaisesRegex(host.HostError, "subordinate"):
+            host.lane_quiescence("DEVIN", self.policy)
+        with patch.object(host, "proc_hides_processes", return_value=False), \
+             patch.object(host, "own_pid_namespace_is_procs", return_value=False), \
+             self.assertRaisesRegex(host.HostError, "PID namespace"):
+            host.lane_quiescence("DEVIN", self.policy)
 
     def test_status_lanes_command(self):
         self.launch(writer())

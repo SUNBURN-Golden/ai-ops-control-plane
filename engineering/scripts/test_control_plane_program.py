@@ -1,4 +1,8 @@
-"""Program-mode runtime tests against a fake GitHub and the real host ledger (no network)."""
+"""Program-mode runtime tests against a fake GitHub and the real host ledger (no network).
+
+Every lane posts with the same GitHub account, so these tests treat all GitHub text as
+attacker-editable and check that gates follow only host pins, the plan and live PR state.
+"""
 import base64
 import hashlib
 import json
@@ -30,8 +34,24 @@ def plan(nodes=None):
                                 "audit_floor": "A1"}]}
 
 
+def node(node_id="n1", floor="A1", **extra):
+    return {"id": node_id, "title": f"t {node_id}", "spec": "s", "audit_floor": floor, **extra}
+
+
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def signed_delivery(packet, pr=7, head=HEAD):
+    mac = host.pin_mac(packet["delivery_nonce"], ("ASTRA_DELIVERY_V1", packet["launch_request_id"], str(pr), head))
+    return f"ASTRA_DELIVERY_V1 pr={pr} head={head} mac={mac}"
+
+
+def signed_review(packet, verdict="PASS", depth="A1", change="NO", nonce=None):
+    fields = ("ASTRA_REVIEW_V1", packet["review_request_id"], packet["head_sha"], verdict, depth, change)
+    mac = host.pin_mac(nonce or packet["review_nonce"], fields)
+    return (f"ASTRA_REVIEW_V1 review={packet['review_request_id']} head={packet['head_sha']} verdict={verdict} "
+            f"depth={depth} contract_change={change} mac={mac}")
 
 
 class FakeGitHub:
@@ -47,7 +67,7 @@ class FakeGitHub:
 
     # control_plane.GithubApi surface
     def issue(self, number):
-        return self.issues[number]
+        return json.loads(json.dumps(self.issues[number]))
 
     def comments(self, number):
         return [dict(c) for c in self.comments_by_issue.get(number, [])]
@@ -89,6 +109,8 @@ class FakeGitHub:
 
     def _request(self, method, path, payload=None):
         path_only = path.split("?")[0]
+        paged = re.search(r"[?&]page=(\d+)", path)
+        page = int(paged.group(1)) if paged else 1
         if method == "GET" and path_only == "":
             return {"default_branch": "main"}
         if method == "POST" and path_only == "/issues":
@@ -100,7 +122,6 @@ class FakeGitHub:
                 raise cp.ControlPlaneError("GitHub API POST /issues unavailable")
             return {"number": number, "labels": self.issues[number]["labels"]}
         if method == "GET" and path_only == "/issues":
-            page = int(re.search(r"[?&]page=(\d+)", path).group(1))
             return [dict(i) for i in self.issues.values()] if page == 1 else []
         match = re.fullmatch(r"/issues/(\d+)/labels", path_only)
         if match and method == "POST":
@@ -130,6 +151,9 @@ class FakeGitHub:
         match = re.fullmatch(r"/pulls/(\d+)", path_only)
         if match:
             return json.loads(json.dumps(self.pulls[int(match.group(1))]))
+        match = re.fullmatch(r"/pulls/(\d+)/reviews", path_only)
+        if match:
+            return [dict(r) for r in self.reviews.get(int(match.group(1)), [])] if page == 1 else []
         match = re.fullmatch(r"/pulls/(\d+)/reviews/(\d+)", path_only)
         if match:
             for review in self.reviews.get(int(match.group(1)), []):
@@ -138,7 +162,6 @@ class FakeGitHub:
             raise cp.ControlPlaneError("GitHub API GET review failed: 404")
         match = re.fullmatch(r"/commits/([0-9a-f]{40})/check-runs", path_only)
         if match:
-            page = int(re.search(r"[?&]page=(\d+)", path).group(1))
             return {"check_runs": self.checks.get(match.group(1), []) if page == 1 else []}
         match = re.fullmatch(r"/commits/([0-9a-f]{40})/status", path_only)
         if match:
@@ -179,6 +202,8 @@ class FakeHost:
             return self.ledger.lanes(self.policy)
         if command == "status":
             return self.ledger.status(flags["--launch-request-id"])
+        if command == "task-status":
+            return self.ledger.task_status(flags["--repository"], flags["--task"])
         if command == "preflight":
             lane = flags["--builder-id"]
             return {"status": "PASS", "builder_id": lane, "execution_mode": "PERSISTENT_SUPERVISOR",
@@ -189,7 +214,14 @@ class FakeHost:
         if command == "launch":
             return host.launch(packet, self.policy, self.ledger, self.confirm)
         if command == "reap":
-            return self.ledger.reap(flags["--launch-request-id"], flags["--evidence"], self.policy,
+            reap_flags = dict(zip(arguments[1:5:2], arguments[2:5:2]))
+            # Mirrors the helper CLI: a pin arrives only as {"pin": ...} on stdin with --pin-stdin.
+            if "--pin-stdin" in arguments:
+                assert set(packet) == {"pin"} and isinstance(packet["pin"], str)
+            else:
+                assert packet is None
+            return self.ledger.reap(reap_flags["--launch-request-id"], reap_flags["--evidence"], self.policy,
+                                    pin=(packet or {}).get("pin"),
                                     quiescence=lambda lane, policy: self.live.get(lane, []))
         if command == "materialize-begin":
             return self.ledger.materialize_begin(flags["--program"], flags["--node"], flags["--repository"],
@@ -243,32 +275,39 @@ class ProgramModeTests(unittest.TestCase):
         comment = cp.find_control_comment(self.gh.comments(issue), ACTOR)
         return cp.parse_control_record(comment["body"])
 
-    def materialized(self, node="n1", commit=PLAN1):
-        result = prog.materialize("zari", node, commit)
+    def edit_record(self, issue, change):
+        comment = cp.find_control_comment(self.gh.comments(issue), ACTOR)
+        record = cp.parse_control_record(comment["body"])
+        change(record)
+        self.gh.update_comment(comment["id"], cp.render_control_record(record))
+
+    def materialized(self, node_id="n1", commit=PLAN1):
+        result = prog.materialize("zari", node_id, commit)
         self.assertEqual(result["status"], "CREATED")
         return result["issue"]
 
-    def launch_writer(self, issue, node="n1", commit=PLAN1):
-        started = prog.start(issue, "zari", node, commit, self.file("packet.json"), preflight=lambda lane: True)
+    def launch_writer(self, issue, node_id="n1", commit=PLAN1):
+        started = prog.start(issue, "zari", node_id, commit, self.file("packet.json"), preflight=lambda lane: True)
         if started["status"] != "PREPARED":
             return started
+        self.assertEqual(self.file("packet.json").stat().st_mode & 0o777, 0o600)
         cp.launch_dispatch(self.file("packet.json"), self.file("result.json"))
         packet = json.loads(self.file("packet.json").read_text())
-        state = cp.finalize_dispatch(issue, self.file("result.json"), packet["launch_request_id"])
-        self.assertEqual(state, "CONFIRMED")
-        return {**started, "launch_request_id": packet["launch_request_id"]}
+        self.assertEqual(cp.finalize_dispatch(issue, self.file("result.json"), packet["launch_request_id"]),
+                         "CONFIRMED")
+        return {**started, "launch_request_id": packet["launch_request_id"], "packet": packet}
 
     def pr(self, pr=7, sha=HEAD, **overrides):
-        self.gh.pulls[pr] = {"state": "open", "draft": False, "mergeable_state": "clean",
+        self.gh.pulls[pr] = {"state": "open", "draft": False, "mergeable_state": "clean", "merged": False,
                              "head": {"sha": sha, "repo": {"full_name": REPO}}, "base": {"ref": "main"},
                              **overrides}
 
-    def deliver(self, issue, pr=7, head=HEAD, green=True, created_at=None, login=ACTOR):
+    def deliver(self, issue, writer, pr=7, head=HEAD, green=True, body=None, **comment):
         self.pr(pr, head)
         self.gh.checks[head] = [{"status": "completed", "conclusion": "success" if green else "failure"}]
-        comment = self.gh.create_comment(issue, f"ASTRA_DELIVERY_V1 pr={pr} head={head}",
-                                         login=login, created_at=created_at)
-        return f"https://github.com/{REPO}/issues/{issue}#issuecomment-{comment['id']}"
+        text = body if body is not None else "Ready.\n\n" + signed_delivery(writer["packet"], pr, head)
+        posted = self.gh.create_comment(issue, text, **comment)
+        return f"https://github.com/{REPO}/issues/{issue}#issuecomment-{posted['id']}"
 
     def launch_review(self, issue, slot=1):
         if not self.file("rpacket.json").exists():
@@ -283,18 +322,17 @@ class ProgramModeTests(unittest.TestCase):
         packet = json.loads(packet_file.read_text())
         self.assertEqual(prog.finalize_review(issue, self.file("rresult.json"), packet["launch_request_id"]),
                          "CONFIRMED")
-        return {**prepared, "launch_request_id": packet["launch_request_id"], "nonce": packet["review_nonce"]}
+        return {**prepared, "launch_request_id": packet["launch_request_id"], "packet": packet}
 
-    def post_review(self, pr, review, verdict="PASS", depth="A1", change="NO", nonce=None, **kwargs):
-        body = (f"ASTRA_REVIEW_V1 review={review['review_request_id']} head={HEAD} verdict={verdict} "
-                f"depth={depth} contract_change={change} nonce={nonce or review['nonce']}\n\nfindings")
+    def post_review(self, pr, review, verdict="PASS", depth="A1", change="NO", nonce=None, line=None, **kwargs):
+        body = (line or signed_review(review["packet"], verdict, depth, change, nonce)) + "\n\nfindings"
         return self.gh.add_review(pr, body, **kwargs)
 
-    def released_writer(self, issue=None, **deliver):
-        issue = issue or self.materialized()
-        writer = self.launch_writer(issue)
-        self.assertEqual(prog.reap(issue, writer["launch_request_id"], self.deliver(issue, **deliver))["status"],
-                         "RELEASED")
+    def released_writer(self, issue=None, node_id="n1", **deliver):
+        issue = issue or self.materialized(node_id)
+        writer = self.launch_writer(issue, node_id)
+        released = prog.reap(issue, writer["launch_request_id"], self.deliver(issue, writer, **deliver))
+        self.assertEqual(released["status"], "RELEASED")
         return issue, writer
 
     def reviewed(self, issue, slot=1, **verdict):
@@ -304,6 +342,9 @@ class ProgramModeTests(unittest.TestCase):
 
     def reasons(self, issue, pr=7):
         return " | ".join(prog.merge_check(issue, pr)["reasons"])
+
+    def rows(self, task="ZARI-N1"):
+        return self.host.ledger.task_status(REPO, task)["rows"]
 
     # ------------------------------------------------------------------ full cycle
 
@@ -315,13 +356,16 @@ class ProgramModeTests(unittest.TestCase):
         self.assertEqual((record["owner_lane"], record["launch_state"]), ("DEVIN", "CONFIRMED"))
         envelope = cp.parse_task_envelope(self.gh.issues[issue]["body"])
         self.assertEqual((envelope["BUILDER_ID"], envelope["TASK_ID"]), ("DEVIN", "ZARI-N1"))
-        self.assertEqual(prog.reap(issue, writer["launch_request_id"], self.deliver(issue))["status"], "RELEASED")
-        self.assertEqual(self.record(issue)["delivery"]["pr"], 7)
+        self.assertEqual(prog.reap(issue, writer["launch_request_id"], self.deliver(issue, writer))["status"],
+                         "RELEASED")
+        self.assertEqual(self.record(issue)["delivery"], {"kind": "DELIVERY", "pr": 7, "head": HEAD})
         review = self.launch_review(issue)
-        self.assertEqual(review["lane"], "GROK_BUILD")  # first idle lane, owner excluded
-        self.assertNotIn(review["nonce"], json.dumps(self.record(issue)))  # the record keeps only its hash
+        self.assertEqual(review["lane"], "GROK_BUILD")  # first idle lane, writer excluded
+        for secret in (review["packet"]["review_nonce"], writer["packet"]["delivery_nonce"]):
+            self.assertNotIn(secret, json.dumps(self.record(issue)))
+            self.assertNotIn(secret, json.dumps(self.rows()))
         prog.reap(issue, review["launch_request_id"], self.post_review(7, review))
-        self.assertEqual(self.record(issue)["reviews"][0]["verdict"]["result"], "PASS")
+        self.assertEqual(self.record(issue)["reviews"][0]["verdict"]["verdict"], "PASS")
         check = prog.merge_check(issue, 7)
         self.assertTrue(check["ready"], check["reasons"])
         self.assertEqual(check["head"], HEAD)
@@ -364,41 +408,38 @@ class ProgramModeTests(unittest.TestCase):
         self.pr(sha=other)  # the writer pushed after delivering
         self.gh.checks[other] = [{"status": "completed", "conclusion": "success"}]
         reasons = self.reasons(issue)
-        self.assertIn("pinned delivery", reasons)
+        self.assertIn("host-pinned delivery", reasons)
         self.assertIn("0 of 1 required", reasons)  # the PASS was for the delivered head only
 
-    def test_posted_review_copies_do_not_count_as_independent_reviews(self):
-        self.gh.contents[PLAN1] = plan([{"id": "n1", "title": "t", "spec": "s", "audit_floor": "A2"}])
+    def test_shallow_review_does_not_satisfy_a2(self):
+        self.gh.contents[PLAN1] = plan([node(floor="A2")])
         issue, _ = self.released_writer()
-        first = self.reviewed(issue, depth="A2")
-        # The same verdict line posted again, and a second review from the first lane's text: no session, no pin.
-        self.post_review(7, first, depth="A2")
-        self.post_review(7, first, depth="A2", login="someone-else")
+        self.reviewed(issue, depth="A1")
+        self.reviewed(issue, slot=2, depth="A2")
+        self.assertIn("1 of 2 required", self.reasons(issue))
+
+    def test_a2_needs_two_distinct_non_writer_lanes(self):
+        self.gh.contents[PLAN1] = plan([node(floor="A2")])
+        issue, _ = self.released_writer()
+        self.reviewed(issue, depth="A2")
         self.assertIn("1 of 2 required", self.reasons(issue))
         self.reviewed(issue, slot=2, depth="A2")
         check = prog.merge_check(issue, 7)
         self.assertTrue(check["ready"], check["reasons"])
 
-    def test_only_distinct_non_owner_lanes_count(self):
-        self.gh.contents[PLAN1] = plan([{"id": "n1", "title": "t", "spec": "s", "audit_floor": "A2"}])
-        issue, _ = self.released_writer()
-        self.reviewed(issue, depth="A2")
-        comment = cp.find_control_comment(self.gh.comments(issue), ACTOR)
-        original = cp.parse_control_record(comment["body"])
-        for lane in ("GROK_BUILD", "DEVIN"):  # the same reviewer lane again; the owner lane
-            with self.subTest(lane=lane):
-                record = json.loads(json.dumps(original))
-                record["reviews"].append({**record["reviews"][0], "slot": 2, "lane": lane,
-                                          "review_request_id": "e" * 24})
-                self.gh.update_comment(comment["id"], cp.render_control_record(record))
-                self.assertIn("1 of 2 required", self.reasons(issue))
-
-    def test_shallow_review_does_not_satisfy_a2(self):
-        self.gh.contents[PLAN1] = plan([{"id": "n1", "title": "t", "spec": "s", "audit_floor": "A2"}])
-        issue, _ = self.released_writer()
-        self.reviewed(issue, depth="A1")
-        self.reviewed(issue, slot=2, depth="A2")
-        self.assertIn("1 of 2 required", self.reasons(issue))
+    def test_a_verdict_from_a_writer_lane_never_counts(self):
+        issue, writer = self.released_writer()
+        # A reviewer launched on the writer's own lane (a caller bug: the packet lies about the owner).
+        review_id = prog.review_request_id(REPO, "ZARI-N1", writer["launch_request_id"], HEAD, 1)
+        packet = {**writer["packet"], "role": "REVIEWER", "builder_id": "DEVIN", "owner_lane": "GLM",
+                  "review_request_id": review_id, "review_nonce": "7" * 32, "head_sha": HEAD, "pr_number": 7,
+                  "launch_request_id": prog.review_launch_id(review_id, 1), "attempt_id": 1}
+        packet.pop("delivery_nonce")
+        self.assertEqual(host.launch(packet, self.host.policy, self.host.ledger, self.host.confirm)["outcome"],
+                         "CONFIRMED")
+        self.host.ledger.reap(packet["launch_request_id"], "https://github.com/o/r/pull/7#pullrequestreview-1",
+                              self.host.policy, pin=signed_review(packet), quiescence=lambda lane, policy: [])
+        self.assertIn("0 of 1 required", self.reasons(issue))
 
     def test_contract_change_goes_to_a_decision(self):
         issue, _ = self.released_writer()
@@ -406,23 +447,131 @@ class ProgramModeTests(unittest.TestCase):
         self.assertIn("contract change", self.reasons(issue))
 
     def test_merge_check_sends_astra_gated_work_to_the_user(self):
-        self.gh.contents[PLAN1] = plan([{"id": "n1", "title": "t", "spec": "s", "audit_floor": "A3"}])
-        issue = self.materialized()
-        self.launch_writer(issue)
-        self.deliver(issue)
+        self.gh.contents[PLAN1] = plan([node(floor="A3")])
+        issue, _ = self.released_writer()
         self.assertIn("Astra gate ARCHITECTURE", self.reasons(issue))
 
-    # ------------------------------------------------------------------ reap evidence pinning
+    def test_active_review_blocks_readiness(self):
+        self.gh.contents[PLAN1] = plan([node(floor="A2")])
+        issue, _ = self.released_writer()
+        self.reviewed(issue, depth="A2")
+        self.launch_review(issue, slot=2)
+        self.assertIn("still active", self.reasons(issue))
 
-    def test_writer_cannot_satisfy_its_own_review(self):
+    # ------------------------------------------------------------------ attacks from the re-review (R1-R7)
+
+    def test_r1_a_released_verdict_cannot_be_flipped(self):
+        issue, _ = self.released_writer()
+        review = self.reviewed(issue, verdict="FAIL")
+        copy = self.post_review(7, review, verdict="PASS")  # even a correctly signed second line
+        with self.assertRaisesRegex(cp.ControlPlaneError, "write-once"):
+            prog.reap(issue, review["launch_request_id"], copy)
+        self.assertIn("returned FAIL", self.reasons(issue))
+
+    def test_r2_an_edited_verdict_does_not_verify(self):
         issue, _ = self.released_writer()
         review = self.launch_review(issue)
-        # The review id is derivable from public data, but the nonce is not.
-        forged = self.post_review(7, review, nonce="0" * 32)
-        with self.assertRaisesRegex(cp.ControlPlaneError, "nonce"):
-            prog.reap(issue, review["launch_request_id"], forged)
-        self.assertEqual(self.record(issue)["reviews"][0]["state"], "CONFIRMED")
+        genuine = signed_review(review["packet"], "FAIL")
+        url = self.post_review(7, review, line=genuine.replace("verdict=FAIL", "verdict=PASS"))  # edited before reap
+        with self.assertRaisesRegex(cp.ControlPlaneError, "MAC"):
+            prog.reap(issue, review["launch_request_id"], url)
+        self.assertEqual(self.host.ledger.status(review["launch_request_id"])["state"], "CONFIRMED")
         self.assertIn("0 of 1 required", self.reasons(issue))
+
+    def test_writer_cannot_sign_a_review(self):
+        issue, writer = self.released_writer()
+        review = self.launch_review(issue)
+        # The writer knows its own delivery key, never the reviewer's.
+        forged = self.post_review(7, review, nonce=writer["packet"]["delivery_nonce"])
+        with self.assertRaisesRegex(cp.ControlPlaneError, "MAC"):
+            prog.reap(issue, review["launch_request_id"], forged)
+        self.assertIn("0 of 1 required", self.reasons(issue))
+
+    def test_r3_a_later_delivery_cannot_repin_a_released_writer(self):
+        issue, writer = self.released_writer()
+        later = self.deliver(issue, writer, pr=8, head="b" * 40)
+        with self.assertRaisesRegex(cp.ControlPlaneError, "write-once"):
+            prog.reap(issue, writer["launch_request_id"], later)
+        self.assertEqual(self.record(issue)["delivery"]["pr"], 7)
+
+    def test_r4_issue_body_edits_do_not_change_the_gates(self):
+        self.gh.contents[PLAN1] = plan([node(floor="A3")])
+        issue, _ = self.released_writer()
+        body = self.gh.issues[issue]["body"]
+        self.gh.issues[issue]["body"] = body.replace("AUDIT_FLOOR: A3", "AUDIT_FLOOR: A0").replace(
+            "ASTRA_GATE: ARCHITECTURE", "ASTRA_GATE: NONE")
+        reasons = self.reasons(issue)
+        self.assertIn("differs from the envelope", reasons)
+        self.assertIn("0 of 2 required", reasons)       # the floor still comes from the plan
+        self.assertIn("Astra gate ARCHITECTURE", reasons)
+        with self.assertRaisesRegex(cp.ControlPlaneError, "differs from the envelope"):
+            prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
+
+    def test_r5_one_pr_cannot_be_the_delivery_of_two_tasks(self):
+        self.gh.contents[PLAN1] = plan([node("n1"), node("n2")])
+        _, first_writer = self.released_writer(node_id="n1")
+        second = self.materialized("n2")
+        second_writer = self.launch_writer(second, "n2")
+        self.assertEqual(second_writer["lane"], "DEVIN")  # DEVIN is idle again after its release
+        # A line copied from task n1 does not verify under task n2's key.
+        copied = self.gh.create_comment(second, signed_delivery(first_writer["packet"]))
+        with self.assertRaisesRegex(cp.ControlPlaneError, "MAC"):
+            prog.reap(second, second_writer["launch_request_id"],
+                      f"https://github.com/{REPO}/issues/{second}#issuecomment-{copied['id']}")
+        # n2's own writer signing n1's PR is refused too.
+        with self.assertRaisesRegex(cp.ControlPlaneError, "already the delivery of task ZARI-N1"):
+            prog.reap(second, second_writer["launch_request_id"], self.deliver(second, second_writer))
+
+    def test_r6_control_record_edits_do_not_change_readiness(self):
+        issue, _ = self.released_writer()
+        self.edit_record(issue, lambda record: record.setdefault("reviews", []).append({
+            "launch_request_id": "e" * 24, "review_request_id": "e" * 24, "slot": 1, "lane": "GLM",
+            "head_sha": HEAD, "pr": 7, "state": "RELEASED", "attempt": 1,
+            "verdict": {"kind": "REVIEW", "verdict": "PASS", "depth": "A2", "contract_change": "NO", "head": HEAD}}))
+        self.edit_record(issue, lambda record: record.update(owner_lane="CURSOR"))
+        self.assertIn("0 of 1 required", self.reasons(issue))
+
+    def test_r7_reviewer_released_without_a_verdict_is_retried(self):
+        issue, _ = self.released_writer()
+        first = self.launch_review(issue)
+        blocked = self.gh.create_comment(issue, "BLOCKED: the PR does not build locally")
+        prog.reap(issue, first["launch_request_id"],
+                  f"https://github.com/{REPO}/issues/{issue}#issuecomment-{blocked['id']}")
+        retry = self.launch_review(issue)
+        self.assertEqual((retry["status"], retry["attempt"]), ("PREPARED", 2))
+        prog.reap(issue, retry["launch_request_id"], self.post_review(7, retry))
+        check = prog.merge_check(issue, 7)
+        self.assertTrue(check["ready"], check["reasons"])
+
+    def test_an_operator_reconciled_review_without_verdict_is_retried(self):
+        issue, _ = self.released_writer()
+        first = self.launch_review(issue)
+        self.host.ledger.reconcile(first["launch_request_id"], "cli:" + first["launch_request_id"],
+                                   f"https://github.com/{REPO}/issues/{issue}")
+        self.assertEqual(self.launch_review(issue)["attempt"], 2)
+
+    def test_a_posted_verdict_cannot_be_discarded_by_a_blocker_reap(self):
+        issue, _ = self.released_writer()
+        review = self.launch_review(issue)
+        self.post_review(7, review, verdict="FAIL")
+        blocked = self.gh.create_comment(issue, "BLOCKED: re-roll please")
+        with self.assertRaisesRegex(cp.ControlPlaneError, "a verdict for this review request exists"):
+            prog.reap(issue, review["launch_request_id"],
+                      f"https://github.com/{REPO}/issues/{issue}#issuecomment-{blocked['id']}")
+
+    def test_f3_an_edited_record_cannot_revive_a_released_session(self):
+        issue, writer = self.released_writer()
+        self.edit_record(issue, lambda record: record.update(launch_state="NOT_STARTED"))
+        started = prog.start(issue, "zari", "n1", PLAN1, self.file("packet.json"), preflight=lambda lane: True)
+        self.assertEqual(started["status"], "PREPARED")
+        cp.launch_dispatch(self.file("packet.json"), self.file("result.json"))
+        packet = json.loads(self.file("packet.json").read_text())
+        state = cp.finalize_dispatch(issue, self.file("result.json"), packet["launch_request_id"])
+        # The same request (and so a new packet) is refused by the host: never a revived CONFIRMED.
+        self.assertNotEqual(state, "CONFIRMED")
+        self.assertEqual(self.host.ledger.status(writer["launch_request_id"])["state"], "RECONCILED")
+
+    # ------------------------------------------------------------------ reap evidence
 
     def test_review_evidence_must_be_at_the_reviewed_head_after_the_reservation(self):
         issue, _ = self.released_writer()
@@ -432,32 +581,32 @@ class ProgramModeTests(unittest.TestCase):
             (self.post_review(7, review, submitted_at="2000-01-01T00:00:00Z"), "predates"),
             (self.post_review(7, review, login="someone-else"), "not from the control actor"),
             (f"https://github.com/{REPO}/pull/8#pullrequestreview-1", "reviewed PR"),
-            (f"https://github.com/{REPO}/issues/{issue}#issuecomment-1", "review URL"),
+            (self.gh.add_review(7, "looks fine"), "exactly one signed ASTRA_REVIEW_V1"),
         ]
         for evidence, expected in cases:
             with self.subTest(expected=expected):
                 with self.assertRaisesRegex(cp.ControlPlaneError, expected):
                     prog.reap(issue, review["launch_request_id"], evidence)
-        self.assertEqual(self.record(issue)["reviews"][0]["state"], "CONFIRMED")
+        self.assertEqual(self.host.ledger.status(review["launch_request_id"])["state"], "CONFIRMED")
 
-    def test_writer_evidence_must_be_a_fresh_deliverable_on_this_task(self):
+    def test_writer_evidence_must_be_a_fresh_signed_deliverable_on_this_task(self):
         issue = self.materialized()
         writer = self.launch_writer(issue)
         other = self.gh.new_issue("other", "x")
+        unsigned = f"ASTRA_DELIVERY_V1 pr=7 head={HEAD}"
         cases = [
-            (self.deliver(issue, created_at="2000-01-01T00:00:00Z"), "predates"),
-            (self.deliver(issue, login="someone-else"), "not from the control actor"),
-            (self.deliver(other), "this task issue"),
+            (self.deliver(issue, writer, created_at="2000-01-01T00:00:00Z"), "predates"),
+            (self.deliver(issue, writer, login="someone-else"), "not from the control actor"),
+            (self.deliver(other, writer), "comment URL on this task issue"),
             (f"https://github.com/{REPO}/pull/7#pullrequestreview-1", "comment URL"),
+            (self.deliver(issue, writer, body=unsigned), "no signed ASTRA_DELIVERY_V1"),
+            (self.deliver(issue, writer, body=signed_delivery(writer["packet"]) + "\n" +
+                          signed_delivery(writer["packet"], 8)), "more than one"),
         ]
         for evidence, expected in cases:
             with self.subTest(expected=expected):
                 with self.assertRaisesRegex(cp.ControlPlaneError, expected):
                     prog.reap(issue, writer["launch_request_id"], evidence)
-        plain = self.gh.create_comment(issue, "working on it")
-        with self.assertRaisesRegex(cp.ControlPlaneError, "no ASTRA_DELIVERY_V1"):
-            prog.reap(issue, writer["launch_request_id"],
-                      f"https://github.com/{REPO}/issues/{issue}#issuecomment-{plain['id']}")
         self.assertEqual(self.record(issue)["launch_state"], "CONFIRMED")
 
     def test_blocker_reap_releases_without_a_delivery(self):
@@ -469,14 +618,47 @@ class ProgramModeTests(unittest.TestCase):
         record = self.record(issue)
         self.assertEqual((record["launch_state"], record.get("delivery")), ("RELEASED", None))
         self.assertEqual(record["last_deliverable"]["kind"], "DECISION_REQUIRED")
-        with self.assertRaisesRegex(cp.ControlPlaneError, "pinned ASTRA_DELIVERY_V1"):
+        with self.assertRaisesRegex(cp.ControlPlaneError, "host-pinned ASTRA_DELIVERY_V1"):
             prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
+
+    def test_reap_refuses_a_launch_of_another_task(self):
+        self.gh.contents[PLAN1] = plan([node("n1"), node("n2")])
+        first = self.materialized("n1")
+        writer = self.launch_writer(first)
+        second = self.materialized("n2")
+        self.launch_writer(second, "n2")
+        with self.assertRaisesRegex(cp.ControlPlaneError, "not a host launch of this task"):
+            prog.reap(second, writer["launch_request_id"], self.deliver(first, writer))
 
     def test_review_refuses_when_the_pr_moved_off_the_delivered_head(self):
         issue, _ = self.released_writer()
         self.pr(sha="b" * 40)
         with self.assertRaisesRegex(cp.ControlPlaneError, "deliver again"):
             prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
+
+    def test_lost_released_projection_is_repaired_from_the_host(self):
+        issue = self.materialized()
+        writer = self.launch_writer(issue)
+        evidence = self.deliver(issue, writer)
+        self.gh.fail_update = True
+        with self.assertRaises(cp.ControlPlaneError):
+            prog.reap(issue, writer["launch_request_id"], evidence)
+        self.gh.fail_update = False
+        self.assertEqual(self.record(issue)["launch_state"], "CONFIRMED")  # projection lost
+        self.gh.comments_by_issue[issue] = [c for c in self.gh.comments_by_issue[issue]
+                                            if not evidence.endswith(f"-{c['id']}")]  # and the comment deleted
+        repaired = prog.reap(issue, writer["launch_request_id"], evidence)
+        self.assertEqual((repaired["status"], repaired["repeated"]), ("RELEASED", True))
+        record = self.record(issue)
+        self.assertEqual((record["launch_state"], record["delivery"]["head"]), ("RELEASED", HEAD))
+
+    def test_reap_refuses_while_lane_uid_has_live_processes(self):
+        issue = self.materialized()
+        writer = self.launch_writer(issue)
+        self.host.live["DEVIN"] = [321]
+        with self.assertRaises(cp.ControlPlaneError):
+            prog.reap(issue, writer["launch_request_id"], self.deliver(issue, writer))
+        self.assertEqual(self.record(issue)["launch_state"], "CONFIRMED")
 
     # ------------------------------------------------------------------ sessions and lanes
 
@@ -495,15 +677,14 @@ class ProgramModeTests(unittest.TestCase):
         record = self.record(issue)
         self.assertEqual(record["previous_attempts"][0]["fenced_by_host_state"], cp.VERIFIED_RELEASE)
         self.assertNotIn("delivery", record)  # a new attempt must deliver again
+        self.assertIn("host-pinned delivery", self.reasons(issue))
 
-    def test_operator_reconciled_session_resumes_on_the_owner_lane(self):
-        issue = self.materialized()
-        writer = self.launch_writer(issue)
-        self.host.ledger.reconcile(writer["launch_request_id"], "cli:" + writer["launch_request_id"],
-                                   f"https://github.com/{REPO}/issues/{issue}")
-        resumed = self.launch_writer(issue)
-        self.assertEqual((resumed["lane"], resumed["attempt"]), ("DEVIN", 2))
-        self.assertEqual(self.record(issue)["previous_attempts"][0]["fenced_by_host_state"], "SESSION_TERMINAL")
+    def test_owner_lane_comes_from_the_host_not_the_record(self):
+        issue, _ = self.released_writer(green=False)
+        self.edit_record(issue, lambda record: record.update(owner_lane="GLM"))
+        with self.assertRaisesRegex(cp.ControlPlaneError, "owned by lane GLM"):
+            # The host says DEVIN; the edited record's own owner check then refuses the mismatch.
+            prog.start(issue, "zari", "n1", PLAN1, self.file("p.json"), preflight=lambda lane: True)
 
     def test_released_task_is_never_redispatched_under_the_old_request(self):
         issue, writer = self.released_writer()
@@ -515,6 +696,15 @@ class ProgramModeTests(unittest.TestCase):
         with self.assertRaisesRegex(cp.ControlPlaneError, "RELEASED task: a resume requires expected_attempt_id=2"):
             cp.prepare_dispatch(issue, self.file("manual.json"), expected)
         self.assertEqual(self.record(issue)["launch_request_id"], writer["launch_request_id"])
+
+    def test_operator_reconciled_session_resumes_on_the_owner_lane(self):
+        issue = self.materialized()
+        writer = self.launch_writer(issue)
+        self.host.ledger.reconcile(writer["launch_request_id"], "cli:" + writer["launch_request_id"],
+                                   f"https://github.com/{REPO}/issues/{issue}")
+        resumed = self.launch_writer(issue)
+        self.assertEqual((resumed["lane"], resumed["attempt"]), ("DEVIN", 2))
+        self.assertEqual(self.record(issue)["previous_attempts"][0]["fenced_by_host_state"], "SESSION_TERMINAL")
 
     def test_owner_live_blocks_restart_until_verified_release(self):
         issue = self.materialized()
@@ -530,18 +720,18 @@ class ProgramModeTests(unittest.TestCase):
 
     def test_review_waits_for_verified_writer_release(self):
         issue = self.materialized()
-        self.launch_writer(issue)
-        self.deliver(issue)
-        with self.assertRaisesRegex(cp.ControlPlaneError, "RELEASED"):
+        writer = self.launch_writer(issue)
+        self.deliver(issue, writer)
+        with self.assertRaisesRegex(cp.ControlPlaneError, "released current writer attempt"):
             prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
 
-    def test_a2_second_reviewer_excludes_owner_and_first_reviewer(self):
-        self.gh.contents[PLAN1] = plan([{"id": "n1", "title": "t", "spec": "s", "audit_floor": "A2"}])
+    def test_a2_second_reviewer_excludes_writer_and_first_reviewer(self):
+        self.gh.contents[PLAN1] = plan([node(floor="A2")])
         issue, _ = self.released_writer()
         first = self.launch_review(issue, slot=1)
         second = self.launch_review(issue, slot=2)
         self.assertEqual((first["lane"], second["lane"]), ("GROK_BUILD", "GLM"))
-        self.assertNotEqual(first["nonce"], second["nonce"])
+        self.assertNotEqual(first["packet"]["review_nonce"], second["packet"]["review_nonce"])
         again = prog.prepare_review(issue, 1, self.file("r1.json"), preflight=lambda lane: True)
         self.assertEqual(again["status"], "REVIEW_EXISTS")
         with self.assertRaises(cp.ControlPlaneError):
@@ -552,27 +742,30 @@ class ProgramModeTests(unittest.TestCase):
         with self.assertRaisesRegex(cp.ControlPlaneError, "does not require review slot 2"):
             prog.prepare_review(issue, 2, self.file("r.json"), preflight=lambda lane: True)
 
-    def test_lost_released_projection_is_repaired_from_host_result(self):
-        issue = self.materialized()
-        writer = self.launch_writer(issue)
-        evidence = self.deliver(issue)
-        self.gh.fail_update = True
-        with self.assertRaises(cp.ControlPlaneError):
-            prog.reap(issue, writer["launch_request_id"], evidence)
-        self.gh.fail_update = False
-        self.assertEqual(self.record(issue)["launch_state"], "CONFIRMED")  # projection lost
-        repaired = prog.reap(issue, writer["launch_request_id"], evidence)
-        self.assertEqual((repaired["status"], repaired["repeated"]), ("RELEASED", True))
-        record = self.record(issue)
-        self.assertEqual((record["launch_state"], record["delivery"]["head"]), ("RELEASED", HEAD))
+    def test_cursor_is_never_selected_in_program_mode(self):
+        board = {"active_total": 0, "max_active_sessions": 4,
+                 "lanes": [{"lane": lane, "enabled": True, "active": []} for lane in prog.LANE_ORDER]}
+        self.assertIsNone(prog.select_lane(board, self.cfg, exclude={"DEVIN", "GROK_BUILD", "GLM"}))
 
-    def test_reap_refuses_while_lane_uid_has_live_processes(self):
-        issue = self.materialized()
-        writer = self.launch_writer(issue)
-        self.host.live["DEVIN"] = [321]
-        with self.assertRaises(cp.ControlPlaneError):
-            prog.reap(issue, writer["launch_request_id"], self.deliver(issue))
-        self.assertEqual(self.record(issue)["launch_state"], "CONFIRMED")
+    # ------------------------------------------------------------------ dependencies (F8)
+
+    def test_dependencies_must_be_done_before_start_and_merge(self):
+        self.gh.contents[PLAN1] = plan([node("n1"), node("n2", depends_on=["n1"])])
+        self.released_writer(node_id="n1")
+        second = self.materialized("n2")
+        waiting = prog.start(second, "zari", "n2", PLAN1, self.file("p.json"), preflight=lambda lane: True)
+        self.assertEqual((waiting["status"], waiting["pending"]), ("WAITING_ON_DEPENDENCIES", ["n1"]))
+        self.gh.pulls[7].update(merged=True, state="closed")  # n1's delivered head merged
+        started = self.launch_writer(second, "n2")
+        self.assertEqual(started["status"], "PREPARED")
+
+    def test_a_dependency_merged_at_another_head_is_not_done(self):
+        self.gh.contents[PLAN1] = plan([node("n1"), node("n2", depends_on=["n1"])])
+        self.released_writer(node_id="n1")
+        self.gh.pulls[7].update(merged=True, state="closed", head={"sha": "b" * 40, "repo": {"full_name": REPO}})
+        second = self.materialized("n2")
+        waiting = prog.start(second, "zari", "n2", PLAN1, self.file("p.json"), preflight=lambda lane: True)
+        self.assertEqual(waiting["status"], "WAITING_ON_DEPENDENCIES")
 
     # ------------------------------------------------------------------ materialize and plan
 
@@ -659,7 +852,7 @@ class ProgramModeTests(unittest.TestCase):
         self.assertEqual(prog.select_lane(board, self.cfg), "DEVIN")
         board["lanes"][0]["active"] = [{"request": "x"}]
         self.assertEqual(prog.select_lane(board, self.cfg), "GROK_BUILD")
-        self.assertEqual(prog.select_lane(board, self.cfg, preflight=lambda lane: lane == "CURSOR"), "CURSOR")
+        self.assertEqual(prog.select_lane(board, self.cfg, preflight=lambda lane: lane == "GLM"), "GLM")
         self.assertEqual(prog.select_lane(board, {**self.cfg, "enabled_builders": ["DEVIN"]}), None)
         board["active_total"] = 4
         self.assertIsNone(prog.select_lane(board, self.cfg))
@@ -675,6 +868,8 @@ class ProgramModeTests(unittest.TestCase):
             prog.validate_plan({**plan(), "repository": "other/repo"}, self.cfg)
         with self.assertRaises(cp.ControlPlaneError):
             prog.validate_plan(plan([{"id": "a b", "title": "t", "spec": "s"}]), self.cfg)
+        with self.assertRaisesRegex(cp.ControlPlaneError, "case-insensitive"):
+            prog.validate_plan(plan([node("n1"), node("N1")]), self.cfg)
         a3 = prog.validate_plan(plan([{"id": "a", "title": "t", "spec": "s", "audit_floor": "A3"}]), self.cfg)
         self.assertEqual(a3["nodes"][0]["astra_gate"], "ARCHITECTURE")
 

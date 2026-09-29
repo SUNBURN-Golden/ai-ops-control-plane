@@ -43,7 +43,9 @@ control 계정의 HOME/secret store도 builder에 열지 않는다.
 
 runner의 sudo 허용은 고정 helper의 `launch`, 정확한 세 builder별
 `preflight --builder-id ...` command, 읽기 전용
-`status --launch-request-id <24자리 hex>` command만으로 제한한다. `status`는 sudoers에서
+`status --launch-request-id <24자리 hex>` command만으로 제한한다(program mode는
+아래 "runner가 sudo로 부를 수 있는 새 명령"의 `status --lanes`, `task-status`, `reap`,
+`materialize-*`를 더한다). `status`는 sudoers에서
 그 인수 형식만 허용하고(가능하면 정규식), ledger를 바꾸지 않는다. 이 항목이 없으면
 host-preflight와 모든 재시도가 fail-closed로 거부된다. shell, 임의 Python, 임의 인수,
 `init`, `reconcile`, root 실행을 허용하지 않는다. builder에는 이 sudo 권한이 없다.
@@ -140,14 +142,28 @@ control record 작성자는 그 토큰의 login이다. 이 결정은 `AGENTS.md`
    - 같은 레인에 활성 행이 둘이면 인덱스 생성이 실패해 전부 되돌아간다. 그때는 먼저 reconcile한다.
 
 **runner가 sudo로 부를 수 있는 새 명령.** 인수 형식은 정규식으로 제한한다.
-- `status --launch-request-id <id>`는 이제 `reserved_at`(host 예약 시각, 초 단위 내림)도 돌려준다. reap은 이 시각보다 앞선 산출물이나 리뷰를 증거로 받지 않는다.
+- `status --launch-request-id <id>`의 응답 필드가 늘었다.
+  - 추가 필드: role, lane, repository, task, attempt_id, owner_lane, `reserved_at`(host 예약 시각, 초 단위 내림), resolution, pin, evidence, `released_at`. 리뷰어 행에는 review id, head, PR 번호도 붙는다.
+  - packet과 서명 키는 절대 돌려주지 않는다.
+  - reap은 `reserved_at`보다 앞선 산출물이나 리뷰를 증거로 받지 않는다.
+- `task-status --repository <owner/repo> --task <TASK_ID>`: 한 작업의 모든 launch 행을 돌려준다(읽기 전용, 형식은 위와 같다). merge-check과 리뷰 발송의 근거다.
 - `status --lanes`: 읽기 전용 레인 현황.
-- `reap --launch-request-id <24 hex> --evidence <https URL>`
+- `reap --launch-request-id <24 hex> --evidence <https URL> [--pin-stdin]`
   - CONFIRMED 행만, 그 레인 builder UID의 live process가 0개일 때 `RECONCILED/SESSION_TERMINAL_VERIFIED`로 바꾼다.
-  - `/proc`에 hidepid가 있으면 거부한다.
-  - 같은 요청을 다시 부르면 저장된 결과를 그대로 돌려준다.
+  - `--pin-stdin`이면 stdin으로 `{"pin": "<서명된 한 줄>"}`만 받는다.
+    - 저장된 packet의 `delivery_nonce` 또는 `review_nonce`로 HMAC을 검증한다.
+    - 리뷰 판정은 그 세션의 review id와 head를 가리켜야 한다.
+    - 다른 작업이 이미 고정한 PR을 전달물로 가리키면 거부한다.
+    - 검증된 결과를 해제 기록에 고정한다.
+  - **write-once:** 같은 요청을 다시 부르면 저장된 결과를 돌려준다. 이때 evidence와 pin이 처음과 같아야 하고, 다르면 거부한다.
+  - 정지 확인은 fail-closed다. 아래 중 하나라도 해당하면 거부한다.
+    - `/proc`에 hidepid가 있다.
+    - helper의 PID namespace가 `/proc`의 namespace가 아니다(`NSpid`가 1단계가 아님).
+    - 레인 UID에 `/etc/subuid` 또는 `/etc/subgid` 범위가 있다.
+    - `/proc/<pid>/status`를 읽거나 해석할 수 없다.
   - 세션을 끄지 않는다.
   - adapter의 `status.json`은 빌더가 쓸 수 있는 곳에 있어 위조가 가능하다. 그래서 증거로 쓰지 않는다.
+- `launch`는 이미 해제된(RECONCILED) 요청을 다시 받으면 저장된 결과를 재생하지 않는다. 대신 `FAILED_PRESTART`("already released")를 돌려준다. 재개는 언제나 새 시도다.
 - `materialize-begin --program <id> --node <id> --repository <owner/repo> --plan-commit <40 hex>`
 - `materialize-finish --program <id> --node <id> --request <24 hex> --outcome CREATED|UNKNOWN [--issue N]`
 - `materialize-status --program <id> --node <id>`

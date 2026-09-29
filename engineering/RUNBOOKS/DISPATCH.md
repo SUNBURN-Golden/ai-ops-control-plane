@@ -738,9 +738,17 @@ Canonical task (`operation=materialize`):
 - the issue carries `ASTRA_TASK_KEY_V1 ... request=<id>`;
 - duplicate open issues stop as `DUPLICATE_TASK`.
 
+Authority: every lane posts with the same GitHub account, so GitHub text
+(issue bodies, the control record, review bodies) is never a gate input. Gates
+read the host ledger, the plan at the host-recorded `plan_commit`, and live PR
+state. The control record is a projection.
+
 Writer (`operation=start`):
-- the lane is the first idle lane in the fixed order, or the owner lane for a
-  resume;
+- `depends_on` nodes must be DONE (their pinned delivery PR merged at the
+  delivered head); otherwise `WAITING_ON_DEPENDENCIES`;
+- the lane is the first idle program lane (DEVIN, GROK_BUILD, GLM; CURSOR
+  waits for M3) in the fixed order, or, for a resume, the owner lane: the lane
+  of the task's first host writer session;
 - the envelope is rendered from the plan and pinned by its body hash;
 - a stale `plan_commit` is refused (`STALE_PLAN`);
 - the launch then follows §6–§8 unchanged.
@@ -754,33 +762,47 @@ Session release (`operation=reap`):
 
 Resume:
 - uses the explicit retry of §7 (`attempt_id + 1`) on the same owner lane;
-- is admitted only from `RELEASED` plus a host `SESSION_TERMINAL_VERIFIED`
-  result;
+- is admitted only when the host shows the previous request RECONCILED as
+  `SESSION_TERMINAL_VERIFIED` (reap) or `SESSION_TERMINAL` (operator reconcile
+  with the session id); the host never replays a released request;
 - a CONFIRMED record with that host result is a lost projection and is repaired
   first.
 
-Review (`operation=review`, the §13 states in `reviews[]`):
-- runs only after the writer is RELEASED and a matching `ASTRA_DELIVERY_V1`
-  exists;
-- the reviewer lane is the first idle lane, excluding the owner lane and the
-  other reviewers of the same head;
-- the verdict line is `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...>
-  depth=<A1|A2> contract_change=<NO|YES> nonce=<review_nonce>`; the nonce is
-  generated per review, travels only in the reviewer packet, and the record
-  keeps its hash;
+Review (`operation=review`, mirrored in `reviews[]`):
+- runs only after the host has pinned a signed delivery for the released
+  current writer attempt, and the live PR is still at that head;
+- the audit floor comes from the plan; the issue body must equal the envelope
+  rendered from the host-recorded plan;
+- the review id binds the repository, task, delivering writer launch id, head
+  and slot;
+- the reviewer lane is the first idle program lane, excluding every writer lane
+  of the task and the lane of the other slot;
+- a slot released without a verdict (blocker reap or operator reconcile) is
+  re-dispatched as attempt + 1;
 - a head change invalidates the review.
 
-Evidence pinning (`operation=reap`):
-- a writer's evidence is a comment on this task issue written after the
-  attempt's host reservation; an `ASTRA_DELIVERY_V1` is pinned as the record's
-  `delivery`, and review and merge readiness use only that pin;
+Session signatures and pins (`operation=reap`):
+- each writer and reviewer packet carries a fresh secret (`delivery_nonce`,
+  `review_nonce`), readable only by that session's lane UID and the host
+  ledger; the adapter gives the session a private signer that prints
+  `ASTRA_DELIVERY_V1 pr=<n> head=<sha> mac=<hmac>` or
+  `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...> depth=<A1|A2>
+  contract_change=<NO|YES> mac=<hmac>`;
+- a writer's evidence is a control-actor comment on this task written after
+  the attempt's host reservation, with exactly one signed delivery line or a
+  blocker marker;
 - a reviewer's evidence is its PR review at the reviewed head, after its host
-  reservation, whose verdict line matches the review id, head and nonce hash;
-- merge readiness counts pinned verdicts from distinct non-owner lanes, never
-  reviews merely posted on the PR.
+  reservation, with exactly one signed line for its review id; a blocker
+  comment is accepted only when no review names that review id;
+- the host verifies the MAC with the stored packet, refuses a PR that is
+  already another task's delivery, and pins the result write-once: a repeated
+  reap must present the same evidence and line.
 
 Merge readiness (`operation=merge-check`):
-- computes §18 for the exact head;
+- computes §18 for the exact head from host pins: the current writer's pinned
+  delivery must name this PR and head; verdicts count only when pinned for this
+  delivery's review ids, from distinct lanes that never wrote the task; any
+  active review blocks; dependencies must be DONE;
 - anything not machine-computable makes it not ready: Astra gates,
   undeclared project merge prerequisites, labels `needs-user`, `blocked` and
   `decision-required`;

@@ -163,7 +163,57 @@ def preflight():
     return 0
 
 
-def build_prompt(packet):
+SIGNER_TEMPLATE = """\
+# ASTRA session signer (docs/PROGRAM_MODE.md section 4.2). Private to this session:
+# never print, copy or quote this file. Run it with /usr/bin/python3 -I <this file> ...
+import hashlib, hmac, re, sys
+KEY, KIND, BOUND = {key!r}, {kind!r}, {bound!r}
+
+
+def mac(fields):
+    return hmac.new(bytes.fromhex(KEY), "|".join(fields).encode(), hashlib.sha256).hexdigest()
+
+
+args = sys.argv[1:]
+if KIND == "REVIEW":
+    if (len(args) != 3 or args[0] not in ("PASS", "PASS_WITH_NOTES", "FAIL", "DECISION_REQUIRED")
+            or args[1] not in ("A1", "A2") or args[2] not in ("NO", "YES")):
+        sys.exit("usage: PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED A1|A2 NO|YES")
+    review, head = BOUND
+    print(f"ASTRA_REVIEW_V1 review={{review}} head={{head}} verdict={{args[0]}} depth={{args[1]}} "
+          f"contract_change={{args[2]}} mac={{mac(('ASTRA_REVIEW_V1', review, head, *args))}}")
+else:
+    if len(args) != 2 or not re.fullmatch(r"[1-9][0-9]{{0,9}}", args[0]) or not re.fullmatch(r"[0-9a-f]{{40}}", args[1]):
+        sys.exit("usage: <pr number> <40-hex head sha>")
+    (request,) = BOUND
+    print(f"ASTRA_DELIVERY_V1 pr={{args[0]}} head={{args[1]}} mac={{mac(('ASTRA_DELIVERY_V1', request, *args))}}")
+"""
+HEX = re.compile(r"[0-9a-f]+")
+
+
+def write_signer(session_dir, packet):
+    """Write the session's private signer; None when the packet carries no signing nonce."""
+    if packet.get("schema_version") != 2:
+        return None
+    if packet.get("role") == "REVIEWER":
+        key, kind = packet.get("review_nonce"), "REVIEW"
+        bound = (packet.get("review_request_id"), packet.get("head_sha"))
+        lengths = (24, 40)
+    else:
+        key, kind, bound, lengths = packet.get("delivery_nonce"), "DELIVERY", (packet.get("launch_request_id"),), (None,)
+    if not isinstance(key, str) or len(key) != 32 or not HEX.fullmatch(key):
+        return None
+    for value, length in zip(bound, lengths):
+        if not isinstance(value, str) or (length and (len(value) != length or not HEX.fullmatch(value))):
+            return None
+    path = session_dir / "signer.py"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(SIGNER_TEMPLATE.format(key=key, kind=kind, bound=bound))
+    return path
+
+
+def build_prompt(packet, signer=None):
     common = [
         f"repository: {packet['repository']}",
         f"task_id: {packet['task_id']}",
@@ -186,26 +236,41 @@ def build_prompt(packet):
             "against the task specification, repository rules and acceptance",
             f"criteria, at depth {packet.get('audit_floor', 'A1')} (A2 adds concurrency, state,",
             "persistence, payment, security and protocol behavior).",
-            "Submit one GitHub pull request review whose body starts with this line:",
-            f"ASTRA_REVIEW_V1 review={packet.get('review_request_id')} head={packet.get('head_sha')} "
-            "verdict=<PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED> depth=<A1|A2> contract_change=<NO|YES> "
-            f"nonce={packet.get('review_nonce')}",
-            "Keep the nonce private: it appears only in that review line.",
-            "followed by the findings. If the head changes during review, stop and",
-            "report that instead. Then end the session.",
+            "When the review is complete, choose the verdict and run exactly:",
+            f"  /usr/bin/python3 -I {signer} <PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED> <A1|A2> <NO|YES>",
+            "(the last argument says whether the change alters a contract).",
+            "Submit one GitHub pull request review whose body starts with the single",
+            "line that command prints, followed by the findings. Do not edit that",
+            "review afterwards and do not post the line anywhere else. The signer file",
+            "is private to this session: never print, copy or quote its contents.",
+            "If the head changes during review, stop and report that instead.",
+            "Then end the session.",
             *common,
             f"owner_lane: {packet.get('owner_lane')}",
         ])
+    if signer is not None:
+        delivery = [
+            "When the pull request is ready, run exactly:",
+            f"  /usr/bin/python3 -I {signer} <pr number> <40-hex head sha>",
+            "and post one comment on the task issue containing the single line it",
+            "prints, then end the session. The signer file is private to this",
+            "session: never print, copy or quote its contents.",
+        ]
+    else:
+        delivery = [
+            "When the pull request is ready, post one comment on the task issue with",
+            "the exact line `ASTRA_DELIVERY_V1 pr=<number> head=<40-hex head sha>`,",
+            "then end the session.",
+        ]
     return "\n".join([
         "ASTRA control-plane dispatch (BUILDER_STANDARD).",
         "You are the assigned builder running locally via Grok CLI in an",
         "isolated per-task worktree. Work only within the referenced",
         "approved task scope. Investigate, implement, test/fix/retest, and",
         "report evidence in the worktree.",
-        "When the pull request is ready, post one comment on the task issue with",
-        "the exact line `ASTRA_DELIVERY_V1 pr=<number> head=<40-hex head sha>`,",
-        "then end the session. If blocked, post DECISION_REQUIRED, BLOCKED or",
-        "STALLED with the reason and end the session. Never merge.",
+        *delivery,
+        "If blocked, post DECISION_REQUIRED, BLOCKED or STALLED with the reason",
+        "and end the session. Never merge.",
         *common,
     ])
 
@@ -247,8 +312,18 @@ def launch():
             f"per-request state/worktree setup failed: {exc.strerror or exc}")))
         return 0
 
+    try:
+        signer = write_signer(session_dir, packet)
+    except OSError as exc:
+        print(json.dumps(result_for(
+            packet, "FAILED_PRESTART", f"session signer setup failed: {exc.strerror or exc}")))
+        return 0
+    if signer is None and packet.get("role") == "REVIEWER":
+        print(json.dumps(result_for(
+            packet, "FAILED_PRESTART", "reviewer packet lacks a valid review_nonce, head or review id")))
+        return 0
     prompt_file = session_dir / "prompt.txt"
-    prompt_file.write_text(build_prompt(packet), encoding="utf-8")
+    prompt_file.write_text(build_prompt(packet, signer), encoding="utf-8")
     os.chmod(prompt_file, 0o600)
     cli_session_uuid = str(uuid.uuid4())
     job_file = session_dir / "job.json"

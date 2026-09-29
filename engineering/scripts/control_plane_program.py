@@ -13,8 +13,14 @@ group and the host ledger's own transactions):
   start        assign the first idle lane (or the owner lane) and prepare a writer launch
   review       pick the first idle non-owner lane and prepare a reviewer launch
   finalize-review  record a reviewer launch outcome in the control record
-  reap         release a verified-terminal session and project RELEASED
+  reap         release a verified-terminal session; the host pins its signed marker
   merge-check  compute DISPATCH section 18 READY_FOR_MERGE for one PR head
+
+Authority: every lane posts to GitHub with the same account, so GitHub text (issue
+bodies, the control record comment, review bodies) is never a gate input. Gates read
+the host ledger (signed, write-once pins; lanes; attempts), the plan at the host-recorded
+plan commit, and live PR state. The control record is a projection for people and the
+coordinator.
 """
 from __future__ import annotations
 
@@ -33,15 +39,19 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 import control_plane as cp
 
 LANE_ORDER = ("DEVIN", "GROK_BUILD", "GLM", "CURSOR")
+# Lanes whose adapters take schema v2 packets and run without a per-user service manager.
+# CURSOR joins when its adapter does (User decision M3); until then it is never selected.
+PROGRAM_LANES = ("DEVIN", "GROK_BUILD", "GLM")
 TASK_LABEL = "aiops-task"
 PLAN_PATH = ".aiops/program.json"
 SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 SHA = re.compile(r"[0-9a-f]{40}")
 TASK_KEY_RE = re.compile(r"<!-- ASTRA_TASK_KEY_V1 program=(\S+) node=(\S+) request=([0-9a-f]{24}) -->")
-DELIVERY_RE = re.compile(r"ASTRA_DELIVERY_V1 pr=([1-9][0-9]*) head=([0-9a-f]{40})")
-REVIEW_RE = re.compile(r"ASTRA_REVIEW_V1 review=([0-9a-f]{24}) head=([0-9a-f]{40}) "
-                       r"verdict=(PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED) depth=(A[0-3]) "
-                       r"contract_change=(NO|YES) nonce=([0-9a-f]{32})")
+# Session-signed marker lines; the host verifies the MAC (control_plane_host.verify_pin).
+DELIVERY_RE = re.compile(r"ASTRA_DELIVERY_V1 pr=[1-9][0-9]{0,9} head=[0-9a-f]{40} mac=[0-9a-f]{64}")
+REVIEW_RE = re.compile(r"ASTRA_REVIEW_V1 review=([0-9a-f]{24}) head=[0-9a-f]{40} "
+                       r"verdict=(?:PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED) depth=A[0-3] "
+                       r"contract_change=(?:NO|YES) mac=[0-9a-f]{64}")
 AUDIT_FLOORS = ("A0", "A1", "A2", "A3")
 ASTRA_GATES = ("NONE", "MILESTONE", "ARCHITECTURE", "RELEASE")
 DELIVERABLE_MODES = ("PR", "NON_CODE_EVIDENCE", "NO_CHANGE_ALLOWED")
@@ -89,8 +99,8 @@ def issue_key(issue: Dict[str, Any]) -> Optional[tuple]:
 # --------------------------------------------------------------------------- host
 
 
-def host(arguments: List[str]) -> Dict[str, Any]:
-    report = cp.host_call(arguments)
+def host(arguments: List[str], document: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    report = cp.host_call(arguments, document)
     if report.get("status") == "ERROR":
         raise ProgramError(f"host refused: {report.get('reason')}")
     return report
@@ -121,7 +131,7 @@ def select_lane(board: Dict[str, Any], cfg: Dict[str, Any], exclude: Iterable[st
     excluded = set(exclude)
     for lane in LANE_ORDER:
         entry = lanes.get(lane)
-        if (lane in excluded or lane not in cfg["enabled_builders"] or not entry
+        if (lane in excluded or lane not in PROGRAM_LANES or lane not in cfg["enabled_builders"] or not entry
                 or entry.get("enabled") is not True or entry.get("active")):
             continue
         if preflight is not None and not preflight(lane):
@@ -165,6 +175,8 @@ def validate_plan(plan: Any, cfg: Dict[str, Any]) -> Dict[str, Any]:
     ids = [node.get("id") if isinstance(node, dict) else None for node in nodes]
     if any(not isinstance(i, str) or not SAFE.fullmatch(i) for i in ids) or len(set(ids)) != len(ids):
         raise ProgramError("node ids must be unique safe identifiers")
+    if len({task_id_for(plan["program"], i) for i in ids}) != len(ids):
+        raise ProgramError("node ids must stay unique as TASK_IDs (case-insensitive)")
     for node in nodes:
         if not isinstance(node.get("title"), str) or not node["title"].strip():
             raise ProgramError(f"node {node['id']} needs a title")
@@ -275,10 +287,10 @@ def render_task(plan: Dict[str, Any], node: Dict[str, Any], plan_commit: str, is
         ("PROGRAM_KEY", f"{program}/{node['id']}"),
         ("PLAN_COMMIT", plan_commit),
     ]
-    delivery = ("Deliverable protocol (program mode): when the pull request is ready, post one comment on this "
-                "issue with the exact line `ASTRA_DELIVERY_V1 pr=<number> head=<40-hex head sha>`, then end the "
-                "session. If blocked, post `DECISION_REQUIRED`, `BLOCKED` or `STALLED` with the reason and end the "
-                "session. Do not merge.")
+    delivery = ("Deliverable protocol (program mode): when the pull request is ready, run this session's signer "
+                "(the session prompt gives the command) and post one comment on this issue containing the single "
+                "`ASTRA_DELIVERY_V1 ... mac=...` line it prints, then end the session. If blocked, post "
+                "`DECISION_REQUIRED`, `BLOCKED` or `STALLED` with the reason and end the session. Do not merge.")
     return "\n".join([
         key_line(program, node["id"], request), "", "# TASK ENVELOPE v4", "",
         *[f"{name}: {value}" for name, value in fields], "",
@@ -360,12 +372,94 @@ def materialize(program: str, node_id: str, plan_commit: str) -> Dict[str, Any]:
     return {"status": "CREATED", "program": program, "node": node_id, "request": request, "issue": issue}
 
 
-# --------------------------------------------------------------------------- start (writer)
+# --------------------------------------------------------------------------- host task view
 
 
 def control_record(api: cp.GithubApi, cfg: Dict[str, Any], issue_number: int):
     comment = cp.find_control_comment(api.comments(issue_number), cfg["control_record_actor"])
     return comment, (cp.parse_control_record(comment.get("body") or "") if comment else None)
+
+
+def task_rows(cfg: Dict[str, Any], task_id: str) -> List[Dict[str, Any]]:
+    """Every host launch row of one task, oldest first: the authority for owners, pins and reviews."""
+    report = host(["task-status", "--repository", cfg["repository"], "--task", task_id])
+    rows = report.get("rows")
+    if (report.get("repository"), report.get("task")) != (cfg["repository"], task_id) or not isinstance(rows, list) \
+            or not all(isinstance(row, dict) for row in rows):
+        raise ProgramError("host task status is malformed")
+    return rows
+
+
+def released(row: Optional[Dict[str, Any]]) -> bool:
+    return bool(row) and row.get("state") == "RECONCILED" and row.get("resolution") == cp.VERIFIED_RELEASE
+
+
+def pin_of(row: Optional[Dict[str, Any]], kind: str) -> Optional[Dict[str, Any]]:
+    pin = (row or {}).get("pin") if released(row) else None
+    return pin if isinstance(pin, dict) and pin.get("kind") == kind else None
+
+
+def writer_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # A prestart failure never had a session, so it neither owns the task nor is an attempt to review.
+    return [row for row in rows if row.get("role") == "WRITER" and row.get("state") != "FAILED_PRESTART"]
+
+
+def writer_lanes(rows: List[Dict[str, Any]]) -> set:
+    return {row.get("lane") for row in writer_rows(rows)}
+
+
+def current_writer(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    writers = writer_rows(rows)
+    return writers[-1] if writers else None
+
+
+def review_rows(rows: List[Dict[str, Any]], review_id: str) -> List[Dict[str, Any]]:
+    return [row for row in rows if row.get("role") == "REVIEWER" and row.get("review_request_id") == review_id]
+
+
+def task_context(api: cp.GithubApi, cfg: Dict[str, Any], issue_number: int):
+    """The canonical issue, the plan at the host-recorded plan commit, its node and the host record."""
+    issue = api.issue(issue_number)
+    key = issue_key(issue)
+    if not key:
+        raise ProgramError("task issue carries no ASTRA_TASK_KEY_V1")
+    program, node_id, request = key
+    status = host(["materialize-status", "--program", program, "--node", node_id])
+    if (status.get("status") != "CREATED" or status.get("issue") != issue_number or status.get("request") != request
+            or status.get("repository") != cfg["repository"]):
+        raise ProgramError("task issue is not the host-recorded canonical issue of its plan node")
+    plan = load_plan(api, cfg, status["plan_commit"])
+    if plan["program"] != program:
+        raise ProgramError("plan program key does not match the task key")
+    return issue, plan, plan_node(plan, node_id), status
+
+
+def rendered_body(issue: Dict[str, Any], plan: Dict[str, Any], node: Dict[str, Any], status: Dict[str, Any],
+                  lane: str) -> str:
+    return render_task(plan, node, status["plan_commit"], issue["html_url"], status["request"], lane)
+
+
+def dependency_done(api: cp.GithubApi, cfg: Dict[str, Any], plan: Dict[str, Any], node_id: str) -> bool:
+    """DONE: the pinned delivery PR was merged at its delivered head (or, without a PR, the issue completed)."""
+    status = host(["materialize-status", "--program", plan["program"], "--node", node_id])
+    if status.get("status") != "CREATED" or status.get("repository") != cfg["repository"]:
+        return False
+    if plan_node(plan, node_id)["deliverable_mode"] != "PR":
+        issue = api.issue(status["issue"])
+        return issue.get("state") == "closed" and issue.get("state_reason") == "completed"
+    pin = pin_of(current_writer(task_rows(cfg, task_id_for(plan["program"], node_id))), "DELIVERY")
+    if pin is None:
+        return False
+    pr = api._request("GET", f"/pulls/{pin['pr']}")
+    return pr.get("merged") is True and (pr.get("head") or {}).get("sha") == pin["head"]
+
+
+def pending_dependencies(api: cp.GithubApi, cfg: Dict[str, Any], plan: Dict[str, Any],
+                         node: Dict[str, Any]) -> List[str]:
+    return [dep for dep in node.get("depends_on", []) if not dependency_done(api, cfg, plan, dep)]
+
+
+# --------------------------------------------------------------------------- start (writer)
 
 
 def start(issue_number: int, program: str, node_id: str, plan_commit: str, packet_path: Path,
@@ -388,6 +482,10 @@ def start(issue_number: int, program: str, node_id: str, plan_commit: str, packe
     if issue.get("state") != "open" or issue_key(issue) != (program, node_id, status["request"]):
         raise ProgramError("canonical issue is closed or its task key does not match the host record")
     require_single_canonical(api, cfg, program, node_id, issue_number)
+    pending = pending_dependencies(api, cfg, plan, node)
+    if pending:
+        cp.write_github_output("launch_required", "false")
+        return {"status": "WAITING_ON_DEPENDENCIES", "issue": issue_number, "pending": pending}
     _, record = control_record(api, cfg, issue_number)
     board = host_lanes()
     tid = task_id_for(program, node_id)
@@ -408,7 +506,9 @@ def start(issue_number: int, program: str, node_id: str, plan_commit: str, packe
                 raise ProgramError(f"NEEDS_OPERATOR: record CONFIRMED but host is {host_state}")
         if state in {"FAILED_PRESTART", "RELEASED", "CONFIRMED"}:
             attempt = cp.record_attempt_id(record) + 1
-    owner = (record or {}).get("owner_lane")
+    # Ownership comes from the host: the lane of the task's first writer session.
+    writers = writer_rows(task_rows(cfg, tid))
+    owner = writers[0]["lane"] if writers else (record or {}).get("owner_lane")
     # A NOT_STARTED record is a pending action already bound to its lane; a
     # confirmed task keeps its owner lane. Otherwise take the first idle lane.
     pinned = owner or (record["builder_id"] if record and record["launch_state"] == "NOT_STARTED" else None)
@@ -441,9 +541,9 @@ def start(issue_number: int, program: str, node_id: str, plan_commit: str, packe
 # --------------------------------------------------------------------------- review
 
 
-def review_request_id(repository: str, task_id: str, revision: str, writer_attempt: int, head: str,
-                      slot: int) -> str:
-    material = f"review\0{repository}\0{task_id}\0{revision}\0{writer_attempt}\0{head}\0{slot}"
+def review_request_id(repository: str, task_id: str, writer_request: str, head: str, slot: int) -> str:
+    # Bound to the host writer attempt that delivered this head, not to editable record fields.
+    material = f"review\0{repository}\0{task_id}\0{writer_request}\0{head}\0{slot}"
     return hashlib.sha256(material.encode()).hexdigest()[:24]
 
 
@@ -451,11 +551,8 @@ def review_launch_id(review_id: str, attempt: int) -> str:
     return hashlib.sha256(f"review-launch\0{review_id}\0{attempt}".encode()).hexdigest()[:24]
 
 
-def delivered_pr(api: cp.GithubApi, cfg: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
-    """The delivery pinned at the writer's reap, checked against the live PR (same repo, default base)."""
-    delivery = record.get("delivery")
-    if not isinstance(delivery, dict):
-        raise ProgramError("no pinned ASTRA_DELIVERY_V1 for the current writer attempt")
+def live_delivered_pr(api: cp.GithubApi, cfg: Dict[str, Any], delivery: Dict[str, Any]) -> Dict[str, Any]:
+    """The host-pinned delivery, checked against the live PR (same repo, default base, same head)."""
     pr = api._request("GET", f"/pulls/{delivery['pr']}")
     head = (pr.get("head") or {})
     if (pr.get("state") != "open" or head.get("sha") != delivery["head"]
@@ -466,6 +563,21 @@ def delivered_pr(api: cp.GithubApi, cfg: Dict[str, Any], record: Dict[str, Any])
     return pr
 
 
+def project_review(record: Dict[str, Any], row: Dict[str, Any], slot: Optional[int] = None) -> Dict[str, Any]:
+    """Mirror one host reviewer row into the record's reviews[] (a projection only)."""
+    reviews = record.setdefault("reviews", [])
+    entry = next((r for r in reviews if r.get("launch_request_id") == row["launch_request_id"]), None)
+    if entry is None:
+        entry = {"launch_request_id": row["launch_request_id"], "review_request_id": row.get("review_request_id"),
+                 "slot": slot, "lane": row.get("lane"), "attempt": row.get("attempt_id"),
+                 "head_sha": row.get("head_sha"), "pr": row.get("pr_number"), "session_id": None,
+                 "confirmed_at": None, "verdict": None, "last_error": None}
+        reviews.append(entry)
+    state = {"RECONCILED": "RELEASED"}.get(row.get("state"), row.get("state"))
+    entry.update(state=state, verdict=pin_of(row, "REVIEW"))
+    return entry
+
+
 def prepare_review(issue_number: int, slot: int, packet_path: Path,
                    *, preflight: Callable[[str], bool] = preflight_ok) -> Dict[str, Any]:
     if slot not in (1, 2):
@@ -473,66 +585,69 @@ def prepare_review(issue_number: int, slot: int, packet_path: Path,
     cfg = cp.load_config()
     cp.require_runtime_enabled()
     api = api_for(cfg)
-    issue = api.issue(issue_number)
-    envelope = cp.parse_task_envelope(issue.get("body") or "")
+    issue, plan, node, mstatus = task_context(api, cfg, issue_number)
+    tid = task_id_for(plan["program"], node["id"])
+    floor = node["audit_floor"]
+    if REQUIRED_REVIEWS[floor] < slot:
+        raise ProgramError(f"audit floor {floor} does not require review slot {slot}")
+    rows = task_rows(cfg, tid)
+    writer = current_writer(rows)
+    delivery = pin_of(writer, "DELIVERY")
+    if delivery is None:
+        raise ProgramError("review waits for a host-pinned ASTRA_DELIVERY_V1 of the released current writer attempt")
+    if (issue.get("body") or "") != rendered_body(issue, plan, node, mstatus, writer["lane"]):
+        raise ProgramError("task issue body differs from the envelope rendered from the host-recorded plan")
     comment, record = control_record(api, cfg, issue_number)
-    if record is None or not record.get("owner_lane"):
-        raise ProgramError("review needs a task with an established owner lane")
-    if record["launch_state"] != "RELEASED":
-        raise ProgramError("review waits until the writer session is verified terminal (RELEASED)")
-    if REQUIRED_REVIEWS[envelope.get("AUDIT_FLOOR", "A1")] < slot:
-        raise ProgramError(f"audit floor {envelope.get('AUDIT_FLOOR')} does not require review slot {slot}")
-    delivered_pr(api, cfg, record)
-    pr_number, head = record["delivery"]["pr"], record["delivery"]["head"]
-    reviews = record.setdefault("reviews", [])
-    review_id = review_request_id(cfg["repository"], record["task_id"], record["task_revision"],
-                                  cp.record_attempt_id(record), head, slot)
-    entry = next((r for r in reviews if r.get("review_request_id") == review_id), None)
-    if entry is not None and entry["state"] in {"SUBMITTING", "UNKNOWN"}:
-        host_state = cp.host_request_status(entry["launch_request_id"])
-        if host_state.get("state") == "CONFIRMED":
-            entry.update(state="CONFIRMED", confirmed_at=entry.get("confirmed_at") or now_iso(),
-                         last_error="projection repaired from host CONFIRMED")
-            api.update_comment(comment["id"], cp.render_control_record(record))
-            cp.write_github_output("launch_required", "false")
-            return {"status": "REVIEW_EXISTS", "review_request_id": review_id, "repaired": True}
-        if host_state.get("state") not in ("FAILED_PRESTART", "RECONCILED"):
-            raise ProgramError(f"review {review_id} is {entry['state']} (host {host_state.get('state')}); "
-                               "operator reconciliation required")
-    elif entry is not None and entry["state"] in {"CONFIRMED", "RELEASED"}:
+    if record is None:
+        raise ProgramError("task has no control record")
+    live_delivered_pr(api, cfg, delivery)
+    head, pr_number = delivery["head"], delivery["pr"]
+    review_id = review_request_id(cfg["repository"], tid, writer["launch_request_id"], head, slot)
+    mine = review_rows(rows, review_id)
+    active = [row for row in mine if row.get("state") in ("SUBMITTING", "CONFIRMED", "UNKNOWN")]
+    if active or any(pin_of(row, "REVIEW") for row in mine):
+        for row in mine:
+            project_review(record, row, slot)
+        api.update_comment(comment["id"], cp.render_control_record(record))
+        if any(row.get("state") in ("SUBMITTING", "UNKNOWN") for row in active):
+            raise ProgramError(f"review {review_id} is unresolved on the host; operator reconciliation required")
         cp.write_github_output("launch_required", "false")
         return {"status": "REVIEW_EXISTS", "review_request_id": review_id}
-    exclude = {record["owner_lane"]} | {r["lane"] for r in reviews if r.get("head_sha") == head and r is not entry}
+    # No session and no verdict yet (or a prestart failure, or a release without a verdict): a new attempt.
+    attempt = max((row.get("attempt_id") or 0 for row in mine), default=0) + 1
+    others = [row for slot_other in (1, 2) if slot_other != slot
+              for row in review_rows(rows, review_request_id(cfg["repository"], tid, writer["launch_request_id"],
+                                                             head, slot_other))
+              if row.get("state") != "FAILED_PRESTART"]
+    exclude = writer_lanes(rows) | {row.get("lane") for row in others}
     lane = select_lane(host_lanes(), cfg, exclude=exclude, preflight=preflight)
     if lane is None:
         cp.write_github_output("launch_required", "false")
         return {"status": "NO_IDLE_LANE", "review_request_id": review_id}
-    attempt = 1 if entry is None else entry["attempt"] + 1
-    nonce = secrets.token_hex(16)  # only the reviewer's packet carries it; the record keeps its hash
-    new_entry = {"review_request_id": review_id, "slot": slot, "head_sha": head, "pr": pr_number,
-                 "lane": lane, "attempt": attempt, "launch_request_id": review_launch_id(review_id, attempt),
-                 "nonce_sha256": sha256_text(nonce), "state": "SUBMITTING", "session_id": None,
-                 "confirmed_at": None, "verdict": None, "last_error": None}
-    record["reviews"] = [r for r in reviews if r is not entry] + [new_entry]
-    api.update_comment(comment["id"], cp.render_control_record(record))
+    envelope = cp.parse_task_envelope(issue.get("body") or "")
+    launch_id = review_launch_id(review_id, attempt)
     packet = {
-        "schema_version": 2, "role": "REVIEWER", "owner_lane": record["owner_lane"],
-        "review_request_id": review_id, "review_nonce": nonce, "head_sha": head, "pr_number": pr_number,
-        "repository": cfg["repository"], "project": cfg["project"], "task_issue": issue_number,
-        "task_id": record["task_id"], "task_revision": record["task_revision"],
+        "schema_version": 2, "role": "REVIEWER", "owner_lane": writer["lane"],
+        # Keys this session's verdict signer; only the reviewer lane and the host ledger read it.
+        "review_request_id": review_id, "review_nonce": secrets.token_hex(16), "head_sha": head,
+        "pr_number": pr_number, "repository": cfg["repository"], "project": cfg["project"],
+        "task_issue": issue_number, "task_id": tid, "task_revision": envelope["TASK_REVISION"],
         "task_pointer": envelope["CANONICAL_TASK_POINTER"], "task_spec_pointer": envelope["TASK_SPEC_POINTER"],
         "task_spec_revision": envelope["TASK_SPEC_REVISION"], "approval_pointer": envelope["APPROVAL_POINTER"],
         "authoritative_doc_pointers": envelope["AUTHORITATIVE_DOC_POINTERS"],
-        "builder_id": lane, "launch_request_id": new_entry["launch_request_id"], "attempt_id": attempt,
-        "audit_floor": envelope.get("AUDIT_FLOOR", "A1"), "control_comment_id": comment["id"],
+        "builder_id": lane, "launch_request_id": launch_id, "attempt_id": attempt,
+        "audit_floor": floor, "control_comment_id": comment["id"],
     }
-    fd = os.open(packet_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    os.fchmod(fd, 0o600)  # the mode argument applies only when the file is new
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(packet, indent=2, sort_keys=True) + "\n")
+    # Packet first: a failed projection write below leaves no launch behind.
+    cp.write_private_json(packet_path, packet)
+    record["reviews"] = [r for r in record.get("reviews", []) if r.get("launch_request_id") != launch_id] + [{
+        "launch_request_id": launch_id, "review_request_id": review_id, "slot": slot, "lane": lane,
+        "attempt": attempt, "head_sha": head, "pr": pr_number, "state": "SUBMITTING", "session_id": None,
+        "confirmed_at": None, "verdict": None, "last_error": None}]
+    api.update_comment(comment["id"], cp.render_control_record(record))
     cp.write_github_output("launch_required", "true")
-    cp.write_github_output("launch_request_id", new_entry["launch_request_id"])
-    return {"status": "PREPARED", "review_request_id": review_id, "lane": lane}
+    cp.write_github_output("launch_request_id", launch_id)
+    return {"status": "PREPARED", "review_request_id": review_id, "lane": lane, "attempt": attempt}
 
 
 def finalize_review(issue_number: int, result_path: Path, launch_request_id: str) -> str:
@@ -573,54 +688,63 @@ REVIEW_URL = re.compile(r"https://github\.com/([^/]+/[^/]+)/pull/([1-9][0-9]*)#p
 BLOCKER_RE = re.compile(r"(?m)^\s*(DECISION_REQUIRED|BLOCKED|STALLED)\b")
 
 
-def session_floor(launch_request_id: str) -> str:
-    """Host reservation time of a launch: anything its session wrote is at or after it."""
-    floor = cp.host_request_status(launch_request_id).get("reserved_at")
-    if not isinstance(floor, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", floor):
-        raise ProgramError("host has no reservation time for this launch")
-    return floor
-
-
-def pin_writer_deliverable(api: cp.GithubApi, cfg: Dict[str, Any], record: Dict[str, Any], issue_number: int,
-                           evidence: str) -> Dict[str, Any]:
-    """The evidence must be a deliverable comment on this task, written after this attempt was reserved."""
+def task_comment(api: cp.GithubApi, cfg: Dict[str, Any], row: Dict[str, Any], issue_number: int,
+                 evidence: str) -> str:
+    """Body of a control-actor comment on this task written after the session's host reservation."""
     match = ISSUE_COMMENT_URL.fullmatch(evidence)
     if not match or match.group(1) != cfg["repository"] or int(match.group(2)) != issue_number:
-        raise ProgramError("writer reap evidence must be a comment URL on this task issue")
+        raise ProgramError("reap evidence must be a comment URL on this task issue")
     comment = api._request("GET", f"/issues/comments/{match.group(3)}")
-    body = comment.get("body") or ""
     if author(comment) != cfg["control_record_actor"]:
         raise ProgramError("deliverable comment is not from the control actor")
-    if (comment.get("created_at") or "") < session_floor(record["launch_request_id"]):
-        raise ProgramError("deliverable comment predates this attempt's host reservation")
-    delivery = DELIVERY_RE.search(body)
+    if (comment.get("created_at") or "") < row["reserved_at"]:
+        raise ProgramError("deliverable comment predates this session's host reservation")
+    return comment.get("body") or ""
+
+
+def writer_evidence(api: cp.GithubApi, cfg: Dict[str, Any], row: Dict[str, Any], issue_number: int,
+                    evidence: str) -> tuple:
+    """(signed delivery line, "DELIVERY") or (None, blocker kind) from a fresh comment on this task."""
+    body = task_comment(api, cfg, row, issue_number, evidence)
+    lines = DELIVERY_RE.findall(body)
+    if len(lines) > 1:
+        raise ProgramError("deliverable comment carries more than one ASTRA_DELIVERY_V1 line")
+    if lines:
+        return lines[0], "DELIVERY"
     blocker = BLOCKER_RE.search(body)
-    if delivery:
-        return {"kind": "DELIVERY", "pr": int(delivery.group(1)), "head": delivery.group(2),
-                "comment_id": int(match.group(3)), "attempt": cp.record_attempt_id(record)}
     if blocker:
-        return {"kind": blocker.group(1), "comment_id": int(match.group(3)), "attempt": cp.record_attempt_id(record)}
-    raise ProgramError("evidence comment carries no ASTRA_DELIVERY_V1 or blocker marker")
+        return None, blocker.group(1)
+    raise ProgramError("evidence comment carries no signed ASTRA_DELIVERY_V1 line or blocker marker")
 
 
-def pin_review_verdict(api: cp.GithubApi, cfg: Dict[str, Any], entry: Dict[str, Any], evidence: str) -> Dict[str, Any]:
-    """The evidence must be the reviewer's PR review at the reviewed head, carrying its secret nonce."""
+def review_evidence(api: cp.GithubApi, cfg: Dict[str, Any], row: Dict[str, Any], issue_number: int,
+                    evidence: str) -> tuple:
+    """The reviewer's own PR review at the reviewed head carrying its signed verdict line; or, only when
+    no review names this request at all, a blocker comment on the task (released without a verdict)."""
+    review_id, pr_number = row.get("review_request_id"), row.get("pr_number")
+    reviews = [r for r in paginate(api, f"/pulls/{pr_number}/reviews")
+               if any(m == review_id for m in REVIEW_RE.findall(r.get("body") or ""))]
     match = REVIEW_URL.fullmatch(evidence)
-    if not match or match.group(1) != cfg["repository"] or int(match.group(2)) != entry["pr"]:
+    if match is None:
+        if reviews:
+            raise ProgramError("a verdict for this review request exists; reap with its review URL")
+        blocker = BLOCKER_RE.search(task_comment(api, cfg, row, issue_number, evidence))
+        if not blocker:
+            raise ProgramError("a reviewer released without a verdict needs a blocker comment as evidence")
+        return None, blocker.group(1)
+    if match.group(1) != cfg["repository"] or int(match.group(2)) != pr_number:
         raise ProgramError("review reap evidence must be a review URL on the reviewed PR")
-    review = api._request("GET", f"/pulls/{entry['pr']}/reviews/{match.group(3)}")
-    verdict = REVIEW_RE.search(review.get("body") or "")
+    review = api._request("GET", f"/pulls/{pr_number}/reviews/{match.group(3)}")
     if author(review) != cfg["control_record_actor"]:
         raise ProgramError("review is not from the control actor")
-    if review.get("commit_id") != entry["head_sha"]:
+    if review.get("commit_id") != row.get("head_sha"):
         raise ProgramError("review was not submitted at the reviewed head")
-    if (review.get("submitted_at") or "") < session_floor(entry["launch_request_id"]):
+    if (review.get("submitted_at") or "") < row["reserved_at"]:
         raise ProgramError("review predates the reviewer session's host reservation")
-    if (not verdict or verdict.group(1) != entry["review_request_id"] or verdict.group(2) != entry["head_sha"]
-            or sha256_text(verdict.group(6)) != entry.get("nonce_sha256")):
-        raise ProgramError("review verdict line does not bind this review request, head and nonce")
-    return {"result": verdict.group(3), "depth": verdict.group(4), "contract_change": verdict.group(5),
-            "review_id": int(match.group(3))}
+    lines = [m.group(0) for m in REVIEW_RE.finditer(review.get("body") or "") if m.group(1) == review_id]
+    if len(lines) != 1:
+        raise ProgramError("review must carry exactly one signed ASTRA_REVIEW_V1 line for this review request")
+    return lines[0], "REVIEW"
 
 
 def reap(issue_number: int, launch_request_id: str, evidence: str) -> Dict[str, Any]:
@@ -630,36 +754,36 @@ def reap(issue_number: int, launch_request_id: str, evidence: str) -> Dict[str, 
     comment, record = control_record(api, cfg, issue_number)
     if record is None:
         raise ProgramError("task has no control record")
-    if record.get("launch_request_id") == launch_request_id:
-        target = record
-        pinned = pin_writer_deliverable(api, cfg, record, issue_number, evidence)
+    row = cp.host_request_status(launch_request_id)
+    if row.get("status") != "FOUND" or row.get("repository") != cfg["repository"] \
+            or row.get("task") != record.get("task_id"):
+        raise ProgramError("launch_request_id is not a host launch of this task")
+    if released(row):
+        # Write-once: project the stored pin; the host already holds the only answer.
+        if row.get("evidence") != evidence:
+            raise ProgramError("reap is write-once: this session was released with different evidence")
+        pin, repeated, kind = row.get("pin"), True, None
     else:
-        target = next((r for r in record.get("reviews", []) if r.get("launch_request_id") == launch_request_id), None)
-        if target is None:
-            raise ProgramError("launch_request_id is not part of this task's control record")
-        pinned = pin_review_verdict(api, cfg, target, evidence)
-    result = host(["reap", "--launch-request-id", launch_request_id, "--evidence", evidence])
-    if result.get("resolution") != cp.VERIFIED_RELEASE:
-        raise ProgramError("host did not verify the session terminal")
-    key = "launch_state" if target is record else "state"
-    changed = False
-    if target.get(key) != "RELEASED":
-        target[key], target["released_evidence"], target["released_at"] = "RELEASED", evidence, now_iso()
-        changed = True
-    if target is record:
-        if record.get("owner_lane") is None:  # a lost CONFIRMED projection must not lose ownership
-            record["owner_lane"] = record["builder_id"]
-            changed = True
-        if record.get("delivery") != (pinned if pinned["kind"] == "DELIVERY" else None):
-            record["delivery"] = pinned if pinned["kind"] == "DELIVERY" else None
-            changed = True
-        record["last_deliverable"] = pinned
-    elif target.get("verdict") != pinned:
-        target["verdict"] = pinned
-        changed = True
-    if changed or target is record:
-        api.update_comment(comment["id"], cp.render_control_record(record))
-    return {"status": "RELEASED", "launch_request_id": launch_request_id, "repeated": result.get("repeated")}
+        read = writer_evidence if row.get("role") == "WRITER" else review_evidence
+        line, kind = read(api, cfg, row, issue_number, evidence)
+        result = host(["reap", "--launch-request-id", launch_request_id, "--evidence", evidence]
+                      + (["--pin-stdin"] if line else []), {"pin": line} if line else None)
+        if result.get("resolution") != cp.VERIFIED_RELEASE:
+            raise ProgramError("host did not verify the session terminal")
+        pin, repeated = result.get("pin"), result.get("repeated")
+        row = cp.host_request_status(launch_request_id)
+    if row.get("role") == "WRITER":
+        if record.get("launch_request_id") == launch_request_id:
+            record.update(launch_state="RELEASED", released_evidence=evidence, released_at=row.get("released_at"),
+                          delivery=pin if (pin or {}).get("kind") == "DELIVERY" else None)
+            if record.get("owner_lane") is None:  # a lost CONFIRMED projection must not lose ownership
+                record["owner_lane"] = row.get("lane")
+            record["last_deliverable"] = {"kind": kind or (pin or {}).get("kind"), "evidence": evidence}
+    else:
+        entry = project_review(record, row)
+        entry.update(released_evidence=evidence, released_at=row.get("released_at"))
+    api.update_comment(comment["id"], cp.render_control_record(record))
+    return {"status": "RELEASED", "launch_request_id": launch_request_id, "pin": pin, "repeated": repeated}
 
 
 # --------------------------------------------------------------------------- merge readiness
@@ -676,7 +800,8 @@ def all_check_runs(api: cp.GithubApi, head: str) -> List[Dict[str, Any]]:
 
 
 def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
-    """DISPATCH section 18, computed. Anything not computable makes the PR not ready."""
+    """DISPATCH section 18, computed from host pins, the plan and live PR state. Anything not
+    computable makes the PR not ready."""
     cfg = cp.load_config()
     api = api_for(cfg)
     reasons: List[str] = []
@@ -689,18 +814,21 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     if ((pr.get("head") or {}).get("repo") or {}).get("full_name") != cfg["repository"] \
             or (pr.get("base") or {}).get("ref") != default_branch(api):
         reasons.append("PR must come from this repository and target the default branch")
-    issue = api.issue(issue_number)
-    envelope = cp.parse_task_envelope(issue.get("body") or "")
-    _, record = control_record(api, cfg, issue_number)
-    record = record or {}
-    if record.get("task_revision") != envelope["TASK_REVISION"]:
-        reasons.append("task revision is not current in the control record")
+    try:
+        issue, plan, node, mstatus = task_context(api, cfg, issue_number)
+    except ProgramError as exc:
+        return {"ready": False, "head": head, "pr": pr_number, "issue": issue_number, "reasons": reasons + [str(exc)]}
+    floor, gate = node["audit_floor"], node["astra_gate"]
+    rows = task_rows(cfg, task_id_for(plan["program"], node["id"]))
+    writer = current_writer(rows)
+    delivery = pin_of(writer, "DELIVERY")
+    if delivery is None or (delivery["pr"], delivery["head"]) != (pr_number, head):
+        reasons.append("the host-pinned delivery of the current writer attempt does not name this PR head")
+    elif (issue.get("body") or "") != rendered_body(issue, plan, node, mstatus, writer["lane"]):
+        reasons.append("task issue body differs from the envelope rendered from the host-recorded plan")
     labels = {label.get("name") for label in issue.get("labels", [])}
     if labels & BLOCKING_LABELS:
         reasons.append(f"unresolved blocker labels: {sorted(labels & BLOCKING_LABELS)}")
-    delivery = record.get("delivery") or {}
-    if (delivery.get("pr"), delivery.get("head")) != (pr_number, head) or record.get("launch_state") != "RELEASED":
-        reasons.append("the pinned delivery of the released writer attempt does not name this PR head")
     runs = all_check_runs(api, head) if head else []
     if not runs or any(r.get("status") != "completed" or
                        r.get("conclusion") not in ("success", "neutral", "skipped") for r in runs):
@@ -708,26 +836,36 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     combined = api._request("GET", f"/commits/{head}/status") if head else {}
     if (combined or {}).get("statuses") and (combined or {}).get("state") != "success":
         reasons.append(f"verification gate: commit statuses are {combined.get('state')}")
-    floor = envelope.get("AUDIT_FLOOR", "A1")
+    if any(row.get("role") == "REVIEWER" and row.get("state") in ("SUBMITTING", "CONFIRMED", "UNKNOWN")
+           for row in rows):
+        reasons.append("a review session of this task is still active or unresolved")
     needed_depth = min(AUDIT_FLOORS.index(floor), 2)
+    owners = writer_lanes(rows)
     passing_lanes, contract_change = set(), False
-    for review in record.get("reviews", []):
-        verdict = review.get("verdict")
-        if review.get("head_sha") != head or review.get("state") != "RELEASED" or not verdict:
-            continue
-        if verdict["contract_change"] == "YES":
-            contract_change = True
-        if verdict["result"] in ("FAIL", "DECISION_REQUIRED"):
-            reasons.append(f"review {review['review_request_id']} returned {verdict['result']}")
-        elif AUDIT_FLOORS.index(verdict["depth"]) >= needed_depth and review["lane"] != record.get("owner_lane"):
-            passing_lanes.add(review["lane"])
+    if delivery is not None:
+        for slot in (1, 2):
+            review_id = review_request_id(cfg["repository"], task_id_for(plan["program"], node["id"]),
+                                          writer["launch_request_id"], delivery["head"], slot)
+            for row in review_rows(rows, review_id):
+                verdict = pin_of(row, "REVIEW")
+                if verdict is None or verdict["head"] != head:
+                    continue
+                if verdict["contract_change"] == "YES":
+                    contract_change = True
+                if verdict["verdict"] in ("FAIL", "DECISION_REQUIRED"):
+                    reasons.append(f"review {review_id} returned {verdict['verdict']}")
+                elif AUDIT_FLOORS.index(verdict["depth"]) >= needed_depth and row.get("lane") not in owners:
+                    passing_lanes.add(row.get("lane"))
     if len(passing_lanes) < REQUIRED_REVIEWS[floor]:
         reasons.append(f"{len(passing_lanes)} of {REQUIRED_REVIEWS[floor]} required independent reviews "
-                       "(distinct non-owner lanes, released, pinned) PASS at this head")
+                       "(host-pinned verdicts from distinct non-writer lanes) PASS at this head")
     if contract_change:
         reasons.append("a current-head review reports a contract change; Astra/User decision required")
-    if envelope.get("ASTRA_GATE", "NONE") != "NONE" or floor == "A3":
-        reasons.append(f"Astra gate {envelope.get('ASTRA_GATE')} is not machine-verifiable here; User merges")
+    if gate != "NONE" or floor == "A3":
+        reasons.append(f"Astra gate {gate} is not machine-verifiable here; User merges")
+    pending = pending_dependencies(api, cfg, plan, node)
+    if pending:
+        reasons.append(f"dependencies are not DONE: {pending}")
     if cfg.get("program_merge_policy") != "STANDARD":
         reasons.append("project merge prerequisites are not declared machine-computable (program_merge_policy)")
     return {"ready": not reasons, "head": head, "pr": pr_number, "issue": issue_number, "reasons": reasons}
@@ -769,8 +907,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             result = merge_check(args.issue_number, int(extra.get("pr_number", 0)))
         print(json.dumps(result, sort_keys=True))
         return 0
-    except (cp.ControlPlaneError, ValueError, TypeError) as exc:
-        print(f"PROGRAM_ERROR: {exc}", file=sys.stderr)
+    except (cp.ControlPlaneError, KeyError, ValueError, TypeError) as exc:
+        print(f"PROGRAM_ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
 
