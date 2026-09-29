@@ -1,6 +1,6 @@
-# Program mode — 설계 초안 v1
+# Program mode — 설계 초안 v2
 
-v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. 대응표는 §14에 있다.
+v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. v2는 v1(`52ad415`) 재검토에서 남은 F4(불명 생성 요청)와 구현 확인 항목 2개를 반영하고, 호스트 조사 결과(§15)를 더했다. 대응표는 §14에 있다.
 
 상태: **설계 초안**. 코드, 호스트, 활성화 기록은 바꾸지 않는다. 이 문서는
 `RUNTIME_PATHS`에 들어 있지 않다. 구현 전에 Astra A3 설계 감사와 User 승인이
@@ -246,6 +246,12 @@ flowchart TD
   - 지금 코드는 CONFIRMED 기록에서 재시도를 거부한다. 재개(§3.1)는 **host가 `RECONCILED/SESSION_TERMINAL_VERIFIED`이고 기록이 `RELEASED`인 경우에만** 허용한다.
   - 재개할 때 BUILDER_ID는 owner lane과 같아야 한다.
   - CONFIRMED 상태의 재시도 거부는 그대로 유지한다.
+- **reap은 멱등이고, GitHub 반영 실패는 같은 결과로 복구한다** (v1 재검토의 구현 확인 항목 1).
+  - 이미 `RECONCILED/SESSION_TERMINAL_VERIFIED`인 요청에 다시 `reap`을 부르면 저장된 결과를 그대로 돌려준다. wrapper를 다시 묻지 않고, 새 판정도 만들지 않는다.
+  - host reap은 성공했는데 GitHub에 `RELEASED`를 쓰지 못한 경우를 생각한다. 이때 기록은 `CONFIRMED`로 남는다.
+    - 다음 실행(§8.1)이 host `status`로 이 상태를 보고 같은 요청으로 `reap`을 다시 부른다.
+    - 돌아온 저장 결과로 `RELEASED`를 다시 쓴다. 새 해제나 새 판정은 만들지 않는다.
+  - 재개 입장도 먼저 host 상태를 본다. host가 `SESSION_TERMINAL_VERIFIED`인데 기록이 `CONFIRMED`면, 반영을 먼저 복구한 뒤 재시도 절차로 들어간다.
 
 **규칙 변경**
 - 대상은 `CONTROL_PLANE_RUNTIME.md`의 "운영자만 reconcile" 규칙이다.
@@ -319,19 +325,64 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
   - `TASK_ID = <PROGRAM>-<NODE_ID>`다.
   - 이슈 본문에 `ASTRA_TASK_KEY_V1 program=<p> plan=<v> node=<n>` 표식을 넣는다.
   - 표식이 있는 이슈에는 라벨 `aiops-task`를 붙인다.
-- **생성 전 선점과 조회**
-  1. 대상 저장소에서 라벨 `aiops-task`의 이슈를 열린 것과 닫힌 것 모두 REST 목록으로 끝까지 읽는다. 검색 API는 반영이 늦을 수 있어 쓰지 않는다.
-  2. 같은 `(program, node)` 표식이 있으면 그 이슈를 돌려준다.
-  3. 없을 때만 만든다.
-- **응답이 유실되면** 다음 실행에서 조회 단계가 방금 만든 이슈를 찾는다. 같은 작업으로 복구된다.
-- **중복이 발견되면** 발송하지 않는다. 같은 키의 열린 이슈가 둘 이상이면 `DUPLICATE_TASK`로 멈추고 운영자에게 알린다. 낮은 번호를 정본으로 하자는 제안을 함께 남긴다.
-- **계획 버전 변경:** 노드 내용이 바뀌면 같은 이슈의 `TASK_REVISION`을 올린다. 새 이슈를 만들지 않는다. 표식의 `plan`만 갱신한다.
+**생성 요청 기록 (v2, F4 재검토 반영)**
+
+생성 요청 자체에도 발송과 같은 불명 상태 규율을 적용한다.
+
+**host ledger의 새 테이블 `materializations`**
+- 기본 키: `(program, node)`
+- 열: `request_id`(결정적, `sha256(program, node, attempt)`), `attempt`, `plan_commit`, `state`, `issue_number`, `updated`
+- `state`는 `SUBMITTING`, `CREATED`, `UNKNOWN`, `ABANDONED` 중 하나다.
+- 원자성은 host SQLite 트랜잭션과 기존 exclusive in-flight 잠금으로 보장한다. GitHub 조회는 원자성 근거가 아니다.
+
+**절차.** runner가 sudo로 부르는 새 host 명령 `materialize-begin`과 `materialize-finish`를 쓴다.
+
+1. `materialize-begin program node plan_commit`
+   - 행이 없으면 `SUBMITTING`으로 넣고 `CREATE_ALLOWED`와 `request_id`를 돌려준다. 이 기록은 GitHub 요청보다 먼저 영속화된다.
+   - `CREATED`면 이슈 번호를 돌려준다. 생성하지 않는다.
+   - `SUBMITTING`이나 `UNKNOWN`이면 `UNRESOLVED`를 돌려준다. 생성하지 않는다.
+2. `CREATE_ALLOWED`일 때만 이슈를 한 번 만든다.
+   - 본문에 `ASTRA_TASK_KEY_V1 program=<p> node=<n> request=<request_id>`를 넣는다.
+   - 성공 응답을 받으면 `materialize-finish CREATED <issue>`를 호출한다.
+   - 오류, timeout, 응답 유실이면 `materialize-finish UNKNOWN`을 호출한다. finish 호출 자체가 실패해 `SUBMITTING`으로 남아도 `UNKNOWN`과 똑같이 다룬다.
+3. `UNRESOLVED`일 때는 라벨 `aiops-task`의 이슈를 열린 것과 닫힌 것 모두 REST 목록으로 끝까지 읽는다.
+   - 같은 `request_id`의 이슈가 있으면 `CREATED`로 확정한다.
+   - 없어도 **다시 만들지 않는다.** "목록에 없음"은 미생성의 증거가 아니다. 처리 중인 요청이 나중에 완료될 수 있기 때문이다.
+   - 상태는 `UNKNOWN`으로 유지한다. Lane Board에 `MATERIALIZE_UNKNOWN`으로 표시하고, 그 노드는 진행하지 않는다.
+4. **UNKNOWN에서 벗어나는 방법은 두 가지뿐이다.**
+   - 이후 조회에서 같은 `request_id`의 이슈를 찾으면 `CREATED`가 된다.
+   - 운영자 전용 `materialize-resolve --not-created --evidence <URL>`를 쓴다. 이 경우 해당 `request_id`를 `ABANDONED`로 봉인하고 `attempt+1`로 새 요청을 허용한다.
+   - 봉인된 요청의 이슈가 나중에 나타나면 정본이 아니다. `DUPLICATE_TASK` 규칙으로 닫는다. 한 요청 ID는 한 번만 생성을 허락받는다.
+5. **중복이 보이면 멈춘다.** 같은 `(program, node)` 표식을 가진 열린 이슈가 둘 이상이면 발송하지 않고 `DUPLICATE_TASK`로 멈춘다.
+   - 정본은 ledger에 `CREATED`로 기록된 이슈다.
+   - 나머지를 닫는 것은 운영자 확인 뒤에 한다.
+
+**계획 버전 변경:** 노드 내용이 바뀌면 같은 이슈의 `TASK_REVISION`을 올린다. 새 이슈를 만들지 않는다. 절차는 §8.3을 따른다.
 
 **한 작업이 두 번 발송되지 않는다.** 설령 이슈가 둘 생겨도 막힌다.
 - host `one_active_writer`는 `(repository, task)` 단위다.
 - TASK_ID가 같으면 동시에 두 작성자가 생길 수 없다.
 
-### 8.3 기타
+### 8.3 계획 버전과 작업 revision 직렬화 (v1 재검토의 구현 확인 항목 2)
+
+**계획의 원천은 제품 저장소의 `.aiops/program.json`이다.**
+- 제품 저장소 PR로만 바뀐다. 비작성자 리뷰를 거친다.
+- 계획을 제품 저장소에 두기 때문에 ai-ops main이 바뀌지 않는다. 그래서 boundary 재고정이 필요 없다.
+- `plan_commit`은 그 파일이 들어 있는 제품 main 커밋이다.
+
+**오래된 계획은 최신을 덮어쓰지 못한다.**
+- `materializations.plan_commit`과 작업의 현재 `plan_commit`을 host에 기록한다.
+- 새 `plan_commit`은 기록된 커밋의 **후손**일 때만 받는다. runner의 제품 checkout에서 `git merge-base --is-ancestor`로 확인한다.
+- 같은 커밋이면 아무것도 하지 않는다. 조상이거나 관계없는 커밋이면 `STALE_PLAN`으로 거부한다.
+
+**작업 revision 변경은 발송, 리뷰, 병합과 같은 직렬화를 따른다.**
+- 노드 내용 변경이나 레인 경합 뒤의 BUILDER_ID 교체는 `operation=revise`로만 한다.
+- `revise`는 해당 작업 이슈의 concurrency group을 쓴다. 이 group은 발송, 리뷰, 병합, reap과 같은 `astra-control-<repo>-<target>-<issue>`다.
+- host 작업 잠금 아래에서, 같은 작업에 활성 WRITER나 REVIEWER 행이 없을 때만 본문을 바꾼다.
+- 바꾼 뒤에는 새 본문 해시와 새 `TASK_REVISION`이 되므로 기존 리뷰와 게이트 결과는 무효다(AGENTS §9).
+- CONFIRMED 이후에는 BUILDER_ID를 바꾸는 revise를 거부한다(§3.1 owner lane 불변).
+
+### 8.4 기타
 
 - **겹침:** 발송, 리뷰, 정리, 병합, 생성은 모두 ai-ops workflow의 concurrency group과 control record·ledger로 멱등하다. Program Board는 표시일 뿐이고 원천이 아니다.
 - **규칙 변경:** AGENTS 머리말의 "NO STANDING ROUTINES / NO POLLING"을 D5·D8 범위에서 완화한다. 사건 기반 실행을 기본으로 하고, 매시간 heartbeat만 예외로 둔다.
@@ -382,7 +433,7 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 |---|---|---|---|
 | P1 | 이 설계 | Opus 초안 | Astra A3 설계 감사, User 승인 |
 | P2 | runtime/host 코드: ledger v2와 migrate, 레인·역할 입장 조건, select-lane, `status --lanes`, materialize, review, reap, merge(READY_FOR_MERGE 계산), wrapper v3, kix-commerce profile, §10 규칙. F1~F4 재현 테스트 포함 | Claude | 비작성자 리뷰, Astra A3, User 병합, activation rebind |
-| P3 | GROK_BUILD, GLM, CURSOR 설치·자격 검증(`qualify_lane` 7개 검사). GROK_BUILD·GLM wrapper 소스는 저장소에 없으므로 P2에서 작성하거나 호스트 기존본을 소스로 가져온다 | 그록봇(호스트), Claude(소스) | lane별 증거, User 승인 |
+| P3 | ① 호스트 adapter 3종 원본을 저장소로 가져와 감사한다(§15) ② 레인별 `--session-status` 원천을 확정한다 ③ GROK_BUILD 빌더 계정 인증을 고친다 ④ GLM(M2), CURSOR(M3) 결정을 받는다 ⑤ 레인별 `qualify_lane` 7개 검사를 통과한다 | 그록봇(호스트), Claude(소스) | lane별 증거, User 승인 |
 | P4 | COORDINATOR_PLAYBOOK, Routines R1~R4, Slack·Program Board·Lane Board | Claude | 비작성자 리뷰 |
 | P5 | 제품별 Program Board 계획 | 현장 소장 초안, Opus 승인 | 문서 밖 항목은 §5 |
 | P6 | 전 제품 동시 실행, 실패 수정 | 전체 | D8 |
@@ -416,6 +467,9 @@ v0 감사 대상 HEAD는 `892b189e39b961f9c82ffb129219d1a361c5a9ec`이다.
 | F3 (P1) | M1 병합 조건이 필수 승인을 빠뜨린다 | M1은 실행 주체만 위임한다. `DISPATCH.md` §18 `READY_FOR_MERGE` 전체를 기계적으로 계산한다. 여기에는 마일스톤·출시 게이트와 제품별 병합 전제조건이 포함된다. 병합은 `expectedHeadSha`로 고정한다. 계산할 수 없는 조건은 준비 안 됨으로 본다 | §0 M1 |
 | F4 (P2) | 겹친 현장 소장 실행이 같은 노드로 작업 이슈를 중복 생성한다 | 현장 소장은 이슈를 직접 만들지 않는다. `operation=materialize`가 프로그램 단위로 직렬화한다. 결정적 TASK_ID와 `ASTRA_TASK_KEY_V1` 표식을 쓰고, REST 목록 조회로 선점을 확인한 뒤 만든다. 응답이 유실되면 같은 이슈로 복구한다. 중복이 보이면 `DUPLICATE_TASK`로 멈춘다 | §8.2 |
 | F5 (노트) | "최대 1시간 지연"은 보장할 수 없고 사건이 유실될 수 있다 | 문구를 철회했다. 상태 기반 실행으로 유실을 무해하게 만들고, `last_coordinator_run`과 STALE 표시로 멈춤을 감지한다 | §8.1 |
+| F4 재검토 (P2, v1 `52ad415`) | 생성 요청이 처리 중일 때 목록 조회만으로 다시 만들면 중복될 수 있다 | host `materializations` 테이블에 `SUBMITTING`을 먼저 영속화한다. 결과가 불명이면 `UNKNOWN`으로 두고, "목록에 없음"만으로는 다시 만들지 않는다. UNKNOWN은 같은 `request_id`의 이슈를 찾거나 운영자가 `materialize-resolve --not-created`로 확인해야 벗어난다. 봉인된 요청은 다시 쓰지 않는다 | §8.2 |
+| 구현 확인 1 | reap은 성공했는데 `RELEASED` 반영이 실패한 경우 | reap을 멱등으로 해서 저장 결과를 다시 쓰고 반영을 복구한다. 재개 입장에서 host 상태를 먼저 본다 | §6 |
+| 구현 확인 2 | 오래된 `plan_version`이 덮어쓰는 경우, revision 직렬화 | 계획은 제품 저장소 파일로 두고, 새 커밋이 후손일 때만 받는다(`STALE_PLAN`). `operation=revise`는 작업 concurrency group과 host 작업 잠금을 쓰고, 활성 세션이 없을 때만 바꾼다 | §8.3 |
 
 유지한 방향(감사에서 타당하다고 본 것):
 - 레인 선택은 기계적으로 계산한다.
@@ -423,3 +477,45 @@ v0 감사 대상 HEAD는 `892b189e39b961f9c82ffb129219d1a361c5a9ec`이다.
 - UNKNOWN은 운영자에게 남긴다.
 
 v1도 문서뿐이다. F1~F4의 재현 테스트는 P2 구현 PR에 포함하고, 그 PR에서 검증한다.
+
+## 15. 호스트 조사 결과 (2026-09-29, 읽기 전용, 그록봇 보고)
+
+| 레인 | wrapper | adapter / CLI | preflight | 막힌 점 |
+|---|---|---|---|---|
+| DEVIN | `/opt/astra/bin/astra-builder-devin` (bash, `2fea887b…`) | `astra-devin-adapter`, Devin CLI `3000.11.1`, 빌더 계정 로그인됨 | **PASS** (`PERSISTENT_SUPERVISOR`) | — |
+| GROK_BUILD | `astra-builder-grok-build` (bash, `0da78f98…`) | `astra-grok-adapter`, Grok CLI `1.0.40` | **FAIL**: `grok CLI auth check failed` | 빌더 계정 `astra-builder-grokbuild`(uid 995)에서 인증이 안 된다. User 로그인이 다른 계정에 되어 있을 가능성이 있다 |
+| GLM | `astra-builder-glm` (bash, `c3451744…`) | `astra-glm-adapter`, OpenCode `1.18.32`, Z.AI Coding Plan | adapter 직접 실행 PASS. host에서는 `not enabled` | host `enabled_builders`에 없다. **`BUILDER_LANES.md`는 "no implicit OpenCode replacement"를 요구하므로 OpenCode를 GLM 하네스로 쓰려면 명시 승인이 필요하다(M2)** |
+| CURSOR | **없음** | Cursor CLI `2026.09.23-86fc751`. box 사용자로만 로그인됨 | `not enabled` | 빌더 계정이 없고 wrapper가 설치되지 않았다. **저장소의 Cursor adapter(`control_plane_cursor.py`)는 systemd user manager가 필요한데 이 호스트에는 systemd가 없다(PID 1 = tini)** |
+
+**host policy 현재값**
+- `enabled_builders=[DEVIN, GROK_BUILD]`
+- `builder_uids`: DEVIN 996, GROK_BUILD 995, GLM 994
+- `max_active_sessions=1`
+- `wrapper_paths`에는 CURSOR 항목이 없다.
+
+**설계에 미치는 영향**
+1. **adapter 원본이 저장소에 없다.** 세 adapter는 호스트에만 있다(`/opt/astra/libexec/astra-*-adapter`).
+   - wrapper v3의 `--session-status`와 program mode 레인 자격은 **감사된 원본**이 전제다.
+   - 따라서 P3의 첫 단계는 adapter 원본을 저장소로 가져와 감사하는 것이다. 비밀값이 없는지 확인한 뒤 원본과 sha256을 가져온다.
+2. **세션 종료 증거의 원천은 레인마다 다르다.**
+   - DEVIN은 작업 트리의 `.sessions/<id>/status.json`을 읽기 전용으로 읽는다. `EXITED`, `KILLED`, `SPAWN_FAILED`면 `TERMINAL`이다.
+   - `devin -r`은 대화를 재개하므로 증거 확인에 쓰지 않는다.
+   - GROK_BUILD와 GLM의 원천은 P3에서 조사한다.
+   - 읽기 전용 종료 증거가 없는 레인은 program mode 자격을 받지 못한다(§3.1).
+3. **CURSOR는 이 호스트에서 지금 방식으로 켤 수 없다.** 선택지는 셋이다.
+   - (a) systemd가 있는 별도 호스트
+   - (b) systemd가 없는 supervisor로 adapter를 바꾸기. 이는 custodian과 fence 설계를 바꾸는 일이라 A2 이상 리뷰가 필요하다.
+   - (c) 보류
+   - 결정 전까지는 비활성이다. 순서표는 비활성 레인을 건너뛴다.
+4. **Slack**
+   - 현장 소장은 claude.ai의 Slack 연결을 쓴다(User 연결 완료).
+   - 호스트 flow gateway(`127.0.0.1:8787`, 6cc78d4 설치본)의 봇 토큰은 쓰지 않는다. gateway는 그대로 둔다.
+5. **첫 동시 실행의 실제 레인 수**
+   - P3이 끝나기 전에는 DEVIN 1개다.
+   - GROK_BUILD 로그인을 고치고 M2를 승인하면 3개가 된다.
+   - Cursor 결정까지 끝나면 4개가 된다.
+   - `max_active_sessions`는 켜진 레인 수에 맞춘다.
+
+**미결정 M2:** GLM 레인의 하네스로 **OpenCode `1.18.32` + Z.AI Coding Plan**을 명시 승인할지 정한다.
+
+**미결정 M3:** CURSOR 레인을 (a), (b), (c) 중 어느 쪽으로 할지 정한다.
