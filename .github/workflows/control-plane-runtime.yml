@@ -27,6 +27,7 @@ on:
           - review
           - reap
           - merge-check
+          - merge
       target_repository:
         description: "Consumer product repository profile (projects.json)"
         required: true
@@ -163,7 +164,7 @@ jobs:
           --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
 
       - name: Validate program input
-        if: ${{ contains(fromJSON('["start","review","reap","merge-check"]'), inputs.operation) }}
+        if: ${{ contains(fromJSON('["start","review","reap","merge-check","merge"]'), inputs.operation) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -243,8 +244,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
         run: python3 -I engineering/scripts/control_plane_program.py merge-check --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
 
+      - name: Program merge (User decision M1; only a computed READY_FOR_MERGE, pinned to its head)
+        if: ${{ inputs.operation == 'merge' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+        run: python3 -I engineering/scripts/control_plane_program.py merge --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+
       - name: Wake the coordinator (best effort, never changes the outcome)
-        if: ${{ always() && contains(fromJSON('["materialize","start","review","reap"]'), inputs.operation) }}
+        if: ${{ always() && contains(fromJSON('["materialize","start","review","reap","merge"]'), inputs.operation) }}
         continue-on-error: true
         env:
           ROUTINE_TOKEN: ${{ secrets.ASTRA_COORDINATOR_ROUTINE_TOKEN }}

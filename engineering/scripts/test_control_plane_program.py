@@ -70,6 +70,7 @@ class FakeGitHub:
         self.fail_post = None      # "before" (not created) or "after" (created, response lost)
         self.fail_update = False
         self.drop_labels = False   # the create response omits the label
+        self.merges = []
 
     # control_plane.GithubApi surface
     def issue(self, number):
@@ -154,6 +155,14 @@ class FakeGitHub:
         match = re.fullmatch(r"/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})", path_only)
         if match:
             return {"status": self.compare[(match.group(1), match.group(2))]}
+        match = re.fullmatch(r"/pulls/(\d+)/merge", path_only)
+        if match and method == "PUT":
+            pull = self.pulls[int(match.group(1))]
+            self.merges.append((int(match.group(1)), payload))
+            if payload.get("sha") != pull["head"]["sha"]:
+                raise cp.ControlPlaneError("GitHub API PUT merge failed: 409 Head branch was modified")
+            pull.update(merged=True, state="closed")
+            return {"merged": True, "sha": "f" * 40}
         match = re.fullmatch(r"/pulls/(\d+)", path_only)
         if match:
             return json.loads(json.dumps(self.pulls[int(match.group(1))]))
@@ -663,6 +672,31 @@ class ProgramModeTests(unittest.TestCase):
         self.assertIn("older task revision", " | ".join(check["reasons"]))
         with self.assertRaisesRegex(cp.ControlPlaneError, "older task revision"):
             prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
+
+    def test_m1_merge_executes_only_a_computed_ready_state_pinned_to_its_head(self):
+        issue, _ = self.released_writer()
+        not_ready = prog.merge(issue, 7)
+        self.assertEqual(not_ready["status"], "NOT_READY")  # no review yet
+        self.assertEqual(self.gh.merges, [])
+        self.reviewed(issue)
+        merged = prog.merge(issue, 7)
+        self.assertEqual((merged["status"], merged["head"]), ("MERGED", HEAD))
+        self.assertEqual(self.gh.merges, [(7, {"sha": HEAD})])
+        done = prog.start(issue, "zari", "n1", PLAN1, self.file("p.json"), preflight=lambda lane: True)
+        self.assertEqual(done["status"], "DONE")
+
+    def test_m1_merge_refuses_a_head_that_moved_after_the_check(self):
+        issue, _ = self.released_writer()
+        self.reviewed(issue)
+        real = self.gh._request
+        def moved(method, path, payload=None):
+            if method == "PUT":
+                self.gh.pulls[7]["head"]["sha"] = "b" * 40  # a push lands between check and merge
+            return real(method, path, payload)
+        with patch.object(self.gh, "_request", side_effect=moved):
+            with self.assertRaisesRegex(cp.ControlPlaneError, "409"):
+                prog.merge(issue, 7)
+        self.assertFalse(self.gh.pulls[7]["merged"])
 
     def test_a_merged_task_is_never_redispatched(self):
         # Astra A3 finding 7: the delivered PR merged while the issue stayed open.

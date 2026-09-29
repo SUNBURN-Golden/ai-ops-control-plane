@@ -33,9 +33,8 @@ v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. v2는 v1(`52
 
 호스트의 실제 설치와 자격 검증 여부는 P3에서 따로 확인한다.
 
-**미결정 M1 (병합 실행 위임):** M1은 **병합을 실행하는 주체만** 바꾼다. 병합 조건은 바꾸지 않는다.
-- **기본값:** 현행 그대로 User가 병합한다.
-- **선택안:** 현장 소장이 `operation=merge`를 요청한다. 병합은 기계 계층이 계산한 결과가 참일 때만 일어난다.
+**결정 M1 (User, 2026-09-29): 병합 실행을 위임한다.** M1은 **병합을 실행하는 주체만** 바꾼다. 병합 조건은 바꾸지 않는다.
+- 현장 소장이 `operation=merge`를 요청한다. 병합은 기계 계층이 계산한 결과가 참일 때만 일어난다(`control_plane_program.merge`).
   1. 기계 계층이 그 PR의 정확한 HEAD에 대해 `DISPATCH.md` §18 `READY_FOR_MERGE`를 **전부** 계산한다. 여기에는 다음이 포함된다.
      - 리뷰 깊이
      - MILESTONE·RELEASE·ARCHITECTURE Astra 게이트
@@ -50,7 +49,7 @@ v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. v2는 v1(`52
 
 | 역할 | 담당 | 하는 일 | 하지 않는 일 |
 |---|---|---|---|
-| USER | 대표님 | 제품 범위, 청사진 변경, 화면 승인, 출시, 위험 감수, (M1 전까지) 병합 | — |
+| USER | 대표님 | 제품 범위, 청사진 변경, 화면 승인, 출시, 위험 감수. 병합 실행은 M1에 따라 위임했다 | — |
 | ASTRA | ChatGPT Astra | 설계 권한자, A3 감사, Opus가 넘긴 질문 | 일상 리뷰 |
 | OPUS | Claude Opus (고강도) | 첫 질문 응답, 작은 설계 예외 승인, 설계 초안 작성 | 제품 코드 작성, 자기가 쓴 설계의 감사 |
 | COORDINATOR | Claude Sonnet 5.5 | 계획에서 다음 작업 선택, 지시서 작성, 발송, 리뷰 요청, 질문 전달, 정리, 현황 게시 | 코드 작성·리뷰, 설계 판단, 레인을 판단으로 고르기, 호스트 직접 조작 |
@@ -528,10 +527,9 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 - ~~Grok Build, GLM, Cursor 구독과 로그인~~ 완료 (2026-09-29 보고). 호스트의 빌더 Unix 계정에 로그인됐는지는 P3에서 확인한다.
 - ChatGPT Astra가 Slack 결정 채널을 보고 GitHub에 답하도록 설정한다.
 - Routine API 토큰을 GitHub secret에 등록한다.
-- M1(병합 위임)을 결정한다.
-- **M4(레인 토큰 권한)**를 결정한다. 지금은 모든 레인이 병합할 수 있는 개인 토큰을 쓴다. 레인이 계산된 gate를 거치지 않고 직접 병합하지 못하게 하려면 둘 중 하나를 고른다(§13).
-  - 레인별 병합 불가 신원
-  - 우회할 수 없는 branch protection
+- ~~M1(병합 위임)~~ 결정: 위임 (2026-09-29).
+- ~~M2(GLM 하네스)~~ 결정: OpenCode + Z.AI Coding Plan 승인 (2026-09-29).
+- ~~M4(레인 토큰 권한)~~ 결정: **레인별 계정을 두지 않는다** (2026-09-29, "심플하게"). 단일 토큰의 남는 위험(§13)을 User가 감수한다. 별도 UID 서명 helper도 만들지 않는다.
 
 ## 13. 남는 위험
 
@@ -540,13 +538,12 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
   - **남는 것:** 병합할 수 있는 토큰을 가진 레인은 계산된 gate를 거치지 않고 PR을 직접 병합하거나 기본 브랜치에 push할 수 있다. 이것은 control plane이 막을 수 없다. 막으려면 둘 중 하나가 필요하다(`AGENTS.md` §11).
     - 레인별 GitHub 신원을 쓰되 병합과 관리자 권한을 주지 않는다.
     - 레인 토큰이 우회할 수 없는 branch protection을 건다.
-  - 이것은 User 결정 사항이다(M4, §12).
-  - 같은 이유로 필수 체크 확인은 두 가지를 전제한다. check run은 CI가 만들어야 하고, 레인 토큰에는 `checks:write`가 없어야 한다. 기본 브랜치 보호가 그 체크들을 요구해야 한다(`mergeable_state: clean`에 반영). 레인 토큰으로 가짜 `success` check run을 만들 수 있으면 이 확인은 증거가 되지 못한다. M4에서 함께 정한다.
+  - **User가 감수한다 (M4 결정, 2026-09-29: 레인별 계정을 두지 않는다).** 레인이 계산된 gate를 거치지 않고 직접 병합하거나 push하는 것은 control plane이 막지 못한다. 계산된 gate는 control plane 자신의 병합(`operation=merge`)과 준비 판정에만 적용된다.
+  - 같은 이유로 필수 체크 확인은 CI가 만든 check run을 전제한다. 레인 토큰으로 가짜 `success` check run을 만들 수 있으면, 이 확인은 증거가 되지 못한다. 이 위험도 같은 결정으로 감수한다.
 - **prestart 재시도:** `FAILED_PRESTART`(예: 45초 안에 끝나지 않는 CURSOR clone)는 다음 실행에서 다시 시도된다. 이 재시도에는 별도 상한이 없고, host `max_launches_per_24h`만 막는다. program mode에서는 이 값을 정해 둔다(P3).
 - **CURSOR:** M3 결정에 따라 systemd 없는 adapter(`adapters/cursor/`)로 바꿨다. 이 adapter는 v2 packet을 stdin으로 받고, 서명 도구를 쓰며, 모든 프로세스가 helper의 launch 아래에 있다. 그래서 program mode 순서의 마지막 레인으로 선택된다. 호스트 설치와 자격 검증(P3) 전에는 host `enabled_builders`와 preflight가 막는다.
 - **세션 키는 그 세션의 모델이 읽을 수 있다:** 서명 도구 파일은 그 레인 UID 소유(0600)다. 그래서 리뷰 대상 PR 안의 prompt injection이 리뷰어 모델에게 키를 출력하게 만들 수 있다. 키가 새면 그 세션의 판정을 위조할 수 있다.
-  - 막는 방법: 키를 레인이 읽을 수 없는 별도 UID의 서명 helper에 두고, 레인은 실행만 하게 한다. wrapper가 packet에서 키를 떼어 그 helper에 넘긴다.
-  - 이것은 M4(레인 신원)와 함께 호스트 작업으로 한다.
+  - 막는 방법은 키를 레인이 읽을 수 없는 별도 UID의 서명 helper에 두는 것이다. M4 결정(단순하게)에 따라 이것은 하지 않고, 위험을 감수한다. 키는 세션마다 새로 만들므로, 샌 키는 그 한 세션의 판정에만 쓸 수 있다.
 - **레인 UID 정지 확인의 전제:** 동결 점검(§6)은 fork 경합을 닫는다. 그래도 아래 세 가지를 전제한다.
   - helper의 PID namespace가 `/proc`의 namespace와 같다(`NSpid` 1단계).
   - 레인 UID에 subuid/subgid 범위가 없다.
@@ -589,7 +586,7 @@ v1도 문서뿐이다. F1~F4의 재현 테스트는 P2 구현 PR에 포함하고
 |---|---|---|---|---|
 | DEVIN | `/opt/astra/bin/astra-builder-devin` (bash, `2fea887b…`) | `astra-devin-adapter`, Devin CLI `3000.11.1`, 빌더 계정 로그인됨 | **PASS** (`PERSISTENT_SUPERVISOR`) | — |
 | GROK_BUILD | `astra-builder-grok-build` (bash, `0da78f98…`) | `astra-grok-adapter`, Grok CLI `1.0.40` | **FAIL**: `grok CLI auth check failed` | 빌더 계정 `astra-builder-grokbuild`(uid 995)에서 인증이 안 된다. User 로그인이 다른 계정에 되어 있을 가능성이 있다 |
-| GLM | `astra-builder-glm` (bash, `c3451744…`) | `astra-glm-adapter`, OpenCode `1.18.32`, Z.AI Coding Plan | adapter 직접 실행 PASS. host에서는 `not enabled` | host `enabled_builders`에 없다. **`BUILDER_LANES.md`는 "no implicit OpenCode replacement"를 요구하므로 OpenCode를 GLM 하네스로 쓰려면 명시 승인이 필요하다(M2)** |
+| GLM | `astra-builder-glm` (bash, `c3451744…`) | `astra-glm-adapter`, OpenCode `1.18.32`, Z.AI Coding Plan | adapter 직접 실행 PASS. host에서는 `not enabled` | host `enabled_builders`에 없다. OpenCode 하네스는 **M2로 명시 승인됐다(2026-09-29)** |
 | CURSOR | **없음** | Cursor CLI `2026.09.23-86fc751`. box 사용자로만 로그인됨 | `not enabled` | 빌더 계정이 없고 wrapper가 설치되지 않았다. **저장소의 Cursor adapter(`control_plane_cursor.py`)는 systemd user manager가 필요한데 이 호스트에는 systemd가 없다(PID 1 = tini)** |
 
 **host policy 현재값**
@@ -624,6 +621,6 @@ v1도 문서뿐이다. F1~F4의 재현 테스트는 P2 구현 PR에 포함하고
    - Cursor 결정까지 끝나면 4개가 된다.
    - `max_active_sessions`는 켜진 레인 수에 맞춘다.
 
-**미결정 M2:** GLM 레인의 하네스로 **OpenCode `1.18.32` + Z.AI Coding Plan**을 명시 승인할지 정한다.
+**결정 M2 (User, 2026-09-29): 승인.** GLM 레인의 하네스는 **OpenCode `1.18.32` + Z.AI Coding Plan**이다. 호스트 `enabled_builders`에 GLM을 넣는 일은 P3에서 한다.
 
 **결정 M3 (User, 2026-09-29): (b).** 이 호스트에서 systemd 없이 돌리는 adapter로 바꾼다. 구현은 `adapters/cursor/`다. 구조는 다른 세 레인과 같다: wrapper, adapter, 분리된 supervisor. 끝난 supervisor는 tini가 정리한다. 이전의 systemd 방식 `control_plane_cursor.py`는 폐기했다.

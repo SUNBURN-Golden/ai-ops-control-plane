@@ -835,7 +835,9 @@ Merge readiness (`operation=merge-check`):
 - anything not machine-computable makes it not ready: Astra gates,
   undeclared project merge prerequisites, labels `needs-user`, `blocked` and
   `decision-required`;
-- merge stays with the User until decision M1 is recorded.
+- User decision M1 (2026-09-29) delegates the merge executor: `operation=merge`
+  recomputes this predicate and merges only when it is true, with the merge
+  pinned to that exact head (`sha`), so a later push makes GitHub refuse it.
 
 Scheduling (lanes free up in this priority order):
 1. resumes of the lane's owned tasks;

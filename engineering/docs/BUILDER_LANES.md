@@ -10,7 +10,7 @@ up to the number of enabled lanes; outside program mode keep `max_active_session
 |---|---|---|
 | DEVIN | Existing Devin adapter | Exact installed adapter and durable session evidence |
 | GROK_BUILD | Official xAI Grok Build CLI | Dedicated builder identity; native xAI session and quota |
-| GLM | Explicitly approved GLM harness | Supported model/harness and subscription evidence; no implicit OpenCode replacement. The installed host harness is OpenCode `1.18.32` with the Z.AI Coding Plan; approving it is User decision M2 (open) |
+| GLM | Explicitly approved GLM harness | Supported model/harness and subscription evidence; no implicit OpenCode replacement. The installed host harness is OpenCode `1.18.32` with the Z.AI Coding Plan, explicitly approved by User decision M2 (2026-09-29) |
 | CURSOR | Official Cursor CLI (`agent`) | `harness=CURSOR_CLI`, exact model ID from installed CLI, isolated durable supervisor |
 
 CURSOR with a Grok model is not GROK_BUILD. Credentials, session IDs, model IDs,

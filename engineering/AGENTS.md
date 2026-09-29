@@ -37,7 +37,7 @@ pointers.
 | BUILDER | One configured autonomous writer: DEVIN, GROK_BUILD, GLM or CURSOR; investigate → implement → test/debug → PR/evidence | Change approved architecture silently; write outside the assigned task/worktree; merge |
 | REVIEWER | Configured non-author read-only reviewer; may be a different builder lane or User-designated external lane | Modify the reviewed change or become a second writer |
 | CHEAP_WORKER | Explicitly authorized mechanical work | Become a second writer on a substantive task |
-| COORDINATOR | Program mode only (Claude Sonnet): follow `docs/COORDINATOR_PLAYBOOK.md`; call fixed operations (materialize, start, review, reap, merge-check); route questions; post progress | Write or review code; judge design; choose a lane (the mechanical layer computes it); create task issues directly; touch the host; merge unless M1 delegation is recorded |
+| COORDINATOR | Program mode only (Claude Sonnet): follow `docs/COORDINATOR_PLAYBOOK.md`; call fixed operations (materialize, start, review, reap, merge-check, merge); route questions; post progress | Write or review code; judge design; choose a lane (the mechanical layer computes it); create task issues directly; touch the host; merge other than through `operation=merge` (User decision M1) |
 | OPUS | Program mode only (Claude Opus): first answerer for DECISION_REQUIRED; may approve a *small design exception* (`docs/PROGRAM_MODE.md` §5) | Author code in the task it rules on; audit a design it drafted; approve anything outside the small-exception definition |
 | MECHANICAL_LAYER | Actor validation, task serialization, builder dispatch, durable control record, event dedupe, gate aggregation, lane selection in the fixed order | Perform semantic engineering or architecture judgment |
 | SLACK | Command/status/decision cockpit | Persistent source of technical truth |
@@ -333,10 +333,11 @@ launch when an owner exists or launch state is UNKNOWN.
 
 Grok never merges.
 A reviewer PASS or required Astra PASS is not a merge command.
-Only User authorizes merge. Program mode decision M1 (open) may delegate only the
-merge executor to the coordinator. The merge would still require the computed
-READY_FOR_MERGE of `RUNBOOKS/DISPATCH.md` §18, pinned to the exact head, and
-anything not computable goes to User. Until M1 is durably recorded, User merges.
+Only User authorizes merge. Program mode decision M1 (User, 2026-09-29) delegates
+only the merge executor to the coordinator, through `operation=merge`. The merge
+still requires the computed READY_FOR_MERGE of `RUNBOOKS/DISPATCH.md` §18, pinned
+to the exact head, and anything not computable goes to User. Outside program mode,
+User merges.
 
 READY_FOR_MERGE is a derived mechanical predicate for the current task revision
 and current HEAD. It is not a status string that an arbitrary actor may assert.

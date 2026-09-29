@@ -15,6 +15,7 @@ group and the host ledger's own transactions):
   finalize-review  record a reviewer launch outcome in the control record
   reap         release a verified-terminal session; the host pins its signed marker
   merge-check  compute DISPATCH section 18 READY_FOR_MERGE for one PR head
+  merge        User decision M1: merge a computed READY_FOR_MERGE, pinned to that exact head
 
 Authority: every lane posts to GitHub with the same account, so GitHub text (issue
 bodies, the control record comment, review bodies) is never a gate input. Gates read
@@ -967,6 +968,24 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     return {"ready": not reasons, "head": head, "pr": pr_number, "issue": issue_number, "reasons": reasons}
 
 
+def merge(issue_number: int, pr_number: int) -> Dict[str, Any]:
+    """User decision M1 (2026-09-29): the merge executor is delegated, the merge condition is not.
+
+    Merges only when merge_check is ready, and pins the merge to the head it computed, so a push
+    in between makes GitHub refuse the merge instead of merging an unreviewed head.
+    """
+    cfg = cp.load_config()
+    cp.require_runtime_enabled()
+    check = merge_check(issue_number, pr_number)
+    if not check["ready"]:
+        return {"status": "NOT_READY", "issue": issue_number, "pr": pr_number, "reasons": check["reasons"]}
+    result = api_for(cfg)._request("PUT", f"/pulls/{pr_number}/merge", {"sha": check["head"]})
+    if not isinstance(result, dict) or result.get("merged") is not True:
+        raise ProgramError(f"GitHub did not merge PR {pr_number} at {check['head']}")
+    return {"status": "MERGED", "issue": issue_number, "pr": pr_number, "head": check["head"],
+            "merge_commit": result.get("sha")}
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -974,7 +993,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("lanes")
-    for name in ("materialize", "start", "review", "finalize-review", "reap", "merge-check"):
+    for name in ("materialize", "start", "review", "finalize-review", "reap", "merge-check", "merge"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--args-json", default="{}")
         cmd.add_argument("--issue-number", type=int)
@@ -999,6 +1018,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             result = {"state": finalize_review(args.issue_number, args.result, args.launch_request_id)}
         elif args.command == "reap":
             result = reap(args.issue_number, extra.get("launch_request_id", ""), extra.get("evidence", ""))
+        elif args.command == "merge":
+            result = merge(args.issue_number, int(extra.get("pr_number", 0)))
         else:
             result = merge_check(args.issue_number, int(extra.get("pr_number", 0)))
         print(json.dumps(result, sort_keys=True))
