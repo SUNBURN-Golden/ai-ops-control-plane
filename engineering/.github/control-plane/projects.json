@@ -134,5 +134,39 @@
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
     "deployment_enabled": true
+  },
+  "BeautifulMind-JT/kix-commerce-apps": {
+    "schema_version": 1,
+    "project": "KIX_COMMERCE",
+    "repository": "BeautifulMind-JT/kix-commerce-apps",
+    "runner_labels": [
+      "self-hosted",
+      "astra-control-plane"
+    ],
+    "allowed_builders": [
+      "DEVIN",
+      "GROK_BUILD",
+      "GLM",
+      "CURSOR"
+    ],
+    "builder_wrappers": {
+      "DEVIN": "/opt/astra/bin/astra-builder-devin",
+      "GROK_BUILD": "/opt/astra/bin/astra-builder-grok-build",
+      "GLM": "/opt/astra/bin/astra-builder-glm",
+      "CURSOR": "/opt/astra/bin/astra-builder-cursor"
+    },
+    "control_record_marker": "<!-- ASTRA_CONTROL_RECORD_V1 -->",
+    "control_record_actor": "BeautifulMind-JT",
+    "allowed_task_actors": [
+      "BeautifulMind-JT"
+    ],
+    "allowed_dispatch_actors": [
+      "BeautifulMind-JT"
+    ],
+    "enabled_builders": [
+      "DEVIN"
+    ],
+    "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
+    "deployment_enabled": true
   }
 }

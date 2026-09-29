@@ -75,10 +75,10 @@ class BotRegistryTests(unittest.TestCase):
     def test_repositories_and_central_targets_are_registered(self):
         repos = set()
         for bot in self.bots:
-            if "repo" in bot:
-                with self.subTest(bot=bot["name"]):
-                    self.assertRegex(bot["repo"], REPO_RE)
-                repos.add(bot["repo"])
+            for repo in ([bot["repo"]] if "repo" in bot else []) + list(bot.get("extra_repos", [])):
+                with self.subTest(bot=bot["name"], repo=repo):
+                    self.assertRegex(repo, REPO_RE)
+                repos.add(repo)
         profiles = json.loads((ROOT / "engineering/.github/control-plane/projects.json").read_text())
         for target in profiles:
             with self.subTest(target=target):
