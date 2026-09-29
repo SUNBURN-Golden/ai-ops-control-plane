@@ -57,11 +57,23 @@ class AdmissionTests(unittest.TestCase):
             db.close()
 
     def test_concurrent_processes_share_capacity_across_five_repositories(self):
+        self.policy["enabled_builders"] = ["DEVIN", "GROK_BUILD", "GLM"]
+        lanes = ("DEVIN", "GROK_BUILD", "GLM")
         with concurrent.futures.ProcessPoolExecutor(max_workers=6) as pool:
-            futures = [pool.submit(reserve_process, str(self.path), self.policy, packet(i)) for i in range(15)]
+            futures = [pool.submit(reserve_process, str(self.path), self.policy,
+                                   packet(i, builder_id=lanes[i % 3])) for i in range(15)]
             results = [future.result(timeout=20) for future in futures]
         self.assertEqual(sum(admitted for admitted, _ in results), 2)
         self.assertEqual(sum(result["outcome"] == "FAILED_PRESTART" for _, result in results), 13)
+
+    def test_concurrent_processes_admit_one_session_per_lane(self):
+        self.policy["max_active_sessions"] = 4
+        with concurrent.futures.ProcessPoolExecutor(max_workers=6) as pool:
+            futures = [pool.submit(reserve_process, str(self.path), self.policy, packet(i)) for i in range(12)]
+            results = [future.result(timeout=20) for future in futures]
+        self.assertEqual(sum(admitted for admitted, _ in results), 1)
+        refused = [result["reason"] for admitted, result in results if not admitted]
+        self.assertTrue(all(reason == "lane busy" for reason in refused))
 
     def test_concurrent_duplicate_admits_only_once(self):
         with concurrent.futures.ProcessPoolExecutor(max_workers=4) as pool:
@@ -156,6 +168,10 @@ class AdmissionTests(unittest.TestCase):
         self.policy["max_active_sessions"] = len(cases)
         for index, (code, stdout) in enumerate(cases):
             with self.subTest(index=index):
+                # Each UNKNOWN keeps its lane busy, so every case gets its own ledger.
+                self.path = Path(self.temp.name) / f"admission-{index}.sqlite"
+                self.ledger = host.Ledger(self.path, clock=lambda: self.now)
+                self.ledger.initialize()
                 # Bind all other fields to this request so the malformed field is decisive.
                 if index:
                     output = json.loads(stdout)
@@ -402,6 +418,269 @@ class AdmissionTests(unittest.TestCase):
             host.protected_leaf(path, os.getuid())
         with self.assertRaises(host.HostError):
             host.parse_json('{"outcome":"CONFIRMED","outcome":"FAILED_PRESTART"}')
+
+
+LANES = ("DEVIN", "GROK_BUILD", "GLM", "CURSOR")
+HEAD = "a" * 40
+EVIDENCE = "https://github.com/owner/repo0/pull/7#issuecomment-1"
+
+
+def writer(index=0, lane="DEVIN", **changes):
+    value = packet(index, schema_version=2, role="WRITER", builder_id=lane, owner_lane=lane,
+                   launch_request_id=f"{index:024x}")
+    value.update(changes)
+    return value
+
+
+def reviewer(index=0, lane="GROK_BUILD", owner="DEVIN", review=1, **changes):
+    value = packet(index, schema_version=2, role="REVIEWER", builder_id=lane, owner_lane=owner,
+                   review_request_id=f"{review:024x}", head_sha=HEAD,
+                   launch_request_id=f"{review + 0x100:024x}")
+    value.update(changes)
+    return value
+
+
+class ProgramModeHostTests(unittest.TestCase):
+    """Ledger v2: role reservations, one session per lane, verified reap, materialization."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "admission.sqlite"
+        self.now = 1_000_000
+        self.ledger = host.Ledger(self.path, clock=lambda: self.now)
+        self.ledger.initialize()
+        self.policy = {
+            "control_uid": 1010, "runner_uid": 1020,
+            "builder_uids": {"DEVIN": 1030, "GROK_BUILD": 1040, "GLM": 1050, "CURSOR": 1060},
+            "allowed_repositories": [f"owner/repo{i}" for i in range(5)],
+            "enabled_builders": list(LANES), "max_active_sessions": 4,
+            "max_launches_per_24h": None, "ledger_path": str(self.path),
+            "wrapper_paths": dict(host.WRAPPERS),
+            "boundary_evidence_pointer": "https://github.com/owner/ops/issues/12",
+        }
+
+    def confirm(self, value, policy):
+        return subprocess.CompletedProcess([], 0, json.dumps(
+            host.result_for(value, "CONFIRMED", session_id="session-" + value["launch_request_id"])))
+
+    def launch(self, value):
+        return host.launch(value, self.policy, self.ledger, self.confirm)
+
+    def reap(self, value, pids=()):
+        return self.ledger.reap(value["launch_request_id"], EVIDENCE, self.policy,
+                                quiescence=lambda lane, policy: list(pids))
+
+    def launch_and_reap(self, value):
+        self.launch(value)
+        return self.reap(value)
+
+    def test_f1_four_busy_writers_release_before_merge_so_reviews_can_run(self):
+        writers = [writer(i, lane) for i, lane in enumerate(LANES)]
+        self.assertTrue(all(self.launch(w)["outcome"] == "CONFIRMED" for w in writers))
+        blocked = self.launch(reviewer(0, "GROK_BUILD", "DEVIN"))
+        self.assertEqual(blocked["outcome"], "FAILED_PRESTART")
+        for w in writers:  # each writer posted its deliverable and its lane UID is quiescent
+            self.assertEqual(self.reap(w)["resolution"], "SESSION_TERMINAL_VERIFIED")
+        for index, (owner, lane) in enumerate(zip(LANES, LANES[1:] + LANES[:1])):
+            review = reviewer(index, lane, owner, review=10 + index)
+            self.assertEqual(self.launch(review)["outcome"], "CONFIRMED", (owner, lane))
+
+    def test_f2_review_of_same_task_is_admitted_once_writer_released(self):
+        w = writer()
+        self.launch(w)
+        early = self.launch(reviewer())
+        self.assertEqual(early["reason"], "task writer session is still active or unresolved; review waits")
+        self.reap(w)
+        self.assertEqual(self.launch(reviewer(review=2))["outcome"], "CONFIRMED")
+        second = self.launch(reviewer(lane="GLM", review=3))  # A2: second reviewer on another lane
+        self.assertEqual(second["outcome"], "CONFIRMED")
+        resume = self.launch(writer(attempt_id=2, launch_request_id="f" * 24))
+        self.assertEqual(resume["reason"], "task has an active or unresolved review; the writer waits")
+
+    def test_reviewer_rules_are_enforced_by_packet_and_ledger(self):
+        with self.assertRaises(host.HostError):
+            host.validate_packet(reviewer(lane="DEVIN", owner="DEVIN"), self.policy)
+        with self.assertRaises(host.HostError):
+            host.validate_packet(reviewer(head_sha="short"), self.policy)
+        with self.assertRaises(host.HostError):
+            host.validate_packet(writer(owner_lane="GLM"), self.policy)
+        self.launch_and_reap(writer())
+        self.launch(reviewer(review=5))
+        duplicate = self.launch(reviewer(lane="GLM", review=5, launch_request_id="e" * 24))
+        self.assertEqual(duplicate["reason"], "review request already has an active or unresolved session")
+
+    def test_lane_is_exclusive_across_tasks_and_repositories(self):
+        self.launch(writer(0, "DEVIN"))
+        busy = self.launch(writer(1, "DEVIN"))
+        self.assertEqual(busy["reason"], "lane busy")
+        self.assertEqual(self.launch(writer(2, "GLM"))["outcome"], "CONFIRMED")
+        board = self.ledger.lanes(self.policy)
+        self.assertEqual(board["active_total"], 2)
+        self.assertEqual({lane["lane"]: len(lane["active"]) for lane in board["lanes"]},
+                         {"DEVIN": 1, "GROK_BUILD": 0, "GLM": 1, "CURSOR": 0})
+
+    def test_reap_requires_quiescent_lane_and_is_idempotent(self):
+        w = writer()
+        self.launch(w)
+        with self.assertRaisesRegex(host.HostError, "live process"):
+            self.reap(w, pids=[4242])
+        with self.assertRaises(host.HostError):
+            self.ledger.reap(w["launch_request_id"], "PENDING", self.policy, quiescence=lambda *_: [])
+        first = self.reap(w)
+        self.assertFalse(first["repeated"])
+        # A lost RELEASED projection is repaired from the stored result; the lane is not re-checked.
+        again = self.ledger.reap(w["launch_request_id"], EVIDENCE, self.policy,
+                                 quiescence=lambda *_: self.fail("must not re-check"))
+        self.assertEqual((again["resolution"], again["repeated"]), ("SESSION_TERMINAL_VERIFIED", True))
+        self.assertEqual(self.ledger.status(w["launch_request_id"])["resolution"], "SESSION_TERMINAL_VERIFIED")
+
+    def test_reap_never_touches_unknown_or_operator_reconciled_rows(self):
+        unknown = writer(1, "GLM")
+        host.launch(unknown, self.policy, self.ledger,
+                    lambda value, policy: subprocess.CompletedProcess([], 1, "crash"))
+        with self.assertRaisesRegex(host.HostError, "operator-only"):
+            self.reap(unknown)
+        confirmed = writer(2, "DEVIN")
+        self.launch(confirmed)
+        self.ledger.reconcile(confirmed["launch_request_id"], "session-" + confirmed["launch_request_id"], EVIDENCE)
+        with self.assertRaisesRegex(host.HostError, "operator"):
+            self.reap(confirmed)
+
+    def test_lane_quiescence_scans_proc_and_refuses_hidden_processes(self):
+        proc = Path(self.temp.name) / "proc"
+        for pid, uid in ((10, 1030), (11, 1040), (12, 0)):
+            (proc / str(pid)).mkdir(parents=True)
+            (proc / str(pid) / "status").write_text(f"Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+        (proc / "self").mkdir()
+        self.assertEqual(host.live_processes(1030, str(proc)), [10])
+        self.assertEqual(host.live_processes(1050, str(proc)), [])
+        mountinfo = Path(self.temp.name) / "mountinfo"
+        mountinfo.write_text("22 1 0:5 / /proc rw,nosuid shared:13 - proc proc rw\n")
+        self.assertFalse(host.proc_hides_processes(str(mountinfo)))
+        mountinfo.write_text("22 1 0:5 / /proc rw,nosuid shared:13 - proc proc rw,hidepid=2\n")
+        self.assertTrue(host.proc_hides_processes(str(mountinfo)))
+        self.assertTrue(host.proc_hides_processes(str(Path(self.temp.name) / "missing")))
+
+    def test_materialize_never_recreates_an_unresolved_request(self):
+        args = ("zari", "n010", "owner/repo0", "b" * 40, self.policy)
+        first = self.ledger.materialize_begin(*args)
+        self.assertEqual(first["decision"], "CREATE_ALLOWED")
+        # A second coordinator run while the create is in flight must not create again.
+        self.assertEqual(self.ledger.materialize_begin(*args)["decision"], "UNRESOLVED")
+        self.ledger.materialize_finish("zari", "n010", first["request"], "UNKNOWN", None)
+        self.assertEqual(self.ledger.materialize_begin(*args)["decision"], "UNRESOLVED")
+        # A later lookup found the issue carrying the same request id.
+        self.ledger.materialize_finish("zari", "n010", first["request"], "CREATED", 33)
+        created = self.ledger.materialize_begin(*args)
+        self.assertEqual((created["decision"], created["issue"]), ("CREATED", 33))
+        self.assertTrue(self.ledger.materialize_finish("zari", "n010", first["request"], "CREATED", 33)["repeated"])
+        with self.assertRaises(host.HostError):
+            self.ledger.materialize_finish("zari", "n010", first["request"], "CREATED", 34)
+
+    def test_late_response_of_sealed_request_cannot_replace_current_issue(self):
+        args = ("zari", "n011", "owner/repo0", "c" * 40, self.policy)
+        old = self.ledger.materialize_begin(*args)
+        self.ledger.materialize_finish("zari", "n011", old["request"], "UNKNOWN", None)
+        with self.assertRaises(host.HostError):
+            self.ledger.materialize_resolve("zari", "n011", old["request"], "PENDING")
+        sealed = self.ledger.materialize_resolve("zari", "n011", old["request"], EVIDENCE)
+        self.assertEqual(sealed["sealed"], [old["request"]])
+        new = self.ledger.materialize_begin(*args)
+        self.assertEqual((new["decision"], new["attempt"]), ("CREATE_ALLOWED", 2))
+        self.assertNotEqual(new["request"], old["request"])
+        self.ledger.materialize_finish("zari", "n011", new["request"], "CREATED", 40)
+        with self.assertRaisesRegex(host.HostError, "sealed or stale"):
+            self.ledger.materialize_finish("zari", "n011", old["request"], "CREATED", 39)
+        status = self.ledger.materialize_status("zari", "n011")
+        self.assertEqual((status["status"], status["issue"], status["sealed"]), ("CREATED", 40, [old["request"]]))
+
+    def test_materialize_validates_inputs(self):
+        for bad in (("zari prog", "n1", "owner/repo0", "b" * 40), ("zari", "n1", "other/repo", "b" * 40),
+                    ("zari", "n1", "owner/repo0", "main")):
+            with self.subTest(bad=bad), self.assertRaises(host.HostError):
+                self.ledger.materialize_begin(*bad, self.policy)
+        self.ledger.materialize_begin("zari", "n1", "owner/repo0", "b" * 40, self.policy)
+        with self.assertRaisesRegex(host.HostError, "different repository"):
+            self.ledger.materialize_begin("zari", "n1", "owner/repo1", "b" * 40, self.policy)
+
+    def test_operator_only_commands(self):
+        with patch.object(host.os, "getuid", return_value=1010), patch.object(host.os, "geteuid", return_value=1010):
+            with patch.dict(os.environ, {"SUDO_UID": "1020"}):
+                for command in ("reap", "materialize-begin", "materialize-finish", "materialize-status", "status"):
+                    host.authorize_identity(self.policy, command)
+                for command in ("migrate", "materialize-resolve", "reconcile", "init"):
+                    with self.subTest(command=command), self.assertRaises(host.HostError):
+                        host.authorize_identity(self.policy, command)
+            with patch.dict(os.environ, {"SUDO_UID": "1060"}), self.assertRaises(host.HostError):
+                host.authorize_identity(self.policy, "reap")
+
+    def test_status_lanes_command(self):
+        self.launch(writer())
+        with patch.object(host, "load_host_policy", return_value=self.policy), \
+             patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(host.main(["status", "--lanes"]), 0)
+        board = json.loads(stdout.getvalue())
+        self.assertEqual(board["lanes"][0]["active"][0]["role"], "WRITER")
+
+
+class MigrationTests(unittest.TestCase):
+    V1 = """
+        CREATE TABLE launches (
+            request TEXT PRIMARY KEY, repository TEXT NOT NULL, task TEXT NOT NULL,
+            packet TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN
+            ('SUBMITTING','CONFIRMED','UNKNOWN','FAILED_PRESTART','RECONCILED')),
+            result TEXT NOT NULL, admitted INTEGER NOT NULL CHECK(admitted IN (0,1)),
+            created REAL NOT NULL, evidence TEXT);
+        CREATE UNIQUE INDEX one_active_task ON launches(repository, task)
+            WHERE state IN ('SUBMITTING','CONFIRMED','UNKNOWN');
+        PRAGMA user_version=1;
+    """
+
+    def make_v1(self, rows):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = Path(temp.name) / "admission.sqlite"
+        db = sqlite3.connect(path)
+        db.executescript(self.V1)
+        for request, lane, state in rows:
+            body = json.dumps({"builder_id": lane}) if lane else ""
+            db.execute("INSERT INTO launches VALUES (?,?,?,?,?,?,?,?,NULL)",
+                       (request, "o/r", "T-" + request, body, state, "{}", 1, 1.0))
+        db.commit()
+        db.close()
+        return path
+
+    def test_migrates_in_place_with_backup_and_lane_backfill(self):
+        path = self.make_v1([("r1", "DEVIN", "RECONCILED"), ("r2", "GLM", "FAILED_PRESTART"),
+                             ("r3", "", "RECONCILED"), ("r4", "DEVIN", "CONFIRMED")])
+        ledger = host.Ledger(path, clock=lambda: 5)
+        with self.assertRaises(host.HostError):
+            ledger.connect()  # v1 is refused until migrated
+        result = ledger.migrate(2)
+        self.assertEqual(result["status"], "MIGRATED")
+        self.assertTrue(Path(result["backup"]).exists())
+        db = ledger.connect()
+        try:
+            lanes = dict(db.execute("SELECT request, lane FROM launches").fetchall())
+            roles = {row[0] for row in db.execute("SELECT role FROM launches")}
+        finally:
+            db.close()
+        self.assertEqual(lanes, {"r1": "DEVIN", "r2": "GLM", "r3": "", "r4": "DEVIN"})
+        self.assertEqual(roles, {"WRITER"})
+        self.assertEqual(ledger.migrate(2)["status"], "ALREADY_V2")
+
+    def test_conflicting_active_rows_roll_back_and_leave_v1_intact(self):
+        path = self.make_v1([("r1", "DEVIN", "CONFIRMED"), ("r2", "DEVIN", "UNKNOWN")])
+        ledger = host.Ledger(path, clock=lambda: 6)
+        with self.assertRaises(sqlite3.IntegrityError):
+            ledger.migrate(2)
+        db = sqlite3.connect(path)
+        try:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            columns = [row[1] for row in db.execute("PRAGMA table_info(launches)")]
+        finally:
+            db.close()
+        self.assertNotIn("lane", columns)
 
 
 if __name__ == "__main__":

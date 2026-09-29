@@ -1,5 +1,9 @@
 #!/usr/bin/python3 -I
-"""Installed, protected host admission boundary. No scheduler or automatic release."""
+"""Installed, protected host admission boundary.
+
+No scheduler. The only automatic release is `reap`, which retires a CONFIRMED
+session after the host itself proves its builder lane UID has no live process.
+"""
 from __future__ import annotations
 
 import argparse
@@ -26,6 +30,14 @@ WRAPPERS = {"DEVIN": "/opt/astra/bin/astra-builder-devin",
             "CURSOR": "/opt/astra/bin/astra-builder-cursor"}
 IDENTITY = ("repository", "task_id", "task_revision", "builder_id", "launch_request_id", "attempt_id")
 ACTIVE = ("SUBMITTING", "CONFIRMED", "UNKNOWN")
+ACTIVE_SQL = "state IN ('SUBMITTING','CONFIRMED','UNKNOWN')"
+SCHEMA_VERSION = 2
+ROLES = ("WRITER", "REVIEWER")
+SAFE_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+SHA_RE = re.compile(r"[0-9a-f]{40}")
+REQUEST_RE = re.compile(r"[0-9a-f]{24}")
+OPERATOR_ONLY = {"init", "reconcile", "migrate", "materialize-resolve"}
+MATERIALIZE_STATES = ("SUBMITTING", "CREATED", "UNKNOWN", "ABANDONED")
 CLEAN_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
 
 
@@ -127,7 +139,7 @@ def authorize_identity(policy, command):
     caller = int(caller)
     if caller in policy["builder_uids"].values() or caller == policy["control_uid"]:
         raise HostError("builder/control identities cannot invoke admission commands")
-    if command in {"init", "reconcile"} and caller == policy["runner_uid"]:
+    if command in OPERATOR_ONLY and caller == policy["runner_uid"]:
         raise HostError("operator-only command; runner is forbidden")
 
 
@@ -155,8 +167,12 @@ def load_host_policy(command):
     return policy
 
 
+def packet_role(packet):
+    return packet.get("role", "WRITER") if packet.get("schema_version") == 2 else "WRITER"
+
+
 def validate_packet(packet, policy):
-    if type(packet.get("schema_version")) is not int or packet["schema_version"] != 1:
+    if type(packet.get("schema_version")) is not int or packet["schema_version"] not in (1, 2):
         raise HostError("unsupported launch packet schema")
     for field in IDENTITY[:-1]:
         value = packet.get(field)
@@ -168,6 +184,22 @@ def validate_packet(packet, policy):
         raise HostError("repository is not admitted by host policy")
     if packet["builder_id"] not in policy["enabled_builders"]:
         raise HostError("builder is not enabled by host policy")
+    if packet["schema_version"] == 2:
+        role, owner = packet.get("role"), packet.get("owner_lane")
+        if role not in ROLES:
+            raise HostError("packet role must be WRITER or REVIEWER")
+        if owner not in WRAPPERS:
+            raise HostError("packet owner_lane must name a registered lane")
+        if role == "WRITER" and owner != packet["builder_id"]:
+            raise HostError("a writer runs on its own owner lane")
+        if role == "REVIEWER":
+            if owner == packet["builder_id"]:
+                raise HostError("a reviewer lane must differ from the task owner lane")
+            key = packet.get("review_request_id")
+            if not isinstance(key, str) or not REQUEST_RE.fullmatch(key):
+                raise HostError("reviewer packet needs a 24-hex review_request_id")
+            if not isinstance(packet.get("head_sha"), str) or not SHA_RE.fullmatch(packet["head_sha"]):
+                raise HostError("reviewer packet needs the exact 40-hex head_sha")
     canonical(packet)
 
 
@@ -179,20 +211,94 @@ def result_for(packet, outcome, reason=None, session_id=None):
     return result
 
 
+V2_SCHEMA = """
+    CREATE UNIQUE INDEX one_active_writer ON launches(repository, task)
+        WHERE role='WRITER' AND state IN ('SUBMITTING','CONFIRMED','UNKNOWN');
+    CREATE UNIQUE INDEX one_active_review ON launches(repository, task, review_key)
+        WHERE role='REVIEWER' AND state IN ('SUBMITTING','CONFIRMED','UNKNOWN');
+    CREATE UNIQUE INDEX one_active_per_lane ON launches(lane)
+        WHERE state IN ('SUBMITTING','CONFIRMED','UNKNOWN');
+    CREATE TABLE materializations (
+        program TEXT NOT NULL, node TEXT NOT NULL, repository TEXT NOT NULL,
+        attempt INTEGER NOT NULL CHECK(attempt >= 1), request TEXT NOT NULL,
+        plan_commit TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('SUBMITTING','CREATED','UNKNOWN','ABANDONED')),
+        issue INTEGER, sealed TEXT NOT NULL, updated REAL NOT NULL, evidence TEXT,
+        PRIMARY KEY(program, node));
+"""
+
+
+def materialize_request(program, node, attempt):
+    return hashlib.sha256(f"materialize\0{program}\0{node}\0{attempt}".encode()).hexdigest()[:24]
+
+
+def safe_key(value, name):
+    if not isinstance(value, str) or not SAFE_KEY.fullmatch(value):
+        raise HostError(f"invalid {name}")
+    return value
+
+
+def proc_hides_processes(mountinfo="/proc/self/mountinfo"):
+    """True unless /proc is mounted without hidepid (other users' processes visible)."""
+    try:
+        lines = Path(mountinfo).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return True
+    for line in lines:
+        left, sep, right = line.partition(" - ")
+        fields, tail = left.split(), right.split()
+        if sep and len(fields) > 4 and fields[4] == "/proc" and tail and tail[0] == "proc":
+            options = dict(opt.partition("=")[::2] for opt in (tail[2] if len(tail) > 2 else "").split(","))
+            return options.get("hidepid", "0") not in ("0", "off")
+    return True
+
+
+def live_processes(uid, proc="/proc"):
+    """PIDs whose real, effective, saved or filesystem UID is `uid` (host-side, unforgeable)."""
+    found = []
+    for entry in os.scandir(proc):
+        if not entry.name.isdecimal():
+            continue
+        try:
+            text = Path(entry.path, "status").read_text(encoding="utf-8", errors="replace")
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        for line in text.splitlines():
+            if line.startswith("Uid:"):
+                if uid in {int(v) for v in line.split()[1:5]}:
+                    found.append(int(entry.name))
+                break
+    return found
+
+
+def lane_quiescence(lane, policy):
+    if proc_hides_processes():
+        raise HostError("/proc hides processes (hidepid); lane quiescence cannot be verified")
+    uid = policy["builder_uids"].get(lane)
+    if type(uid) is not int:
+        raise HostError("lane has no registered builder UID")
+    return live_processes(uid)
+
+
 class Ledger:
     """Filesystem policy is checked by CLI; this class also supports isolated unit tests."""
     def __init__(self, path, clock=time.time):
         self.path, self.clock = Path(path), clock
 
-    def connect(self):
+    def connect(self, *, allow_version=(SCHEMA_VERSION,)):
         db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=10, isolation_level=None)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA synchronous=FULL")
         db.execute("PRAGMA trusted_schema=OFF")
         try:
-            if db.execute("PRAGMA user_version").fetchone()[0] != 1 or db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-                raise HostError("ledger schema unavailable or corrupt")
-            db.execute("SELECT packet, state, result, admitted, created, evidence FROM launches LIMIT 0")
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version not in allow_version or db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise HostError(f"ledger schema v{version} unavailable or corrupt (need v{SCHEMA_VERSION}; run migrate)")
+            columns = "packet, state, result, admitted, created, evidence"
+            if version >= 2:
+                columns += ", role, lane, review_key"
+                db.execute("SELECT program, request, state, sealed FROM materializations LIMIT 0")
+            db.execute(f"SELECT {columns} FROM launches LIMIT 0")
         except Exception:
             db.close()
             raise
@@ -211,14 +317,51 @@ class Ledger:
                     packet TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN
                     ('SUBMITTING','CONFIRMED','UNKNOWN','FAILED_PRESTART','RECONCILED')),
                     result TEXT NOT NULL, admitted INTEGER NOT NULL CHECK(admitted IN (0,1)),
-                    created REAL NOT NULL, evidence TEXT);
-                CREATE UNIQUE INDEX one_active_task ON launches(repository, task)
-                    WHERE state IN ('SUBMITTING','CONFIRMED','UNKNOWN');
-                PRAGMA user_version=1;
-                COMMIT;
-            """)
+                    created REAL NOT NULL, evidence TEXT,
+                    role TEXT NOT NULL DEFAULT 'WRITER' CHECK(role IN ('WRITER','REVIEWER')),
+                    lane TEXT NOT NULL DEFAULT '', review_key TEXT NOT NULL DEFAULT '');
+            """ + V2_SCHEMA + f"PRAGMA user_version={SCHEMA_VERSION};\nCOMMIT;")
         finally:
             db.close()
+
+    def migrate(self, target):
+        """Operator-only, in place, one transaction; backs up the v1 file first."""
+        if target != SCHEMA_VERSION:
+            raise HostError(f"only migration to v{SCHEMA_VERSION} is supported")
+        with self.inflight_lock(exclusive=True):
+            db = self.connect(allow_version=(1, SCHEMA_VERSION))
+            try:
+                if db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
+                    return {"status": "ALREADY_V2"}
+                backup = self.path.with_name(f"{self.path.name}.v1-backup-{int(self.clock())}")
+                fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                os.close(fd)
+                target_db = sqlite3.connect(str(backup))
+                try:
+                    db.backup(target_db)
+                finally:
+                    target_db.close()
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    for statement in (
+                            "ALTER TABLE launches ADD COLUMN role TEXT NOT NULL DEFAULT 'WRITER' "
+                            "CHECK(role IN ('WRITER','REVIEWER'))",
+                            "ALTER TABLE launches ADD COLUMN lane TEXT NOT NULL DEFAULT ''",
+                            "ALTER TABLE launches ADD COLUMN review_key TEXT NOT NULL DEFAULT ''",
+                            "UPDATE launches SET lane=json_extract(packet, '$.builder_id') WHERE packet != ''",
+                            "DROP INDEX one_active_task"):
+                        db.execute(statement)
+                    for statement in V2_SCHEMA.split(";"):
+                        if statement.strip():
+                            db.execute(statement)
+                    db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+                return {"status": "MIGRATED", "from": 1, "to": SCHEMA_VERSION, "backup": str(backup)}
+            finally:
+                db.close()
 
     @contextmanager
     def inflight_lock(self, *, exclusive=False):
@@ -241,6 +384,8 @@ class Ledger:
     def reserve(self, packet, policy):
         validate_packet(packet, policy)
         body, request = canonical(packet), packet["launch_request_id"]
+        role, lane = packet_role(packet), packet["builder_id"]
+        review_key = packet.get("review_request_id", "") if role == "REVIEWER" else ""
         db = self.connect()
         try:
             db.execute("BEGIN IMMEDIATE")
@@ -250,12 +395,27 @@ class Ledger:
                     raise HostError("launch_request_id reused with a different packet")
                 db.commit()
                 return False, parse_json(previous["result"])
-            active = "state IN ('SUBMITTING','CONFIRMED','UNKNOWN')"
+            task = (packet["repository"], packet["task_id"])
             reason = None
-            if db.execute(f"SELECT 1 FROM launches WHERE repository=? AND task=? AND {active}",
-                          (packet["repository"], packet["task_id"])).fetchone():
+            if role == "WRITER" and db.execute(
+                    f"SELECT 1 FROM launches WHERE repository=? AND task=? AND role='WRITER' AND {ACTIVE_SQL}",
+                    task).fetchone():
                 reason = "task already has an active or unresolved owner"
-            elif db.execute(f"SELECT count(*) FROM launches WHERE {active}").fetchone()[0] >= policy["max_active_sessions"]:
+            elif role == "WRITER" and db.execute(
+                    f"SELECT 1 FROM launches WHERE repository=? AND task=? AND role='REVIEWER' AND {ACTIVE_SQL}",
+                    task).fetchone():
+                reason = "task has an active or unresolved review; the writer waits"
+            elif role == "REVIEWER" and db.execute(
+                    f"SELECT 1 FROM launches WHERE repository=? AND task=? AND role='WRITER' AND {ACTIVE_SQL}",
+                    task).fetchone():
+                reason = "task writer session is still active or unresolved; review waits"
+            elif role == "REVIEWER" and db.execute(
+                    f"SELECT 1 FROM launches WHERE repository=? AND task=? AND role='REVIEWER' "
+                    f"AND review_key=? AND {ACTIVE_SQL}", (*task, review_key)).fetchone():
+                reason = "review request already has an active or unresolved session"
+            elif db.execute(f"SELECT 1 FROM launches WHERE lane=? AND {ACTIVE_SQL}", (lane,)).fetchone():
+                reason = "lane busy"
+            elif db.execute(f"SELECT count(*) FROM launches WHERE {ACTIVE_SQL}").fetchone()[0] >= policy["max_active_sessions"]:
                 reason = "host max_active_sessions reached"
             elif (policy.get("max_launches_per_24h") is not None and
                   db.execute("SELECT count(*) FROM launches WHERE admitted=1 AND created>=?",
@@ -264,9 +424,10 @@ class Ledger:
             state = "FAILED_PRESTART" if reason else "SUBMITTING"
             result = result_for(packet, "FAILED_PRESTART" if reason else "UNKNOWN",
                                 reason or "durable SUBMITTING reservation; outcome unresolved")
-            db.execute("INSERT INTO launches VALUES (?,?,?,?,?,?,?,?,NULL)",
+            db.execute("INSERT INTO launches (request, repository, task, packet, state, result, admitted, "
+                       "created, evidence, role, lane, review_key) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?)",
                        (request, packet["repository"], packet["task_id"], body, state,
-                        canonical(result), int(reason is None), self.clock()))
+                        canonical(result), int(reason is None), self.clock(), role, lane, review_key))
             db.commit()  # FULL synchronous commit precedes every provider invocation.
             return reason is None, result
         finally:
@@ -291,11 +452,166 @@ class Ledger:
             raise HostError("invalid launch_request_id")
         db = self.connect()
         try:
-            row = db.execute("SELECT state FROM launches WHERE request=?", (request,)).fetchone()
+            row = db.execute("SELECT state, evidence FROM launches WHERE request=?", (request,)).fetchone()
         finally:
             db.close()
-        return {"status": "FOUND" if row else "NOT_FOUND", "launch_request_id": request,
-                "state": row["state"] if row else None}
+        result = {"status": "FOUND" if row else "NOT_FOUND", "launch_request_id": request,
+                  "state": row["state"] if row else None}
+        if row and row["evidence"]:
+            result["resolution"] = parse_json(row["evidence"]).get("resolution")
+        return result
+
+    def lanes(self, policy):
+        """Read-only lane board source: active reservations per registered lane."""
+        db = self.connect()
+        try:
+            rows = db.execute(f"SELECT request, repository, task, role, lane, state, created FROM launches "
+                              f"WHERE {ACTIVE_SQL} ORDER BY created").fetchall()
+        finally:
+            db.close()
+        active = [dict(row) for row in rows]
+        return {"status": "OK", "max_active_sessions": policy["max_active_sessions"], "active_total": len(active),
+                "lanes": [{"lane": lane, "enabled": lane in policy["enabled_builders"],
+                           "active": [row for row in active if row["lane"] == lane]}
+                          for lane in WRAPPERS if lane in policy["builder_uids"]]}
+
+    def reap(self, request, evidence, policy, *, quiescence=lane_quiescence):
+        """Retire a CONFIRMED session when its lane UID has no live process. Idempotent."""
+        if not isinstance(request, str) or not REQUEST_RE.fullmatch(request):
+            raise HostError("invalid launch_request_id")
+        if not evidence_url(evidence):
+            raise HostError("durable deliverable evidence URL required")
+        db = self.connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM launches WHERE request=?", (request,)).fetchone()
+            if row is None:
+                raise HostError("no reservation for request")
+            if row["state"] == "RECONCILED":
+                stored = parse_json(row["evidence"] or "{}")
+                if stored.get("resolution") != "SESSION_TERMINAL_VERIFIED":
+                    raise HostError("request was reconciled by an operator, not reaped")
+                db.commit()
+                return {"status": "RECONCILED", "resolution": "SESSION_TERMINAL_VERIFIED",
+                        "launch_request_id": request, "session_id": stored.get("session_id"),
+                        "evidence": stored.get("terminal_evidence"), "repeated": True}
+            if row["state"] != "CONFIRMED":
+                raise HostError(f"only a CONFIRMED session can be reaped (state {row['state']}); "
+                                "UNKNOWN/SUBMITTING stay operator-only")
+            session = parse_json(row["result"]).get("session_id")
+            if not isinstance(session, str) or not session.strip():
+                raise HostError("confirmed row lacks its session id")
+            pids = quiescence(row["lane"], policy)
+            if pids:
+                raise HostError(f"lane {row['lane']} still has {len(pids)} live process(es); session not terminal")
+            at = self.clock()
+            record = {"resolution": "SESSION_TERMINAL_VERIFIED", "session_id": session,
+                      "verifier": "LANE_UID_QUIESCENT", "lane": row["lane"], "role": row["role"],
+                      "terminal_evidence": evidence, "at": at}
+            db.execute("UPDATE launches SET state='RECONCILED', evidence=? WHERE request=? AND state='CONFIRMED'",
+                       (canonical(record), request))
+            db.commit()
+            return {"status": "RECONCILED", "resolution": "SESSION_TERMINAL_VERIFIED", "launch_request_id": request,
+                    "session_id": session, "evidence": evidence, "repeated": False}
+        finally:
+            db.close()
+
+    def materialize_begin(self, program, node, repository, plan_commit, policy):
+        safe_key(program, "program")
+        safe_key(node, "node")
+        if repository not in policy["allowed_repositories"]:
+            raise HostError("repository is not admitted by host policy")
+        if not isinstance(plan_commit, str) or not SHA_RE.fullmatch(plan_commit):
+            raise HostError("plan_commit must be a 40-hex commit SHA")
+        db = self.connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM materializations WHERE program=? AND node=?", (program, node)).fetchone()
+            if row is not None and row["repository"] != repository:
+                raise HostError("program node is bound to a different repository")
+            if row is None or row["state"] == "ABANDONED":
+                attempt = 1 if row is None else row["attempt"] + 1
+                request = materialize_request(program, node, attempt)
+                sealed = "[]" if row is None else row["sealed"]
+                db.execute("INSERT OR REPLACE INTO materializations VALUES (?,?,?,?,?,?,?,?,?,?,NULL)",
+                           (program, node, repository, attempt, request, plan_commit, "SUBMITTING",
+                            None, sealed, self.clock()))
+                db.commit()  # durable before any GitHub create request
+                return {"decision": "CREATE_ALLOWED", "program": program, "node": node, "request": request,
+                        "attempt": attempt, "plan_commit": plan_commit, "sealed": json.loads(sealed)}
+            db.commit()
+            decision = "CREATED" if row["state"] == "CREATED" else "UNRESOLVED"
+            return {"decision": decision, "program": program, "node": node, "request": row["request"],
+                    "attempt": row["attempt"], "state": row["state"], "issue": row["issue"],
+                    "plan_commit": row["plan_commit"], "sealed": json.loads(row["sealed"])}
+        finally:
+            db.close()
+
+    def materialize_finish(self, program, node, request, outcome, issue):
+        safe_key(program, "program")
+        safe_key(node, "node")
+        if outcome not in ("CREATED", "UNKNOWN"):
+            raise HostError("outcome must be CREATED or UNKNOWN")
+        if outcome == "CREATED" and (type(issue) is not int or issue < 1):
+            raise HostError("CREATED needs the issue number")
+        db = self.connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM materializations WHERE program=? AND node=?", (program, node)).fetchone()
+            if row is None:
+                raise HostError("no materialization request for program node")
+            if request != row["request"]:
+                # A late response of an abandoned request can never replace the current one.
+                raise HostError("request is not the current materialization request (sealed or stale)")
+            if row["state"] == "CREATED":
+                if outcome == "CREATED" and issue == row["issue"]:
+                    db.commit()
+                    return {"status": "CREATED", "issue": issue, "repeated": True}
+                raise HostError("program node is already CREATED with a different issue")
+            if row["state"] not in ("SUBMITTING", "UNKNOWN"):
+                raise HostError(f"cannot finish a {row['state']} request")
+            db.execute("UPDATE materializations SET state=?, issue=?, updated=? WHERE program=? AND node=?",
+                       (outcome, issue if outcome == "CREATED" else None, self.clock(), program, node))
+            db.commit()
+            return {"status": outcome, "issue": issue if outcome == "CREATED" else None, "repeated": False}
+        finally:
+            db.close()
+
+    def materialize_resolve(self, program, node, request, evidence):
+        """Operator-only: record a verified non-creation, sealing the request id forever."""
+        safe_key(program, "program")
+        safe_key(node, "node")
+        if not evidence_url(evidence):
+            raise HostError("operator evidence URL required")
+        db = self.connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM materializations WHERE program=? AND node=?", (program, node)).fetchone()
+            if row is None or row["request"] != request or row["state"] not in ("SUBMITTING", "UNKNOWN"):
+                raise HostError("only the current SUBMITTING/UNKNOWN request can be resolved as not created")
+            sealed = json.loads(row["sealed"]) + [request]
+            db.execute("UPDATE materializations SET state='ABANDONED', sealed=?, updated=?, evidence=? "
+                       "WHERE program=? AND node=?",
+                       (json.dumps(sealed), self.clock(),
+                        canonical({"resolution": "NOT_CREATED", "evidence": evidence}), program, node))
+            db.commit()
+            return {"status": "ABANDONED", "sealed": sealed}
+        finally:
+            db.close()
+
+    def materialize_status(self, program, node):
+        safe_key(program, "program")
+        safe_key(node, "node")
+        db = self.connect()
+        try:
+            row = db.execute("SELECT * FROM materializations WHERE program=? AND node=?", (program, node)).fetchone()
+        finally:
+            db.close()
+        if row is None:
+            return {"status": "NOT_FOUND", "program": program, "node": node}
+        return {"status": row["state"], "program": program, "node": node, "request": row["request"],
+                "attempt": row["attempt"], "issue": row["issue"], "plan_commit": row["plan_commit"],
+                "repository": row["repository"], "sealed": json.loads(row["sealed"])}
 
     def reconcile(self, request, session, evidence, *, no_session=False, sender_fenced=False,
                   never_admitted=False):
@@ -328,7 +644,8 @@ class Ledger:
                 if row is not None:
                     raise HostError("request is in the ledger; never-admitted reconciliation does not apply")
                 at = self.clock()
-                db.execute("INSERT INTO launches VALUES (?,?,?,?,?,?,?,?,?)",
+                db.execute("INSERT INTO launches (request, repository, task, packet, state, result, admitted, "
+                           "created, evidence) VALUES (?,?,?,?,?,?,?,?,?)",
                            (request, "", "", "", "RECONCILED",
                             canonical({"launch_request_id": request, "outcome": "UNKNOWN", "session_id": None,
                                        "reason": "never admitted; operator-recorded fence"}),
@@ -433,7 +750,14 @@ def main(argv=None):
     commands.add_parser("preflight").add_argument("--builder-id", choices=tuple(WRAPPERS), required=True)
     commands.add_parser("launch")
     commands.add_parser("init")
-    commands.add_parser("status").add_argument("--launch-request-id", required=True)
+    commands.add_parser("migrate").add_argument("--to", type=int, required=True)
+    status_parser = commands.add_parser("status")
+    which = status_parser.add_mutually_exclusive_group(required=True)
+    which.add_argument("--launch-request-id")
+    which.add_argument("--lanes", action="store_true")
+    reap_parser = commands.add_parser("reap")
+    for flag in ("launch-request-id", "evidence"):
+        reap_parser.add_argument("--" + flag, required=True)
     reconcile_parser = commands.add_parser("reconcile")
     for flag in ("launch-request-id", "evidence"):
         reconcile_parser.add_argument("--" + flag, required=True)
@@ -443,6 +767,21 @@ def main(argv=None):
     reconcile_parser.add_argument("--sender-fenced", action="store_true")
     reconcile_parser.add_argument("--never-admitted", action="store_true",
                                   help="record a request that never reached this ledger as fenced")
+    begin = commands.add_parser("materialize-begin")
+    for flag in ("program", "node", "repository", "plan-commit"):
+        begin.add_argument("--" + flag, required=True)
+    finish = commands.add_parser("materialize-finish")
+    for flag in ("program", "node", "request"):
+        finish.add_argument("--" + flag, required=True)
+    finish.add_argument("--outcome", choices=("CREATED", "UNKNOWN"), required=True)
+    finish.add_argument("--issue", type=int)
+    resolve = commands.add_parser("materialize-resolve")
+    for flag in ("program", "node", "request", "evidence"):
+        resolve.add_argument("--" + flag, required=True)
+    resolve.add_argument("--not-created", action="store_true", required=True)
+    mstatus = commands.add_parser("materialize-status")
+    for flag in ("program", "node"):
+        mstatus.add_argument("--" + flag, required=True)
     args, packet = parser.parse_args(argv), None
     os.umask(0o077)
     try:
@@ -455,13 +794,25 @@ def main(argv=None):
         ledger = Ledger(policy["ledger_path"])
         if args.command == "init":
             ledger.initialize()
-            result = {"status": "INITIALIZED"}
+            result = {"status": "INITIALIZED", "schema_version": SCHEMA_VERSION}
+        elif args.command == "migrate":
+            result = ledger.migrate(args.to)
         elif args.command == "preflight":
             result = preflight(args.builder_id, policy, ledger)
         elif args.command == "launch":
             result = launch(packet, policy, ledger)
         elif args.command == "status":
-            result = ledger.status(args.launch_request_id)
+            result = ledger.lanes(policy) if args.lanes else ledger.status(args.launch_request_id)
+        elif args.command == "reap":
+            result = ledger.reap(args.launch_request_id, args.evidence, policy)
+        elif args.command == "materialize-begin":
+            result = ledger.materialize_begin(args.program, args.node, args.repository, args.plan_commit, policy)
+        elif args.command == "materialize-finish":
+            result = ledger.materialize_finish(args.program, args.node, args.request, args.outcome, args.issue)
+        elif args.command == "materialize-resolve":
+            result = ledger.materialize_resolve(args.program, args.node, args.request, args.evidence)
+        elif args.command == "materialize-status":
+            result = ledger.materialize_status(args.program, args.node)
         else:
             result = ledger.reconcile(args.launch_request_id, args.session_id, args.evidence,
                                       no_session=args.no_session, sender_fenced=args.sender_fenced,
