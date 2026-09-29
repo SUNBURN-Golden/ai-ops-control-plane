@@ -124,6 +124,43 @@ control record 작성자는 그 토큰의 login이다. 이 결정은 `AGENTS.md`
 실행 소스를 승인된 GitHub commit에 결속하고 이 workflow와 같은 serialization/route fence를
 공유하기 전에는 추가하지 않는다(PR #34 A3 review F2/F3).
 
+## Program mode host 명령 (ledger v2)
+
+`docs/PROGRAM_MODE.md` §3·§4·§6·§8.2, `RUNBOOKS/DISPATCH.md` §25.
+
+**설치 순서**
+1. 새 helper를 설치한다.
+2. 곧바로 운영자가 `migrate --to 2`를 실행한다.
+   - v1 ledger에서는 migrate를 뺀 모든 명령이 거부된다. 그래서 이전 전에는 발송이 fail-closed로 멈춘다.
+   - migrate는 exclusive in-flight 잠금 아래에서 돈다. 먼저 `<ledger>.v1-backup-<ts>` 백업을 만들고, 한 트랜잭션 안에서 다음을 한다.
+     - 열 추가(role, lane, review_key)
+     - 기존 행의 lane 채우기
+     - 인덱스 교체(`one_active_writer`, `one_active_review`, `one_active_per_lane`)
+     - `materializations` 생성
+   - 같은 레인에 활성 행이 둘이면 인덱스 생성이 실패해 전부 되돌아간다. 그때는 먼저 reconcile한다.
+
+**runner가 sudo로 부를 수 있는 새 명령.** 인수 형식은 정규식으로 제한한다.
+- `status --lanes`: 읽기 전용 레인 현황.
+- `reap --launch-request-id <24 hex> --evidence <https URL>`
+  - CONFIRMED 행만, 그 레인 builder UID의 live process가 0개일 때 `RECONCILED/SESSION_TERMINAL_VERIFIED`로 바꾼다.
+  - `/proc`에 hidepid가 있으면 거부한다.
+  - 같은 요청을 다시 부르면 저장된 결과를 그대로 돌려준다.
+  - 세션을 끄지 않는다.
+  - adapter의 `status.json`은 빌더가 쓸 수 있는 곳에 있어 위조가 가능하다. 그래서 증거로 쓰지 않는다.
+- `materialize-begin --program <id> --node <id> --repository <owner/repo> --plan-commit <40 hex>`
+- `materialize-finish --program <id> --node <id> --request <24 hex> --outcome CREATED|UNKNOWN [--issue N]`
+- `materialize-status --program <id> --node <id>`
+- `materialize-plan --program <id> --node <id> --from <40 hex> --to <40 hex>`: plan commit compare-and-swap.
+
+**운영자 전용 명령.** runner는 금지다.
+- `migrate --to 2`
+- `materialize-resolve --program <id> --node <id> --request <24 hex> --not-created --evidence <URL>`
+  - 미생성을 확인한 요청 ID를 봉인한다. 봉인된 요청은 다시 쓰지 않는다.
+
+**레인당 세션 1개**
+- 동시 세션 한도는 host `max_active_sessions`다. program mode에서는 켜진 레인 수까지 올린다.
+- 같은 작업에서는 활성 WRITER와 REVIEWER가 서로 배제된다.
+
 ## Wrapper contract
 
 ```text

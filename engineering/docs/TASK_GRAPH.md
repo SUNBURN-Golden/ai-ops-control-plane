@@ -12,7 +12,9 @@ implementation and test/fix/retest inside each task. Code evaluates transitions.
 - One host's existing protected flow SQLite database serializes graph delivery.
   Never copy it to another host or create a second active dispatcher. A qualified
   adapter must also enforce existing host-global admission across every caller.
-- `max_active_sessions=1` remains mandatory. Independent nodes need no semantic
+- `max_active_sessions=1` remains mandatory for this graph, which stays disabled. Program
+  mode (`docs/PROGRAM_MODE.md`) does not use it: its plan is the product repository's
+  `.aiops/program.json` and its operations are in `scripts/control_plane_program.py`. Independent nodes need no semantic
   edge, but this capacity policy still schedules their execution sequentially.
 - One task has one writer session. Feedback carries exact failure pointers,
   acceptance pointer and allowed paths to that SAME session. No builder fallback.

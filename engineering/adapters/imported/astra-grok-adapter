@@ -164,12 +164,7 @@ def preflight():
 
 
 def build_prompt(packet):
-    return "\n".join([
-        "ASTRA control-plane dispatch (BUILDER_STANDARD).",
-        "You are the assigned builder running locally via Grok CLI in an",
-        "isolated per-task worktree. Work only within the referenced",
-        "approved task scope. Investigate, implement, test/fix/retest, and",
-        "report evidence in the worktree.",
+    common = [
         f"repository: {packet['repository']}",
         f"task_id: {packet['task_id']}",
         f"task_revision: {packet['task_revision']}",
@@ -179,6 +174,37 @@ def build_prompt(packet):
         f"approval_pointer: {packet.get('approval_pointer', '')}",
         f"authoritative_doc_pointers: {packet.get('authoritative_doc_pointers', '')}",
         f"launch_request_id: {packet['launch_request_id']}",
+    ]
+    if packet.get("schema_version") == 2 and packet.get("role") == "REVIEWER":
+        # Program mode (docs/PROGRAM_MODE.md section 4): read-only, non-author review.
+        return "\n".join([
+            "ASTRA control-plane dispatch (INDEPENDENT REVIEW, read-only).",
+            "You are a non-author reviewer running locally via Grok CLI in an",
+            "isolated per-request worktree. Do not commit, push, edit the pull",
+            "request, comment code suggestions for others to apply, or merge.",
+            f"Review pull request #{packet.get('pr_number')} at exact head {packet.get('head_sha')}",
+            "against the task specification, repository rules and acceptance",
+            f"criteria, at depth {packet.get('audit_floor', 'A1')} (A2 adds concurrency, state,",
+            "persistence, payment, security and protocol behavior).",
+            "Submit one GitHub pull request review whose body starts with this line:",
+            f"ASTRA_REVIEW_V1 review={packet.get('review_request_id')} head={packet.get('head_sha')} "
+            "verdict=<PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED> depth=<A1|A2> contract_change=<NO|YES>",
+            "followed by the findings. If the head changes during review, stop and",
+            "report that instead. Then end the session.",
+            *common,
+            f"owner_lane: {packet.get('owner_lane')}",
+        ])
+    return "\n".join([
+        "ASTRA control-plane dispatch (BUILDER_STANDARD).",
+        "You are the assigned builder running locally via Grok CLI in an",
+        "isolated per-task worktree. Work only within the referenced",
+        "approved task scope. Investigate, implement, test/fix/retest, and",
+        "report evidence in the worktree.",
+        "When the pull request is ready, post one comment on the task issue with",
+        "the exact line `ASTRA_DELIVERY_V1 pr=<number> head=<40-hex head sha>`,",
+        "then end the session. If blocked, post DECISION_REQUIRED, BLOCKED or",
+        "STALLED with the reason and end the session. Never merge.",
+        *common,
     ])
 
 

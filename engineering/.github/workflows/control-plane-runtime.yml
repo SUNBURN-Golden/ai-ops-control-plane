@@ -220,3 +220,24 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
         run: python3 -I scripts/control_plane_program.py merge-check --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+
+      - name: Wake the coordinator (best effort, never changes the outcome)
+        if: ${{ always() && contains(fromJSON('["materialize","start","review","reap"]'), inputs.operation) }}
+        continue-on-error: true
+        env:
+          ROUTINE_TOKEN: ${{ secrets.ASTRA_COORDINATOR_ROUTINE_TOKEN }}
+          ROUTINE_ID: ${{ vars.ASTRA_COORDINATOR_ROUTINE_ID }}
+          OP: ${{ inputs.operation }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [[ -z "${ROUTINE_TOKEN:-}" || ! "${ROUTINE_ID:-}" =~ ^trig_[A-Za-z0-9]+$ ]]; then
+            echo "coordinator wake not configured"; exit 0
+          fi
+          payload=$(python3 -I -c 'import json, os; print(json.dumps({"text": json.dumps({"event": "control-plane-run", "operation": os.environ["OP"], "target": os.environ.get("ASTRA_TARGET_REPOSITORY", ""), "issue": os.environ.get("ISSUE_NUMBER", ""), "run_id": os.environ["GITHUB_RUN_ID"]})}))')
+          curl -sS --max-time 20 -o /dev/null -w "coordinator wake HTTP %{http_code}\n" \
+            -X POST "https://api.anthropic.com/v1/claude_code/routines/${ROUTINE_ID}/fire" \
+            -H "Authorization: Bearer ${ROUTINE_TOKEN}" \
+            -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "Content-Type: application/json" -d "$payload" || true

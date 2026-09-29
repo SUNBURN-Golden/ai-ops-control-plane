@@ -2,13 +2,15 @@
 
 This is source registration, not host qualification or activation. Task ownership,
 launch identity, UNKNOWN reconciliation and the protected admission limit remain
-mandatory. One task has one writer. `max_active_sessions=1` remains unchanged.
+mandatory. One task has one writer. Program mode (`docs/PROGRAM_MODE.md`) allows one
+session per lane (host index `one_active_per_lane`) and raises `max_active_sessions`
+up to the number of enabled lanes; outside program mode keep `max_active_sessions=1`.
 
 | Builder ID | Execution surface | Qualification |
 |---|---|---|
 | DEVIN | Existing Devin adapter | Exact installed adapter and durable session evidence |
 | GROK_BUILD | Official xAI Grok Build CLI | Dedicated builder identity; native xAI session and quota |
-| GLM | Explicitly approved GLM harness | Supported model/harness and subscription evidence; no implicit OpenCode replacement |
+| GLM | Explicitly approved GLM harness | Supported model/harness and subscription evidence; no implicit OpenCode replacement. The installed host harness is OpenCode `1.18.32` with the Z.AI Coding Plan; approving it is User decision M2 (open) |
 | CURSOR | Official Cursor CLI (`agent`) | `harness=CURSOR_CLI`, exact model ID from installed CLI, isolated durable supervisor |
 
 CURSOR with a Grok model is not GROK_BUILD. Credentials, session IDs, model IDs,

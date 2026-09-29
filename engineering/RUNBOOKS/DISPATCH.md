@@ -719,3 +719,64 @@ Grok usage, User interventions, review findings, rework and integration
 conflicts. Report unavailable usage metrics as unknown.
 
 
+
+## 25. Program mode
+
+Design: `docs/PROGRAM_MODE.md` (A3 design PASS at `424a661`).
+Operations: `scripts/control_plane_program.py`.
+Coordinator decision table: `docs/COORDINATOR_PLAYBOOK.md`.
+Everything in §1–§24 still applies. Program mode changes three things only: who
+creates the canonical task, how lanes are chosen, and when a session slot is
+released.
+
+Canonical task (`operation=materialize`):
+- the plan is `.aiops/program.json` in the product repository at an exact
+  `plan_commit`;
+- `TASK_ID = <PROGRAM>-<NODE>`;
+- the host records a SUBMITTING create request before the GitHub create call;
+- an UNKNOWN create is never re-sent because a listing shows no issue;
+- the issue carries `ASTRA_TASK_KEY_V1 ... request=<id>`;
+- duplicate open issues stop as `DUPLICATE_TASK`.
+
+Writer (`operation=start`):
+- the lane is the first idle lane in the fixed order, or the owner lane for a
+  resume;
+- the envelope is rendered from the plan and pinned by its body hash;
+- a stale `plan_commit` is refused (`STALE_PLAN`);
+- the launch then follows §6–§8 unchanged.
+
+Session release (`operation=reap`):
+- runs after the session posts its deliverable (`ASTRA_DELIVERY_V1`, a review
+  verdict, DECISION_REQUIRED, BLOCKED or STALLED);
+- the host retires the CONFIRMED row only when the lane UID has no live process;
+- the control record shows `RELEASED`; ownership is unchanged;
+- UNKNOWN or SUBMITTING stays operator-only (§9).
+
+Resume:
+- uses the explicit retry of §7 (`attempt_id + 1`) on the same owner lane;
+- is admitted only from `RELEASED` plus a host `SESSION_TERMINAL_VERIFIED`
+  result;
+- a CONFIRMED record with that host result is a lost projection and is repaired
+  first.
+
+Review (`operation=review`, the §13 states in `reviews[]`):
+- runs only after the writer is RELEASED and a matching `ASTRA_DELIVERY_V1`
+  exists;
+- the reviewer lane is the first idle lane, excluding the owner lane and the
+  other reviewers of the same head;
+- the verdict line is `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...>
+  depth=<A1|A2> contract_change=<NO|YES>`;
+- a head change invalidates the review.
+
+Merge readiness (`operation=merge-check`):
+- computes §18 for the exact head;
+- anything not machine-computable makes it not ready: Astra gates,
+  undeclared project merge prerequisites, labels `needs-user`, `blocked` and
+  `decision-required`;
+- merge stays with the User until decision M1 is recorded.
+
+Scheduling (lanes free up in this priority order):
+1. resumes of the lane's owned tasks;
+2. pending reviews that lane can take;
+3. new builds, only while tasks waiting for review or fix number fewer than
+   `max_active_sessions`.
