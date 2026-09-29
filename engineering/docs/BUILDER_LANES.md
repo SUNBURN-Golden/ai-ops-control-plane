@@ -39,31 +39,41 @@ No CLI/model is selected because its display name resembles another lane.
 
 ## CURSOR host acceptance
 
-1. Install/authenticate the official CLI under a dedicated builder Unix identity.
-   Record CLI version, binary/wrapper digest, subscription account and model listing
-   without secrets. Choose the exact supported Grok model/effort from `agent models`
-   or `agent --list-models`; `auto`, aliases and guessed slugs are not qualification.
-2. Install `/opt/astra/bin/astra-builder-cursor` using the existing wrapper contract.
-   Source: `scripts/control_plane_cursor.py`; protected config example:
-   `.github/control-plane/cursor-adapter.example.json`. The same installed executable
-   invokes only its fixed worker modes under the dedicated CURSOR UID. Provision a
-   narrowly scoped sudo rule, lingering systemd user manager, private HOME/workspace
-   and root-owned CLI bundle. Source publication does not install these host resources.
-   Preserve piped stdin (no sudo PTY conversion for these fixed modes). Worker entry
-   requires a kernel-owned anonymous read pipe from the control UID, never SUDO_UID.
-   Provider children receive new builder-owned stdin; they cannot reuse that capability.
-3. Prove isolated task workspace, durable execution after wrapper/runner teardown,
-   exact session ownership, duplicate launch rejection and UNKNOWN reconciliation.
+User decision M3 (2026-09-29) is option (b): CURSOR runs without systemd, under the
+same wrapper → adapter → detached supervisor contract as the other lanes. Sources and
+the host checklist are in `adapters/cursor/README.md`.
+
+1. Install and authenticate the official CLI under the dedicated `astra-builder-cursor`
+   Unix identity. That identity has a private HOME and no subuid/subgid ranges. Record
+   the CLI version, binary digest, subscription account and model listing, without secrets.
+   Choose the exact supported model/effort from the CLI's `models` listing. `auto`,
+   aliases and guessed slugs are not qualification.
+2. Write `/etc/astra/cursor-lane.json` (root-owned; example
+   `.github/control-plane/cursor-lane.example.json`). It holds the CLI path, its digest,
+   the exact model and the non-secret account fields of `status --format json`.
+3. Install `astra-builder-cursor` at `/opt/astra/bin/`, and `astra-cursor-adapter` and
+   `astra-cursor-supervisor` at `/opt/astra/libexec/`, all root-owned. Add the narrow sudo
+   rule that lets the control identity run the adapter as the lane identity. No systemd
+   user manager or linger is used. The supervisor starts in its own session, and the
+   host init (tini) reaps it.
+4. Prove the following:
+   - the task workspace is isolated;
+   - execution survives wrapper and runner teardown;
+   - session ownership is exact (`cursor-cli:<chat>`);
+   - a duplicate launch is rejected, and UNKNOWN is reconciled;
+   - every lane process descends from the helper's launch.
+
    `create-chat` / `--resume` alone are not process-lifetime evidence.
-4. Prove credential separation and reviewer read-only boundaries at the OS/workspace
-   level. CLI prompt wording or absence of `--force` alone is insufficient.
-5. Qualify the exact report with `control_plane_flow_cli.py qualify-lane` against the
+5. Prove credential separation at the OS and workspace level. Also prove that the packet
+   and the signing key never reach a process argument or environment. CLI prompt
+   wording alone is insufficient.
+6. Qualify the exact report with `control_plane_flow_cli.py qualify-lane` against the
    audited implementation SHA. CURSOR requires `harness=CURSOR_CLI` and an explicit
    `model` field containing that exact model ID. Pin model effort, billing mode and wrapper in the approved report.
    The optional task `EXECUTION_PROFILE_POINTER` points there; it grants no authority.
-6. Independently review source and installed adapter, then update protected lane,
-   runtime and flow policy through the existing approval gate. Run one diagnostic
-   canary, close its session and reconcile its ledger before general intake.
+7. Review the installed adapter independently against `adapters/cursor/SHA256SUMS`.
+   Then update protected lane, runtime and flow policy through the existing approval gate.
+   Run one diagnostic canary, close its session and reconcile its ledger before general intake.
 
 Legacy three-lane host configuration stays valid. Enabling an unregistered lane is
 rejected. Source enum membership never implies authentication or production readiness.

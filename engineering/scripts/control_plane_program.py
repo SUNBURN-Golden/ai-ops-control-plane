@@ -40,8 +40,8 @@ import control_plane as cp
 
 LANE_ORDER = ("DEVIN", "GROK_BUILD", "GLM", "CURSOR")
 # Lanes whose adapters take schema v2 packets and run without a per-user service manager.
-# CURSOR joins when its adapter does (User decision M3); until then it is never selected.
-PROGRAM_LANES = ("DEVIN", "GROK_BUILD", "GLM")
+# CURSOR's systemd-free adapter (User decision M3 = b) lives in adapters/cursor/.
+PROGRAM_LANES = LANE_ORDER
 TASK_LABEL = "aiops-task"
 PLAN_PATH = ".aiops/program.json"
 SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")

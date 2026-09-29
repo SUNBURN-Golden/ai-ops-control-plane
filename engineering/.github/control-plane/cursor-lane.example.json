@@ -1,0 +1,6 @@
+{
+  "cli": "/opt/astra/libexec/cursor-agent",
+  "cli_sha256": "PENDING",
+  "model": "CONFIG_REQUIRED",
+  "auth_match": {}
+}

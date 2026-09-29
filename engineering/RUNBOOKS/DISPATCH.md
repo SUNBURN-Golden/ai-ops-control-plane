@@ -746,8 +746,8 @@ state. The control record is a projection.
 Writer (`operation=start`):
 - `depends_on` nodes must be DONE (their pinned delivery PR merged at the
   delivered head); otherwise `WAITING_ON_DEPENDENCIES`;
-- the lane is the first idle program lane (DEVIN, GROK_BUILD, GLM; CURSOR
-  waits for M3) in the fixed order, or, for a resume, the owner lane: the lane
+- the lane is the first idle program lane (DEVIN, GROK_BUILD, GLM, CURSOR)
+  in the fixed order, or, for a resume, the owner lane: the lane
   of the task's first host writer session;
 - the envelope is rendered from the plan and pinned by its body hash;
 - a stale `plan_commit` is refused (`STALE_PLAN`);

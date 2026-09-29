@@ -742,10 +742,12 @@ class ProgramModeTests(unittest.TestCase):
         with self.assertRaisesRegex(cp.ControlPlaneError, "does not require review slot 2"):
             prog.prepare_review(issue, 2, self.file("r.json"), preflight=lambda lane: True)
 
-    def test_cursor_is_never_selected_in_program_mode(self):
+    def test_cursor_is_the_last_lane_in_the_order(self):
         board = {"active_total": 0, "max_active_sessions": 4,
                  "lanes": [{"lane": lane, "enabled": True, "active": []} for lane in prog.LANE_ORDER]}
-        self.assertIsNone(prog.select_lane(board, self.cfg, exclude={"DEVIN", "GROK_BUILD", "GLM"}))
+        self.assertEqual(prog.select_lane(board, self.cfg, exclude={"DEVIN", "GROK_BUILD", "GLM"}), "CURSOR")
+        self.assertIsNone(prog.select_lane(board, {**self.cfg, "enabled_builders": ["DEVIN", "GROK_BUILD", "GLM"]},
+                                           exclude={"DEVIN", "GROK_BUILD", "GLM"}))
 
     # ------------------------------------------------------------------ dependencies (F8)
 

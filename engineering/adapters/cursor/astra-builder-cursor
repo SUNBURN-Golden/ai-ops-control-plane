@@ -1,0 +1,18 @@
+#!/bin/bash
+# ASTRA CURSOR builder wrapper (root-owned, invoked by astra-host-control as the
+# astra-control identity). Reads the launch packet as control identity, then
+# drops to the builder identity for all provider work. ASTRA_HOST_INFLIGHT_FD
+# stays open in this wrapper while the send is in flight; sudo strips it from
+# the builder process environment and descriptor table. No systemd is used:
+# the adapter starts a detached supervisor, and the host init (tini) reaps it.
+set -euo pipefail
+INNER=/opt/astra/libexec/astra-cursor-adapter
+case "${1:-}" in
+  --preflight)
+    exec /usr/bin/sudo -n -u astra-builder-cursor -- "$INNER" --preflight
+    ;;
+  *)
+    packet="${1:?launch packet path required}"
+    exec /usr/bin/sudo -n -u astra-builder-cursor -- "$INNER" --launch < "$packet"
+    ;;
+esac

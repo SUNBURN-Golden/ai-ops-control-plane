@@ -506,7 +506,7 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
     - 레인별 GitHub 신원을 쓰되 병합과 관리자 권한을 주지 않는다.
     - 레인 토큰이 우회할 수 없는 branch protection을 건다.
   - 이것은 User 결정 사항이다(M4, §12).
-- **CURSOR:** program mode에서 선택하지 않는다(`PROGRAM_LANES`). 지금 adapter는 schema v1 packet만 받고 systemd user manager가 필요하다. 그래서 reap의 레인 UID 정지 확인을 통과할 수 없다. v2 packet을 파일이나 stdin으로 받게 되면 M3에 따라 추가한다.
+- **CURSOR:** M3 결정에 따라 systemd 없는 adapter(`adapters/cursor/`)로 바꿨다. 이 adapter는 v2 packet을 stdin으로 받고, 서명 도구를 쓰며, 모든 프로세스가 helper의 launch 아래에 있다. 그래서 program mode 순서의 마지막 레인으로 선택된다. 호스트 설치와 자격 검증(P3) 전에는 host `enabled_builders`와 preflight가 막는다.
 - **레인 UID 정지 확인의 전제:** 이 확인은 세 가지를 전제한다.
   - helper의 PID namespace가 `/proc`의 namespace와 같다(`NSpid` 1단계).
   - 레인 UID에 subuid/subgid 범위가 없다.
@@ -570,7 +570,7 @@ v1도 문서뿐이다. F1~F4의 재현 테스트는 P2 구현 PR에 포함하고
    - `devin -r`은 대화를 재개하므로 증거 확인에 쓰지 않는다.
 3. **CURSOR는 이 호스트에서 지금 방식으로 켤 수 없다.** 선택지는 셋이다.
    - (a) systemd가 있는 별도 호스트
-   - (b) systemd가 없는 supervisor로 adapter를 바꾸기. 이는 custodian과 fence 설계를 바꾸는 일이라 A2 이상 리뷰가 필요하다.
+   - (b) systemd가 없는 supervisor로 adapter를 바꾸기. 이는 custodian과 fence 설계를 바꾸는 일이라 A2 이상 리뷰가 필요하다. **(User 선택, 아래 M3 결정)**
    - (c) 보류
    - 결정 전까지는 비활성이다. 순서표는 비활성 레인을 건너뛴다.
 4. **Slack**
@@ -584,4 +584,4 @@ v1도 문서뿐이다. F1~F4의 재현 테스트는 P2 구현 PR에 포함하고
 
 **미결정 M2:** GLM 레인의 하네스로 **OpenCode `1.18.32` + Z.AI Coding Plan**을 명시 승인할지 정한다.
 
-**미결정 M3:** CURSOR 레인을 (a), (b), (c) 중 어느 쪽으로 할지 정한다.
+**결정 M3 (User, 2026-09-29): (b).** 이 호스트에서 systemd 없이 돌리는 adapter로 바꾼다. 구현은 `adapters/cursor/`다. 구조는 다른 세 레인과 같다: wrapper, adapter, 분리된 supervisor. 끝난 supervisor는 tini가 정리한다. 이전의 systemd 방식 `control_plane_cursor.py`는 폐기했다.
