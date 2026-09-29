@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -595,6 +596,8 @@ def host_request_state(launch_request_id: str) -> Optional[str]:
 
 
 VERIFIED_RELEASE = "SESSION_TERMINAL_VERIFIED"
+# Terminal releases a resume may rely on: host-verified reap, or operator reconcile with evidence.
+TERMINAL_RELEASES = (VERIFIED_RELEASE, "SESSION_TERMINAL")
 
 
 def require_fenced_attempt(record: Dict[str, Any]) -> str:
@@ -611,8 +614,8 @@ def require_fenced_attempt(record: Dict[str, Any]) -> str:
         # session terminal (reap). A CONFIRMED record with that host result is a
         # lost RELEASED projection and is repaired by this same path.
         status = host_request_status(request)
-        if status.get("state") == "RECONCILED" and status.get("resolution") == VERIFIED_RELEASE:
-            return VERIFIED_RELEASE
+        if status.get("state") == "RECONCILED" and status.get("resolution") in TERMINAL_RELEASES:
+            return status["resolution"]
         if state == "RELEASED":
             raise ControlPlaneError("retry refused: record says RELEASED but the host has no verified release")
         raise ControlPlaneError("retry refused: a CONFIRMED owner exists; reassignment is a separate fenced action")
@@ -722,6 +725,11 @@ def prepare_dispatch(issue_number: int, packet_path: Path, expected: Optional[Di
                 raise ControlPlaneError(
                     "FAILED_PRESTART requires explicit retry authorization: dispatch with "
                     f"expected_attempt_id={current_attempt + 1}")
+            if state == "RELEASED":
+                # The released request id is RECONCILED on the host; re-sending it would
+                # revive a dead session in the record. A resume is always a new attempt.
+                raise ControlPlaneError(
+                    f"RELEASED task: a resume requires expected_attempt_id={current_attempt + 1}")
     else:
         if requested_attempt not in (None, 1):
             raise ControlPlaneError("no control record exists; the first attempt is expected_attempt_id=1")
@@ -821,6 +829,7 @@ def finalize_dispatch(issue_number: int, result_path: Path, launch_request_id: s
             record["launch_state"] = "CONFIRMED"
             record["owner_session_id"] = session.strip()
             record["last_error"] = None
+            record["confirmed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             if record.get("owner_lane") is None:
                 record["owner_lane"] = record["builder_id"]
     if outcome == "FAILED_PRESTART":

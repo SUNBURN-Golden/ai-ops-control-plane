@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -329,7 +330,8 @@ class AdmissionTests(unittest.TestCase):
         rejected = host.launch(packet(1), self.policy, self.ledger, self.invoke)
         self.assertEqual(rejected["outcome"], "FAILED_PRESTART")
         self.assertEqual(self.ledger.status("request-1"),
-                         {"status": "FOUND", "launch_request_id": "request-1", "state": "FAILED_PRESTART"})
+                         {"status": "FOUND", "launch_request_id": "request-1", "state": "FAILED_PRESTART",
+                          "reserved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(self.ledger.clock())))})
         self.assertEqual(self.ledger.status("request-0")["state"], "CONFIRMED")
         self.assertEqual(self.ledger.status("never-sent"),
                          {"status": "NOT_FOUND", "launch_request_id": "never-sent", "state": None})
@@ -560,6 +562,21 @@ class ProgramModeHostTests(unittest.TestCase):
         mountinfo.write_text("22 1 0:5 / /proc rw,nosuid shared:13 - proc proc rw,hidepid=2\n")
         self.assertTrue(host.proc_hides_processes(str(mountinfo)))
         self.assertTrue(host.proc_hides_processes(str(Path(self.temp.name) / "missing")))
+        # A hidepid procfs mounted over a plain one hides processes: the topmost mount wins.
+        mountinfo.write_text("22 1 0:5 / /proc rw shared:13 - proc proc rw\n"
+                             "40 22 0:9 / /proc rw shared:20 - proc proc rw,hidepid=invisible\n")
+        self.assertTrue(host.proc_hides_processes(str(mountinfo)))
+
+    def test_unreadable_or_unparseable_status_fails_closed(self):
+        proc = Path(self.temp.name) / "proc2"
+        (proc / "10").mkdir(parents=True)
+        (proc / "10" / "status").write_text("Name:\tx\n")  # no Uid line
+        with self.assertRaisesRegex(host.HostError, "unverifiable"):
+            host.live_processes(1030, str(proc))
+        (proc / "10" / "status").write_text("Name:\tx\nUid:\t1030\t1030\t1030\t1030\n")
+        with patch.object(host.Path, "read_text", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(host.HostError, "unverifiable"):
+                host.live_processes(1030, str(proc))
 
     def test_materialize_never_recreates_an_unresolved_request(self):
         args = ("zari", "n010", "owner/repo0", "b" * 40, self.policy)

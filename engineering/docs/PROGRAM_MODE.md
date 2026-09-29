@@ -194,6 +194,18 @@ flowchart TD
   - 판정은 `head_sha`에 묶인다.
   - 리뷰 세션 동안 같은 작업의 WRITER 입장은 막힌다.
 
+**판정 결속 (P2 구현, 사전 리뷰 반영)**
+- 모든 레인이 같은 토큰으로 글을 쓰므로, 작성자 이름만으로는 누가 판정했는지 알 수 없다. `review_request_id`도 공개 정보로 계산할 수 있다.
+- 그래서 `operation=review`가 리뷰마다 비밀 nonce(32 hex)를 새로 만든다.
+  - nonce는 리뷰어 packet(mode 0600)에만 들어간다. control record에는 그 해시만 남는다.
+  - 판정 줄은 `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...> depth=<A1|A2> contract_change=<NO|YES> nonce=<nonce>`다.
+- reap이 판정을 **고정(pin)**한다. 아래가 모두 맞아야 한다.
+  - evidence가 리뷰한 PR의 리뷰 URL이다.
+  - 그 리뷰의 `commit_id`가 리뷰한 head다.
+  - 리뷰 시각이 그 리뷰어 예약의 host 시각 이후다.
+  - 판정 줄의 id, head, nonce 해시가 기록과 맞다.
+- merge-check은 PR에 올라온 리뷰를 세지 않는다. 고정된 판정만, 서로 다른 비작성자 레인 기준으로 센다.
+
 ## 5. 질문 경로와 작은 설계 예외
 
 1. 빌더나 리뷰어가 작업 이슈에 `DECISION_REQUIRED` 블록을 남긴다. 블록에는 질문, 선택지, 막힌 파일 또는 계약을 적는다.
@@ -230,6 +242,12 @@ v2의 wrapper `--session-status` 안은 **폐기했다.** P3 조사 결과, 세 
 - 빌더는 자기 프로세스를 `/proc`에서 숨길 수 없다. 자식 PID 네임스페이스도 부모에서 보인다.
 
 adapter의 `status.json`은 참고용이다.
+
+**산출물 고정 (P2 구현)**
+- 작성자 reap의 evidence는 이 작업 이슈의 댓글 URL이어야 한다. 그 댓글은 이번 시도의 host 예약 시각 이후에 쓰여야 한다(`status`의 `reserved_at`).
+- `ASTRA_DELIVERY_V1`이면 PR 번호와 head를 control record의 `delivery`로 고정한다. 리뷰와 merge-check은 이 고정값만 쓴다.
+- 고정 뒤 PR head가 바뀌면 리뷰를 발송하지 않는다. 작성자가 다시 전달해야 한다.
+- 새 시도는 `delivery`와 `reviews[]`를 이어받지 않는다.
 
 **host `reap --launch-request-id <id> --evidence <URL>`**
 - runner가 sudo로 호출할 수 있는 새 명령이다. 인수 형식은 status와 같이 제한한다.

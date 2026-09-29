@@ -23,10 +23,12 @@ class AdapterPromptTests(unittest.TestCase):
             with self.subTest(adapter=name):
                 prompt = load(name).build_prompt({**BASE, "schema_version": 2, "role": "REVIEWER",
                                                   "pr_number": 7, "head_sha": "b" * 40,
-                                                  "review_request_id": "c" * 24, "owner_lane": "DEVIN"})
+                                                  "review_request_id": "c" * 24, "review_nonce": "d" * 32,
+                                                  "owner_lane": "DEVIN"})
                 self.assertIn("read-only", prompt)
                 self.assertIn("Do not commit, push", prompt)
                 self.assertIn(f"ASTRA_REVIEW_V1 review={'c' * 24} head={'b' * 40}", prompt)
+                self.assertIn(f"contract_change=<NO|YES> nonce={'d' * 32}", prompt)
                 self.assertNotIn("ASTRA_DELIVERY_V1", prompt)
 
     def test_writer_prompt_carries_the_delivery_protocol(self):

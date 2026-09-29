@@ -140,6 +140,7 @@ control record 작성자는 그 토큰의 login이다. 이 결정은 `AGENTS.md`
    - 같은 레인에 활성 행이 둘이면 인덱스 생성이 실패해 전부 되돌아간다. 그때는 먼저 reconcile한다.
 
 **runner가 sudo로 부를 수 있는 새 명령.** 인수 형식은 정규식으로 제한한다.
+- `status --launch-request-id <id>`는 이제 `reserved_at`(host 예약 시각, 초 단위 내림)도 돌려준다. reap은 이 시각보다 앞선 산출물이나 리뷰를 증거로 받지 않는다.
 - `status --lanes`: 읽기 전용 레인 현황.
 - `reap --launch-request-id <24 hex> --evidence <https URL>`
   - CONFIRMED 행만, 그 레인 builder UID의 live process가 0개일 때 `RECONCILED/SESSION_TERMINAL_VERIFIED`로 바꾼다.

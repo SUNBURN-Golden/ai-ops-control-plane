@@ -765,8 +765,19 @@ Review (`operation=review`, the §13 states in `reviews[]`):
 - the reviewer lane is the first idle lane, excluding the owner lane and the
   other reviewers of the same head;
 - the verdict line is `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...>
-  depth=<A1|A2> contract_change=<NO|YES>`;
+  depth=<A1|A2> contract_change=<NO|YES> nonce=<review_nonce>`; the nonce is
+  generated per review, travels only in the reviewer packet, and the record
+  keeps its hash;
 - a head change invalidates the review.
+
+Evidence pinning (`operation=reap`):
+- a writer's evidence is a comment on this task issue written after the
+  attempt's host reservation; an `ASTRA_DELIVERY_V1` is pinned as the record's
+  `delivery`, and review and merge readiness use only that pin;
+- a reviewer's evidence is its PR review at the reviewed head, after its host
+  reservation, whose verdict line matches the review id, head and nonce hash;
+- merge readiness counts pinned verdicts from distinct non-owner lanes, never
+  reviews merely posted on the PR.
 
 Merge readiness (`operation=merge-check`):
 - computes §18 for the exact head;

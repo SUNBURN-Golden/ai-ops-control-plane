@@ -166,7 +166,9 @@ def build_prompt(packet):
             "persistence, payment, security and protocol behavior).",
             "Submit one GitHub pull request review whose body starts with this line:",
             f"ASTRA_REVIEW_V1 review={packet.get('review_request_id')} head={packet.get('head_sha')} "
-            "verdict=<PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED> depth=<A1|A2> contract_change=<NO|YES>",
+            "verdict=<PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED> depth=<A1|A2> contract_change=<NO|YES> "
+            f"nonce={packet.get('review_nonce')}",
+            "Keep the nonce private: it appears only in that review line.",
             "followed by the findings. If the head changes during review, stop and",
             "report that instead. Then end the session.",
             *common,

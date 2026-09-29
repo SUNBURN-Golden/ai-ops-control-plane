@@ -239,35 +239,52 @@ def safe_key(value, name):
 
 
 def proc_hides_processes(mountinfo="/proc/self/mountinfo"):
-    """True unless /proc is mounted without hidepid (other users' processes visible)."""
+    """True unless the topmost /proc mount is procfs without hidepid (other users' processes visible)."""
     try:
         lines = Path(mountinfo).read_text(encoding="utf-8").splitlines()
     except OSError:
         return True
-    for line in lines:
+    visible = None
+    for line in lines:  # later entries are mounted over earlier ones: the last /proc wins
         left, sep, right = line.partition(" - ")
         fields, tail = left.split(), right.split()
-        if sep and len(fields) > 4 and fields[4] == "/proc" and tail and tail[0] == "proc":
+        if sep and len(fields) > 4 and fields[4] == "/proc":
+            if not tail or tail[0] != "proc":
+                visible = False
+                continue
             options = dict(opt.partition("=")[::2] for opt in (tail[2] if len(tail) > 2 else "").split(","))
-            return options.get("hidepid", "0") not in ("0", "off")
-    return True
+            visible = options.get("hidepid", "0") in ("0", "off")
+    return visible is not True
 
 
 def live_processes(uid, proc="/proc"):
-    """PIDs whose real, effective, saved or filesystem UID is `uid` (host-side, unforgeable)."""
+    """PIDs whose real, effective, saved or filesystem UID is `uid` (host-side, unforgeable).
+
+    A process that exits during the scan is skipped. Any status that exists but cannot be read
+    or parsed makes the scan unverifiable (fail closed), never "absent".
+    """
     found = []
     for entry in os.scandir(proc):
         if not entry.name.isdecimal():
             continue
         try:
             text = Path(entry.path, "status").read_text(encoding="utf-8", errors="replace")
-        except (FileNotFoundError, ProcessLookupError, PermissionError):
+        except (FileNotFoundError, ProcessLookupError):
             continue
+        except OSError as exc:
+            raise HostError(f"cannot read /proc/{entry.name}/status; lane quiescence unverifiable") from exc
+        uids = None
         for line in text.splitlines():
             if line.startswith("Uid:"):
-                if uid in {int(v) for v in line.split()[1:5]}:
-                    found.append(int(entry.name))
+                try:
+                    uids = {int(v) for v in line.split()[1:5]}
+                except ValueError:
+                    uids = None
                 break
+        if not uids:
+            raise HostError(f"unparseable /proc/{entry.name}/status; lane quiescence unverifiable")
+        if uid in uids:
+            found.append(int(entry.name))
     return found
 
 
@@ -452,11 +469,14 @@ class Ledger:
             raise HostError("invalid launch_request_id")
         db = self.connect()
         try:
-            row = db.execute("SELECT state, evidence FROM launches WHERE request=?", (request,)).fetchone()
+            row = db.execute("SELECT state, evidence, created FROM launches WHERE request=?", (request,)).fetchone()
         finally:
             db.close()
         result = {"status": "FOUND" if row else "NOT_FOUND", "launch_request_id": request,
                   "state": row["state"] if row else None}
+        if row:
+            # Host clock, floored to the second: nothing the session wrote can predate its reservation.
+            result["reserved_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(row["created"])))
         if row and row["evidence"]:
             result["resolution"] = parse_json(row["evidence"]).get("resolution")
         return result
@@ -758,7 +778,8 @@ def preflight(builder, policy, ledger):
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", report["model"])
             or report["model"].upper() in {"AUTO", "DEFAULT", "CONFIG_REQUIRED", "PENDING", "UNKNOWN"}):
         raise HostError("CURSOR requires explicit Cursor CLI harness/model provenance")
-    report.update(host_admission="ENFORCED", boundary_evidence_pointer=policy["boundary_evidence_pointer"],
+    report.update(host_admission="ENFORCED", ledger_schema_version=SCHEMA_VERSION,
+                  boundary_evidence_pointer=policy["boundary_evidence_pointer"],
                   allowed_repositories=policy["allowed_repositories"],
                   helper_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
     return report
