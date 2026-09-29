@@ -599,6 +599,26 @@ class Ledger:
         finally:
             db.close()
 
+    def materialize_plan(self, program, node, old, new):
+        """Compare-and-swap the node's plan commit. The runtime proves `new` descends from `old`."""
+        safe_key(program, "program")
+        safe_key(node, "node")
+        for value in (old, new):
+            if not isinstance(value, str) or not SHA_RE.fullmatch(value):
+                raise HostError("plan commits must be 40-hex SHAs")
+        db = self.connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            changed = db.execute("UPDATE materializations SET plan_commit=?, updated=? "
+                                 "WHERE program=? AND node=? AND plan_commit=?",
+                                 (new, self.clock(), program, node, old)).rowcount
+            db.commit()
+        finally:
+            db.close()
+        if changed != 1:
+            raise HostError("STALE_PLAN: the recorded plan commit changed or does not match")
+        return {"status": "PLAN_ADVANCED", "plan_commit": new}
+
     def materialize_status(self, program, node):
         safe_key(program, "program")
         safe_key(node, "node")
@@ -779,6 +799,9 @@ def main(argv=None):
     for flag in ("program", "node", "request", "evidence"):
         resolve.add_argument("--" + flag, required=True)
     resolve.add_argument("--not-created", action="store_true", required=True)
+    mplan = commands.add_parser("materialize-plan")
+    for flag in ("program", "node", "from", "to"):
+        mplan.add_argument("--" + flag, required=True)
     mstatus = commands.add_parser("materialize-status")
     for flag in ("program", "node"):
         mstatus.add_argument("--" + flag, required=True)
@@ -811,6 +834,8 @@ def main(argv=None):
             result = ledger.materialize_finish(args.program, args.node, args.request, args.outcome, args.issue)
         elif args.command == "materialize-resolve":
             result = ledger.materialize_resolve(args.program, args.node, args.request, args.evidence)
+        elif args.command == "materialize-plan":
+            result = ledger.materialize_plan(args.program, args.node, getattr(args, "from"), args.to)
         elif args.command == "materialize-status":
             result = ledger.materialize_status(args.program, args.node)
         else:

@@ -45,6 +45,7 @@ ALLOWED_LAUNCH_STATES = (
     "CONFIRMED",
     "FAILED_PRESTART",
     "UNKNOWN",
+    "RELEASED",  # program mode: CONFIRMED session verified terminal on the host (reap)
 )
 HOST_COMMAND = ("/usr/bin/sudo", "-n", "-u", "astra-control", "/opt/astra/bin/astra-host-control")
 STATUS_PROBE_REQUEST = "0" * 24  # never produced by stable_id's sha256 prefix in practice
@@ -56,6 +57,11 @@ RUNTIME_PATHS = (
     ".github/control-plane/graph-policy.example.json",
     ".github/control-plane/projects.json",
     "scripts/control_plane.py", "scripts/control_plane_host.py",
+    "scripts/control_plane_program.py", "scripts/test_control_plane_program.py",
+    "docs/PROGRAM_MODE.md",
+    "adapters/imported/astra-devin-adapter", "adapters/imported/astra-grok-adapter",
+    "adapters/imported/astra-glm-adapter", "adapters/imported/astra-builder-devin",
+    "adapters/imported/astra-builder-grok-build", "adapters/imported/astra-builder-glm",
     "scripts/control_plane_boundary.py", "scripts/control_plane_boundary_hook.sh",
     "scripts/control_plane_boundary_probe.sh",
     "scripts/test_control_plane.py", "scripts/test_control_plane_host.py",
@@ -311,6 +317,7 @@ def new_control_record(envelope: Dict[str, str], cfg: Dict[str, Any], attempt: i
         "launch_request_id": stable_id("launch", cfg["repository"], envelope["TASK_ID"], envelope["TASK_REVISION"], attempt),
         "launch_state": "NOT_STARTED",
         "attempt_id": attempt,
+        "owner_lane": None,  # set by the first CONFIRMED launch; never changes afterwards
         "owner_session_id": None,
         "last_error": None,
     }
@@ -540,13 +547,18 @@ def host_preflight(builder_id: Optional[str]) -> None:
     print(json.dumps({"status": "PASS", "builders": reports}, sort_keys=True))
 
 
-def verify_dispatch_binding(body: str, envelope: dict) -> None:
-    expected = {"TASK_ID": "EXPECTED_TASK_ID", "TASK_REVISION": "EXPECTED_TASK_REVISION",
-                "BUILDER_ID": "EXPECTED_BUILDER_ID"}
-    for field, key in expected.items():
-        if not os.environ.get(key) or os.environ[key] != envelope.get(field):
+def verify_dispatch_binding(body: str, envelope: dict, expected: Optional[Dict[str, str]] = None) -> None:
+    # `expected` is the pinned authorization. Manual dispatch reads it from the
+    # workflow inputs; program mode passes the values it rendered from the plan.
+    pinned = expected if expected is not None else {
+        key: os.environ.get(key, "") for key in (
+            "EXPECTED_TASK_ID", "EXPECTED_TASK_REVISION", "EXPECTED_BUILDER_ID", "EXPECTED_ISSUE_BODY_SHA256")}
+    fields = {"TASK_ID": "EXPECTED_TASK_ID", "TASK_REVISION": "EXPECTED_TASK_REVISION",
+              "BUILDER_ID": "EXPECTED_BUILDER_ID"}
+    for field, key in fields.items():
+        if not pinned.get(key) or pinned[key] != envelope.get(field):
             raise ControlPlaneError("dispatch authorization mismatch: " + field)
-    digest = os.environ.get("EXPECTED_ISSUE_BODY_SHA256", "")
+    digest = pinned.get("EXPECTED_ISSUE_BODY_SHA256", "")
     if not re.fullmatch(r"[0-9a-f]{64}", digest) or hashlib.sha256(body.encode()).hexdigest() != digest:
         raise ControlPlaneError("dispatch authorization mismatch: issue body")
 
@@ -567,14 +579,21 @@ def record_attempt_id(record: Dict[str, Any]) -> int:
     return attempt
 
 
-def host_request_state(launch_request_id: str) -> Optional[str]:
+def host_request_status(launch_request_id: str) -> Dict[str, Any]:
     report = host_call(["status", "--launch-request-id", launch_request_id])
     if report.get("launch_request_id") != launch_request_id:
         raise ControlPlaneError("host status identity mismatch")
     state = report.get("state")
     if state is not None and not isinstance(state, str):
         raise ControlPlaneError("host status returned an invalid state")
-    return state
+    return report
+
+
+def host_request_state(launch_request_id: str) -> Optional[str]:
+    return host_request_status(launch_request_id).get("state")
+
+
+VERIFIED_RELEASE = "SESSION_TERMINAL_VERIFIED"
 
 
 def require_fenced_attempt(record: Dict[str, Any]) -> str:
@@ -583,11 +602,19 @@ def require_fenced_attempt(record: Dict[str, Any]) -> str:
     # prestart failure, an operator reconciliation, or (for a record that never
     # consumed send authority) no reservation at all.
     state = record["launch_state"]
-    if state == "CONFIRMED":
-        raise ControlPlaneError("retry refused: a CONFIRMED owner exists; reassignment is a separate fenced action")
     request = record.get("launch_request_id")
     if not isinstance(request, str) or not request:
         raise ControlPlaneError("control record has invalid launch_request_id")
+    if state in {"CONFIRMED", "RELEASED"}:
+        # Program-mode resume: allowed only after the host itself verified the
+        # session terminal (reap). A CONFIRMED record with that host result is a
+        # lost RELEASED projection and is repaired by this same path.
+        status = host_request_status(request)
+        if status.get("state") == "RECONCILED" and status.get("resolution") == VERIFIED_RELEASE:
+            return VERIFIED_RELEASE
+        if state == "RELEASED":
+            raise ControlPlaneError("retry refused: record says RELEASED but the host has no verified release")
+        raise ControlPlaneError("retry refused: a CONFIRMED owner exists; reassignment is a separate fenced action")
     host_state = host_request_state(request)
     if host_state in {"FAILED_PRESTART", "RECONCILED"}:
         return host_state
@@ -621,10 +648,16 @@ def new_attempt_record(previous: Dict[str, Any], envelope: Dict[str, str], cfg: 
     summary["last_error"] = str(previous.get("last_error"))[:MAX_HISTORY_ERROR] if previous.get("last_error") else None
     summary["fenced_by_host_state"] = fenced_by
     record["previous_attempts"] = [*history, summary]
+    owner = previous.get("owner_lane")
+    if owner is not None:
+        # Ownership outlives sessions: a resume keeps the lane that first confirmed.
+        if record["builder_id"] != owner:
+            raise ControlPlaneError(f"retry refused: task is owned by lane {owner}; a resume keeps the owner lane")
+        record["owner_lane"] = owner
     return record
 
 
-def prepare_dispatch(issue_number: int, packet_path: Path) -> None:
+def prepare_dispatch(issue_number: int, packet_path: Path, expected: Optional[Dict[str, str]] = None) -> None:
     cfg = load_config()
     require_runtime_enabled()
     token = os.environ.get("GITHUB_TOKEN")
@@ -647,7 +680,7 @@ def prepare_dispatch(issue_number: int, packet_path: Path) -> None:
 
     envelope = parse_task_envelope(issue.get("body") or "")
     validate_task(envelope, cfg)
-    verify_dispatch_binding(issue.get("body") or "", envelope)
+    verify_dispatch_binding(issue.get("body") or "", envelope, expected)
     issue_url = issue.get("html_url") or ""
     if envelope["CANONICAL_TASK_POINTER"] != issue_url:
         raise ControlPlaneError("CANONICAL_TASK_POINTER must equal the canonical issue URL")
@@ -707,7 +740,9 @@ def prepare_dispatch(issue_number: int, packet_path: Path) -> None:
     api.update_comment(comment["id"], render_control_record(record))
 
     packet = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "role": "WRITER",
+        "owner_lane": envelope["BUILDER_ID"],
         "repository": cfg["repository"],
         "project": cfg["project"],
         "task_issue": issue_number,
@@ -785,6 +820,8 @@ def finalize_dispatch(issue_number: int, result_path: Path, launch_request_id: s
             record["launch_state"] = "CONFIRMED"
             record["owner_session_id"] = session.strip()
             record["last_error"] = None
+            if record.get("owner_lane") is None:
+                record["owner_lane"] = record["builder_id"]
     if outcome == "FAILED_PRESTART":
         record["launch_state"] = "FAILED_PRESTART"
         record["last_error"] = str(result.get("reason") or "adapter reported FAILED_PRESTART")

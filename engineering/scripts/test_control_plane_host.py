@@ -594,6 +594,13 @@ class ProgramModeHostTests(unittest.TestCase):
         status = self.ledger.materialize_status("zari", "n011")
         self.assertEqual((status["status"], status["issue"], status["sealed"]), ("CREATED", 40, [old["request"]]))
 
+    def test_plan_commit_advances_only_by_compare_and_swap(self):
+        self.ledger.materialize_begin("zari", "n2", "owner/repo0", "b" * 40, self.policy)
+        self.assertEqual(self.ledger.materialize_plan("zari", "n2", "b" * 40, "c" * 40)["plan_commit"], "c" * 40)
+        with self.assertRaisesRegex(host.HostError, "STALE_PLAN"):
+            self.ledger.materialize_plan("zari", "n2", "b" * 40, "d" * 40)  # stale writer
+        self.assertEqual(self.ledger.materialize_status("zari", "n2")["plan_commit"], "c" * 40)
+
     def test_materialize_validates_inputs(self):
         for bad in (("zari prog", "n1", "owner/repo0", "b" * 40), ("zari", "n1", "other/repo", "b" * 40),
                     ("zari", "n1", "owner/repo0", "main")):
