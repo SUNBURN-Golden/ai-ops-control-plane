@@ -285,7 +285,10 @@ v2의 wrapper `--session-status` 안은 **폐기했다.** P3 조사 결과, 세 
 - **dbus 자동 실행 차단.** adapter와 supervisor는 모든 레인 CLI를 `DBUS_SESSION_BUS_ADDRESS=disabled:`로 실행한다. 주소가 설정돼 있으면 libdbus와 GDBus는 버스를 자동으로 띄우지 않는다. 레인에는 키링이 없으므로 잃는 기능이 없다.
 - **census 직렬화 (구현 A3 재감사 참고 1).** host는 레인마다 원장 디렉터리의 `census-<LANE>.lock`을 잡고 census를 한 번에 하나만 돌린다. 두 census가 서로를 멈춘 채 남는 일을 막는다.
 - **운영자 정리.** 대화형 로그인이나 수동 시험 뒤에는 운영자가 레인을 정리한다. 원장에 그 레인의 진행 작업이 없는 경우에만 하고, root로는 하지 않는다. 절차는 `CONTROL_PLANE_RUNTIME.md`의 "레인 정리"에 있다.
-- **남은 일 (User 결정 대기).** 세션이 띄운 프로세스(예: 에이전트가 켜 둔 개발 서버)가 세션 뒤에 남으면, 그 레인은 해제되지 않는다. 세션 종료 때 supervisor가 자기 레인을 스스로 정리하는 방안은 User 결정을 기다린다. 그때까지는 해제가 멈추고, 운영자가 정리한다.
+- **User 결정 (2026-09-30): 자동 청소는 넣지 않는다. 운영자(그록봇)가 손으로 정리한다.**
+  - 세션이 띄운 프로세스(예: 에이전트가 켜 둔 개발 서버)가 세션 뒤에 남으면, 그 레인은 해제되지 않는다.
+  - 현장 소장은 스스로 정리하지 않는다. `reap`이 같은 세션에서 두 번 연속 "live process"로 거부되면 운영자에게 정리를 요청한다(`COORDINATOR_PLAYBOOK.md` §3 행 1a).
+  - 운영자는 그 세션의 supervisor가 끝났음을 확인한 뒤에만 정리한다. 절차는 `CONTROL_PLANE_RUNTIME.md`의 "레인 정리"에 있다.
 
 adapter의 `status.json`은 참고용이다.
 
