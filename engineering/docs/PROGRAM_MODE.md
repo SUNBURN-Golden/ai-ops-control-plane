@@ -219,15 +219,23 @@ flowchart TD
 
 ## 6. 자동 정리 (reap)
 
-**wrapper launch contract v3**
-- `--session-status <session_id>`를 추가한다.
-- 반환값은 `TERMINAL`, `RUNNING`, `UNKNOWN` 중 하나이고, 제공자 근거를 함께 준다. 예: Devin 세션 상태, Cursor systemd unit 상태.
+**종료 증거: 레인 UID 정지 확인 (P2 구현, v2 설계 노트 반영)**
+
+v2의 wrapper `--session-status` 안은 **폐기했다.** P3 조사 결과, 세 adapter 모두 세션 상태(`.sessions/<request>/status.json`)를 빌더 UID로 **빌더가 쓸 수 있는 작업 트리 안에** 기록한다. 그래서 빌더가 위조할 수 있다(Astra v2 노트 "빌더가 위조할 수 없는 종료 증거" 불충족).
+
+대신 host helper가 **해당 레인 builder UID의 live process가 0개**인지를 직접 확인한다.
+- 제어 identity가 `/proc`에서 real, effective, saved, fs UID를 검사한다. `/proc`에 hidepid가 있으면 거부한다.
+- 레인당 세션이 1개(§4.1)이므로 "UID에 프로세스 없음"이면 그 세션의 supervisor와 CLI가 모두 끝났다는 뜻이다.
+- 빌더가 몰래 띄운 백그라운드 프로세스도 프로세스로 보인다. 그래서 그 레인은 해제되지 않는다.
+- 빌더는 자기 프로세스를 `/proc`에서 숨길 수 없다. 자식 PID 네임스페이스도 부모에서 보인다.
+
+adapter의 `status.json`은 참고용이다.
 
 **host `reap --launch-request-id <id> --evidence <URL>`**
 - runner가 sudo로 호출할 수 있는 새 명령이다. 인수 형식은 status와 같이 제한한다.
 - 아래가 모두 참일 때만 `RECONCILED`로 바꾼다. resolution은 `SESSION_TERMINAL_VERIFIED`다.
   - 해당 행이 CONFIRMED다. WRITER와 REVIEWER 모두 해당한다.
-  - 기록된 session id로 wrapper에 물었을 때 `TERMINAL`이다.
+  - 그 행의 레인 builder UID에 live process가 없다(위 정지 확인).
 - `RUNNING`이나 `UNKNOWN`이면 거부한다. 세션을 끄지는 않는다.
 - UNKNOWN 행이나 세션이 없는 경우는 지금처럼 운영자 전용 `reconcile`로 처리한다.
 
@@ -497,11 +505,14 @@ v1도 문서뿐이다. F1~F4의 재현 테스트는 P2 구현 PR에 포함하고
 1. **adapter 원본이 저장소에 없다.** 세 adapter는 호스트에만 있다(`/opt/astra/libexec/astra-*-adapter`).
    - wrapper v3의 `--session-status`와 program mode 레인 자격은 **감사된 원본**이 전제다.
    - 따라서 P3의 첫 단계는 adapter 원본을 저장소로 가져와 감사하는 것이다. 비밀값이 없는지 확인한 뒤 원본과 sha256을 가져온다.
-2. **세션 종료 증거의 원천은 레인마다 다르다.**
-   - DEVIN은 작업 트리의 `.sessions/<id>/status.json`을 읽기 전용으로 읽는다. `EXITED`, `KILLED`, `SPAWN_FAILED`면 `TERMINAL`이다.
+2. **세션 종료 증거 (P3 조사 결과 반영)**
+   - 세 adapter 모두 `.sessions/<launch_request_id>/status.json`에 상태를 기록한다. 종료 상태는 `EXITED`, `KILLED`, `SPAWN_FAILED`, `SUPERVISOR_ERROR`다.
+   - 세션 ID는 `devin-cli:`, `grok-cli:`, `opencode-cli:` 형식이다.
+   - 이 파일은 빌더 UID 소유의 작업 트리 안에 있어 위조할 수 있다. 그래서 reap은 **레인 UID 정지 확인**을 쓴다(§6).
+   - P3에서 확인할 것:
+     - 쉬는 레인 UID에 상주 프로세스가 0개인지. CLI가 남기는 백그라운드 데몬이 있으면 레인이 해제되지 않는다.
+     - `/proc`에 hidepid가 없는지.
    - `devin -r`은 대화를 재개하므로 증거 확인에 쓰지 않는다.
-   - GROK_BUILD와 GLM의 원천은 P3에서 조사한다.
-   - 읽기 전용 종료 증거가 없는 레인은 program mode 자격을 받지 못한다(§3.1).
 3. **CURSOR는 이 호스트에서 지금 방식으로 켤 수 없다.** 선택지는 셋이다.
    - (a) systemd가 있는 별도 호스트
    - (b) systemd가 없는 supervisor로 adapter를 바꾸기. 이는 custodian과 fence 설계를 바꾸는 일이라 A2 이상 리뷰가 필요하다.
