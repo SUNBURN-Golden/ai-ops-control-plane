@@ -1,0 +1,289 @@
+#!/usr/bin/python3 -I
+"""ASTRA GLM builder adapter — launch contract v2 (OpenCode + Z.AI Coding Plan).
+
+Installed at /opt/astra/libexec/astra-glm-adapter (root-owned).
+Invoked by /opt/astra/bin/astra-builder-glm via sudo as astra-builder-glm.
+Harness is official OpenCode CLI only (NOT zcode / ZCode). Model path is
+Z.AI Coding Plan via OpenCode auth. execution_mode PERSISTENT_SUPERVISOR.
+
+Official headless invoke (documented in evidence):
+  opencode run --format json --auto --dir WORKTREE --title TITLE -- MESSAGE
+Resume:
+  opencode run --format json --auto --dir WORKTREE -s SESSION_ID -- MESSAGE
+Session id prefix: opencode-cli:<id>
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import stat
+import subprocess
+import sys
+import time
+
+OPENCODE_BIN = Path("/opt/astra/libexec/opencode")
+SUPERVISOR = Path("/opt/astra/libexec/astra-glm-supervisor")
+WORKTREE_ROOT = Path("/opt/astra/worktrees/glm")
+STATE_ROOT = WORKTREE_ROOT / ".sessions"
+IDENTITY = ("repository", "task_id", "task_revision", "builder_id",
+            "launch_request_id", "attempt_id")
+SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+RESULT_WAIT = 100.0
+# Prefer Z.AI Coding Plan GLM models when configured; leave unset to use
+# OpenCode default after auth. Exact model pin is operator/User choice.
+PREFERRED_MODEL = os.environ.get("ASTRA_GLM_MODEL", "")
+
+
+def builder_home():
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def child_env():
+    return {"HOME": str(builder_home()),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "XDG_CONFIG_HOME": str(builder_home() / ".config"),
+            "XDG_DATA_HOME": str(builder_home() / ".local/share")}
+
+
+def auth_path():
+    return builder_home() / ".local/share/opencode/auth.json"
+
+
+def fail(reason):
+    print(json.dumps({"status": "FAIL", "builder_id": "GLM", "reason": reason},
+                     sort_keys=True))
+    return 0
+
+
+def result_for(packet, outcome, reason=None, session_id=None):
+    result = {key: packet[key] for key in IDENTITY}
+    result.update(outcome=outcome, session_id=session_id)
+    if reason:
+        result["reason"] = reason
+    return result
+
+
+def root_owned_tool(path):
+    try:
+        info = path.lstat()
+        return (stat.S_ISREG(info.st_mode) and info.st_uid == 0
+                and not stat.S_IMODE(info.st_mode) & 0o022
+                and os.access(path, os.X_OK))
+    except OSError:
+        return False
+
+
+def protected_secret(path):
+    try:
+        info = path.lstat()
+        return (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and not stat.S_IMODE(info.st_mode) & 0o077
+                and info.st_nlink == 1)
+    except OSError:
+        return False
+
+
+def worktree_ready():
+    try:
+        info = WORKTREE_ROOT.lstat()
+        return (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+                and stat.S_IMODE(info.st_mode) == 0o700)
+    except OSError:
+        return False
+
+
+def cli_auth_ok(timeout=30):
+    """Require builder-owned OpenCode auth with a Z.AI Coding Plan entry."""
+    path = auth_path()
+    if not protected_secret(path):
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict) or not data:
+        return False
+    # Accept common provider key spellings used by OpenCode for Z.AI plans.
+    for key, val in data.items():
+        key_l = str(key).lower()
+        if "z.ai" in key_l or "zai" in key_l or "coding" in key_l or "glm" in key_l:
+            if isinstance(val, (dict, str)) and val:
+                return True
+        if isinstance(val, dict) and any(
+                "zai" in str(k).lower() or "glm" in str(k).lower()
+                for k in val.keys()):
+            return True
+    # If any credential exists, treat as present but not Coding-Plan-qualified
+    # until User completes Z.AI Coding Plan login — still fail closed.
+    return False
+
+
+def prerequisites():
+    if not root_owned_tool(OPENCODE_BIN):
+        return "opencode CLI binary missing or unsafe"
+    if not root_owned_tool(SUPERVISOR):
+        return "supervisor missing or unsafe"
+    if not worktree_ready():
+        return "worktree root missing or unsafe"
+    if not protected_secret(auth_path()):
+        return "builder OpenCode auth store missing or unsafe"
+    return None
+
+
+def preflight():
+    reason = prerequisites()
+    if reason is not None:
+        return fail(reason)
+    if not cli_auth_ok():
+        return fail("opencode Z.AI Coding Plan auth check failed")
+    print(json.dumps({
+        "status": "PASS", "builder_id": "GLM", "launch_contract_version": 2,
+        "execution_mode": "PERSISTENT_SUPERVISOR", "parallel_safe": True,
+        "worktree_root": str(WORKTREE_ROOT),
+        "harness": "opencode",
+        "provider_plan": "Z.AI Coding Plan",
+    }, sort_keys=True))
+    return 0
+
+
+def build_prompt(packet):
+    return "\n".join([
+        "ASTRA control-plane dispatch (BUILDER_STANDARD).",
+        "You are the assigned builder running locally via OpenCode with",
+        "Z.AI Coding Plan in an isolated per-task worktree. Work only within",
+        "the referenced approved task scope. Investigate, implement,",
+        "test/fix/retest, and report evidence in the worktree.",
+        f"repository: {packet['repository']}",
+        f"task_id: {packet['task_id']}",
+        f"task_revision: {packet['task_revision']}",
+        f"task_pointer: {packet.get('task_pointer', '')}",
+        f"task_spec_pointer: {packet.get('task_spec_pointer', '')}",
+        f"task_spec_revision: {packet.get('task_spec_revision', '')}",
+        f"approval_pointer: {packet.get('approval_pointer', '')}",
+        f"authoritative_doc_pointers: {packet.get('authoritative_doc_pointers', '')}",
+        f"launch_request_id: {packet['launch_request_id']}",
+    ])
+
+
+def launch():
+    try:
+        packet = json.loads(sys.stdin.read(1024 * 1024 + 1))
+    except ValueError:
+        print(json.dumps({"outcome": "FAILED_PRESTART",
+                          "reason": "malformed launch packet"}))
+        return 1
+    if not isinstance(packet, dict) or any(k not in packet for k in IDENTITY):
+        print(json.dumps({"outcome": "FAILED_PRESTART",
+                          "reason": "launch packet missing identity fields"}))
+        return 1
+    request = str(packet["launch_request_id"])
+    if not SAFE_ID.match(request):
+        print(json.dumps(result_for(
+            packet, "FAILED_PRESTART", "unsafe launch_request_id")))
+        return 0
+    reason = prerequisites()
+    if reason is not None:
+        print(json.dumps(result_for(packet, "FAILED_PRESTART", reason)))
+        return 0
+    if not cli_auth_ok():
+        print(json.dumps(result_for(
+            packet, "FAILED_PRESTART",
+            "opencode Z.AI Coding Plan auth check failed")))
+        return 0
+
+    session_dir = STATE_ROOT / request
+    worktree = WORKTREE_ROOT / f"wt-{request}"
+    try:
+        STATE_ROOT.mkdir(mode=0o700, exist_ok=True)
+        os.mkdir(session_dir, 0o700)
+        os.mkdir(worktree, 0o700)
+    except OSError as exc:
+        print(json.dumps(result_for(
+            packet, "FAILED_PRESTART",
+            f"per-request state/worktree setup failed: {exc.strerror or exc}")))
+        return 0
+
+    prompt_file = session_dir / "prompt.txt"
+    prompt_file.write_text(build_prompt(packet), encoding="utf-8")
+    os.chmod(prompt_file, 0o600)
+    job_file = session_dir / "job.json"
+    job = {
+        "launch_request_id": request,
+        "worktree": str(worktree),
+        "session_dir": str(session_dir),
+        "prompt_file": str(prompt_file),
+        "title": f"astra-{request}",
+    }
+    if PREFERRED_MODEL:
+        job["model"] = PREFERRED_MODEL
+    job_file.write_text(json.dumps(job, sort_keys=True), encoding="utf-8")
+    os.chmod(job_file, 0o600)
+
+    try:
+        sup_log = open(session_dir / "supervisor.log", "ab", buffering=0)
+        subprocess.Popen(
+            [str(SUPERVISOR), str(job_file)],
+            stdin=subprocess.DEVNULL, stdout=sup_log, stderr=sup_log,
+            cwd=str(worktree), env=child_env(),
+            start_new_session=True, close_fds=True)
+    except OSError as exc:
+        print(json.dumps(result_for(
+            packet, "FAILED_PRESTART",
+            f"supervisor failed to start: {exc}")))
+        return 0
+
+    result_file = session_dir / "result.json"
+    deadline = time.monotonic() + RESULT_WAIT
+    while time.monotonic() < deadline:
+        try:
+            outcome = json.loads(result_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            time.sleep(0.5)
+            continue
+        code = outcome.get("outcome")
+        session_id = outcome.get("session_id")
+        if code == "CONFIRMED" and isinstance(session_id, str) \
+                and session_id.startswith("opencode-cli:"):
+            print(json.dumps(result_for(packet, "CONFIRMED",
+                                        session_id=session_id)))
+            return 0
+        if code == "FAILED_PRESTART":
+            print(json.dumps(result_for(
+                packet, "FAILED_PRESTART",
+                outcome.get("reason") or "supervisor reported prestart failure")))
+            return 0
+        if code == "UNKNOWN":
+            print(json.dumps(result_for(
+                packet, "UNKNOWN",
+                outcome.get("reason") or "supervisor outcome unresolved")))
+            return 0
+        time.sleep(0.5)
+    print(json.dumps(result_for(
+        packet, "UNKNOWN",
+        "supervisor did not report a durable outcome within deadline")))
+    return 0
+
+
+def diag_env():
+    print(json.dumps({"env_names": sorted(os.environ)}))
+    return 0
+
+
+def main(argv):
+    if argv == ["--preflight"]:
+        return preflight()
+    if argv == ["--launch"]:
+        return launch()
+    if argv == ["--diag-env"]:
+        return diag_env()
+    print("usage: astra-glm-adapter --preflight | --launch | --diag-env",
+          file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
