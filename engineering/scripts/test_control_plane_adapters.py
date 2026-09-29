@@ -143,11 +143,20 @@ class AdapterPromptTests(unittest.TestCase):
                 self.assertIn("review_nonce", result["reason"])
 
     def test_recorded_digests_match_the_reviewed_sources(self):
-        for directory in (ADAPTERS, CURSOR):
-            for line in (directory / "SHA256SUMS").read_text().splitlines():
+        for sums in (ADAPTERS / "SHA256SUMS", ADAPTERS / "SHA256SUMS.supervisors", CURSOR / "SHA256SUMS"):
+            for line in sums.read_text().splitlines():
                 digest, name = line.split()
                 with self.subTest(file=name):
-                    self.assertEqual(hashlib.sha256((directory / name).read_bytes()).hexdigest(), digest)
+                    self.assertEqual(hashlib.sha256((sums.parent / name).read_bytes()).hexdigest(), digest)
+
+    def test_no_lane_process_autolaunches_a_session_bus(self):
+        # A bus started on demand outlives the session and keeps the lane UID from ever
+        # being quiescent, so every lane CLI runs with a set but unusable bus address.
+        supervisors = ("astra-devin-supervisor", "astra-grok-supervisor", "astra-glm-supervisor",
+                       "astra-cursor-supervisor")
+        for name in (*NAMES, *supervisors):
+            with self.subTest(file=name):
+                self.assertEqual(load(name).child_env()["DBUS_SESSION_BUS_ADDRESS"], "disabled:")
 
 
     def test_all_program_lanes_share_one_signer_and_census_implementation(self):

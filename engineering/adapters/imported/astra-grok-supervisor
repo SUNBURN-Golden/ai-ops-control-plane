@@ -46,7 +46,8 @@ def child_env():
     return {"HOME": home,
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "LANG": "C.UTF-8",
-            "GROK_HOME": str(Path(home) / ".grok")}
+            "GROK_HOME": str(Path(home) / ".grok"),
+            "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
 
 
 def atomic_write(path, payload):

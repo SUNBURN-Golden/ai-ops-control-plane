@@ -53,6 +53,15 @@ host-preflight와 모든 재시도가 fail-closed로 거부된다. shell, 임의
 원 ledger와 외부 session을 대사하기 전 dispatch를 재개하지 않는다.
 최초 활성화 전에도 ledger에 없는 기존 writer/session이 없는지 확인한다.
 
+program mode의 sudoers 원문은 `.github/control-plane/sudoers-aiops-program.example`이다.
+- 설치 위치는 `/etc/sudoers.d/aiops-program`이고, root:root 0440이다. 파일 이름에 점(`.`)이 있으면 sudo가 읽지 않는다.
+- 바꾸는 곳은 `RUNNER_USER` 하나다. 기존 `status --launch-request-id` 규칙의 사용자 칸을 그대로 쓴다.
+- 인수는 sudo 1.9.10 이상의 정규식(`^...$`)으로 제한한다. helper의 인수 검증과 같은 모양이다.
+- runner 규칙은 `reap`의 `--pin-stdin` 형식만 허용한다. `migrate`, `reconcile`, `init`, `materialize-resolve`는 허용하지 않는다.
+- control identity는 각 레인 adapter의 `--quiescence`만 레인 계정으로 실행한다. root로는 실행하지 않는다.
+- program mode 테스트는 런타임이 helper에 보내는 모든 인수가 이 규칙에 맞는지 검사한다. 새 helper 호출을 더하면 이 파일도 같이 고쳐야 한다.
+- 설치 후 확인: `diff <(sed 's/RUNNER_USER/<runner 계정>/' sudoers-aiops-program.example) /etc/sudoers.d/aiops-program`
+
 host policy 모양은 `.github/control-plane/host-policy.example.json`에 있다.
 예시는 UID=0 / 빈 repo / PENDING evidence라서 그대로는 실행되지 않는다.
 실제 policy와 ledger, runtime 상태는 source tree에 commit하지 않는다.
@@ -179,6 +188,19 @@ control record 작성자는 그 토큰의 login이다. 이 결정은 `AGENTS.md`
 **레인당 세션 1개**
 - 동시 세션 한도는 host `max_active_sessions`다. program mode에서는 켜진 레인 수까지 올린다.
 - 같은 작업에서는 활성 WRITER와 REVIEWER가 서로 배제된다.
+
+**레인 정리 (운영자)** (`docs/PROGRAM_MODE.md` §6 "레인 위생")
+- 레인 계정에 세션 밖 프로세스가 남으면 그 레인은 해제되지 않는다. 대화형 로그인이나 수동 시험 뒤에 정리한다.
+- 먼저 `status --lanes`로 그 레인의 `active`가 비었는지 확인한다. 비어 있지 않으면 정리하지 않는다.
+- 레인 계정으로만 TERM을 보내고, 10초 뒤 KILL을 보낸다. root가 `kill -1`을 보내면 host 전체가 멈춘다.
+  ```
+  sudo -u <lane user> /bin/sh -c '[ "$(id -u)" -ne 0 ] && exec /usr/bin/kill -s TERM -- -1'
+  sleep 10
+  sudo -u <lane user> /bin/sh -c '[ "$(id -u)" -ne 0 ] && exec /usr/bin/kill -s KILL -- -1'
+  ```
+- 다음 census가 `{"status": "OK", "live": []}`인지 확인한다.
+- census가 중간에 끊겨 레인 프로세스가 멈춘 채 남았으면, 레인 계정으로 `kill -s CONT -- -1`을 보낸다. 다음 census도 끝에서 CONT를 보내므로 저절로 풀린다.
+- 수동 census는 dispatch가 없을 때만 한다. host의 census 잠금은 helper 밖의 수동 실행을 막지 못한다.
 
 ## Wrapper contract
 

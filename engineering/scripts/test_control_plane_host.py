@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -866,6 +867,42 @@ class ProgramModeHostTests(unittest.TestCase):
              patch.object(host, "live_processes", return_value=[]):
             self.assertEqual(host.lane_quiescence("DEVIN", self.policy, census=lambda lane: [91]), [91])
             self.assertEqual(host.lane_quiescence("DEVIN", self.policy, census=lambda lane: []), [])
+
+    def test_censuses_of_one_lane_never_overlap(self):
+        # Two concurrent freezes of one lane would stop each other; the host serializes them.
+        running, overlaps, lock = [], [], threading.Lock()
+
+        def census(lane):
+            with lock:
+                running.append(lane)
+                overlaps.append(running.count(lane))
+            time.sleep(0.05)
+            with lock:
+                running.remove(lane)
+            return []
+
+        with patch.object(host, "proc_hides_processes", return_value=False), \
+             patch.object(host, "own_pid_namespace_is_procs", return_value=True), \
+             patch.object(host, "has_subordinate_ids", return_value=False), \
+             patch.object(host, "live_processes", return_value=[]):
+            threads = [threading.Thread(target=host.lane_quiescence, args=(lane, self.policy),
+                                        kwargs={"census": census}) for lane in ("DEVIN",) * 4 + ("GLM",) * 2]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(len(overlaps), 6)
+        self.assertEqual(max(overlaps), 1)
+        lock_file = Path(self.policy["ledger_path"]).parent / "census-DEVIN.lock"
+        self.assertEqual(lock_file.stat().st_mode & 0o777, 0o600)
+        lock_file.unlink()
+        lock_file.symlink_to(Path(self.temp.name) / "elsewhere")
+        with self.assertRaisesRegex(host.HostError, "census lock"):
+            with host.census_lock("DEVIN", self.policy):
+                pass
+        with self.assertRaisesRegex(host.HostError, "unknown lane"):
+            with host.census_lock("../x", self.policy):
+                pass
 
     def test_lane_census_runs_through_the_wrapper_and_fails_closed(self):
         cases = [(0, {"status": "OK", "live": [5]}, [5]), (0, {"status": "OK", "live": []}, [])]

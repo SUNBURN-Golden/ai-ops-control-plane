@@ -1,0 +1,29 @@
+# /etc/sudoers.d/aiops-program  (root:root 0440; the file name must contain no dot)
+# AIOPS program mode, ai-ops-control-plane 59785e0. Arguments are anchored POSIX
+# regular expressions (sudo >= 1.9.10) that mirror the helper's own validators.
+# ':' and '#' are escaped for the sudoers parser; no ',' or '=' is used.
+# Replace RUNNER_USER with the exact user field of the existing
+# "status --launch-request-id" rule. Everything else is literal.
+
+Cmnd_Alias AIOPS_PROGRAM_HOST = \
+    /opt/astra/bin/astra-host-control ^status --lanes$, \
+    /opt/astra/bin/astra-host-control ^task-status --repository [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+ --task [A-Z0-9][A-Z0-9._-]*$, \
+    /opt/astra/bin/astra-host-control ^reap --launch-request-id [0-9a-f]{24} --evidence https\://github[.]com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*\#issuecomment-[1-9][0-9]* --pin-stdin$, \
+    /opt/astra/bin/astra-host-control ^reap --launch-request-id [0-9a-f]{24} --evidence https\://github[.]com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*\#pullrequestreview-[1-9][0-9]* --pin-stdin$, \
+    /opt/astra/bin/astra-host-control ^materialize-begin --program [A-Za-z0-9][A-Za-z0-9._-]* --node [A-Za-z0-9][A-Za-z0-9._-]* --repository [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+ --plan-commit [0-9a-f]{40}$, \
+    /opt/astra/bin/astra-host-control ^materialize-finish --program [A-Za-z0-9][A-Za-z0-9._-]* --node [A-Za-z0-9][A-Za-z0-9._-]* --request [0-9a-f]{24} --outcome CREATED --issue [1-9][0-9]*$, \
+    /opt/astra/bin/astra-host-control ^materialize-finish --program [A-Za-z0-9][A-Za-z0-9._-]* --node [A-Za-z0-9][A-Za-z0-9._-]* --request [0-9a-f]{24} --outcome UNKNOWN$, \
+    /opt/astra/bin/astra-host-control ^materialize-status --program [A-Za-z0-9][A-Za-z0-9._-]* --node [A-Za-z0-9][A-Za-z0-9._-]*$, \
+    /opt/astra/bin/astra-host-control ^materialize-plan --program [A-Za-z0-9][A-Za-z0-9._-]* --node [A-Za-z0-9][A-Za-z0-9._-]* --from [0-9a-f]{40} --to [0-9a-f]{40}$, \
+    /opt/astra/bin/astra-host-control preflight --builder-id CURSOR
+
+RUNNER_USER ALL=(astra-control) NOPASSWD: AIOPS_PROGRAM_HOST
+
+# Census: the helper (astra-control) runs each lane wrapper with --quiescence,
+# which re-executes the lane adapter as that lane's own account. Never root.
+astra-control ALL=(astra-builder-devin) NOPASSWD: /opt/astra/libexec/astra-devin-adapter --quiescence
+astra-control ALL=(astra-builder-grokbuild) NOPASSWD: /opt/astra/libexec/astra-grok-adapter --quiescence
+astra-control ALL=(astra-builder-glm) NOPASSWD: /opt/astra/libexec/astra-glm-adapter --quiescence
+
+# CURSOR lane: the same three adapter modes the other lanes already have.
+astra-control ALL=(astra-builder-cursor) NOPASSWD: /opt/astra/libexec/astra-cursor-adapter --preflight, /opt/astra/libexec/astra-cursor-adapter --launch, /opt/astra/libexec/astra-cursor-adapter --quiescence

@@ -44,7 +44,8 @@ def child_env():
     return {"HOME": pwd.getpwuid(os.getuid()).pw_dir,
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "LANG": "C.UTF-8",
-            "GIT_TERMINAL_PROMPT": "0"}
+            "GIT_TERMINAL_PROMPT": "0",
+            "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
 
 
 def write_state(path, value):
