@@ -53,6 +53,15 @@ host-preflight와 모든 재시도가 fail-closed로 거부된다. shell, 임의
 원 ledger와 외부 session을 대사하기 전 dispatch를 재개하지 않는다.
 최초 활성화 전에도 ledger에 없는 기존 writer/session이 없는지 확인한다.
 
+program mode의 sudoers 원문은 `.github/control-plane/sudoers-aiops-program.example`이다.
+- 설치 위치는 `/etc/sudoers.d/aiops-program`이고, root:root 0440이다. 파일 이름에 점(`.`)이 있으면 sudo가 읽지 않는다.
+- 바꾸는 곳은 `RUNNER_USER` 하나다. 기존 `status --launch-request-id` 규칙의 사용자 칸을 그대로 쓴다.
+- 인수는 sudo 1.9.10 이상의 정규식(`^...$`)으로 제한한다. helper의 인수 검증과 같은 모양이다.
+- runner 규칙은 `reap`의 `--pin-stdin` 형식만 허용한다. `migrate`, `reconcile`, `init`, `materialize-resolve`는 허용하지 않는다.
+- control identity는 각 레인 adapter의 `--quiescence`만 레인 계정으로 실행한다. root로는 실행하지 않는다.
+- program mode 테스트는 런타임이 helper에 보내는 모든 인수가 이 규칙에 맞는지 검사한다. 새 helper 호출을 더하면 이 파일도 같이 고쳐야 한다.
+- 설치 후 확인: `diff <(sed 's/RUNNER_USER/<runner 계정>/' sudoers-aiops-program.example) /etc/sudoers.d/aiops-program`
+
 host policy 모양은 `.github/control-plane/host-policy.example.json`에 있다.
 예시는 UID=0 / 빈 repo / PENDING evidence라서 그대로는 실행되지 않는다.
 실제 policy와 ledger, runtime 상태는 source tree에 commit하지 않는다.
@@ -179,6 +188,24 @@ control record 작성자는 그 토큰의 login이다. 이 결정은 `AGENTS.md`
 **레인당 세션 1개**
 - 동시 세션 한도는 host `max_active_sessions`다. program mode에서는 켜진 레인 수까지 올린다.
 - 같은 작업에서는 활성 WRITER와 REVIEWER가 서로 배제된다.
+
+**레인 정리 (운영자)** (`docs/PROGRAM_MODE.md` §6 "레인 위생")
+- 레인 계정에 세션 밖 프로세스가 남으면 그 레인은 해제되지 않는다. User 결정(2026-09-30)에 따라 자동 청소는 없고, 운영자가 손으로 정리한다.
+- 먼저 `status --lanes`로 그 레인의 `active`를 확인한다. 아래 둘 중 하나일 때만 정리한다.
+  1. `active`가 비었다. 대화형 로그인이나 수동 시험 뒤가 여기에 해당한다.
+  2. `active`가 현장 소장이 정리를 요청한 그 세션 하나뿐이고(`needs-lane-cleanup`), 그 세션이 끝났다. 끝났다는 것은 아래 두 가지가 모두 참이라는 뜻이다.
+     - `<레인 작업 루트>/.sessions/<launch_request_id>/status.json`의 `state`가 `EXITED` 또는 `SUPERVISOR_ERROR`다. 작업 루트는 `/opt/astra/worktrees/`의 `devin`, `grokbuild`, `glm`, `cursor`다.
+     - `pgrep -u <lane user> -f 'libexec/astra-[a-z]+-supervisor'`가 아무것도 출력하지 않는다. 명령줄 전체는 출력하지 않는다.
+- 다른 경우(작업이 둘 이상이거나, supervisor가 아직 돌거나, status가 `RUNNING`)에는 정리하지 않고 보고한다.
+- 레인 계정으로만 TERM을 보내고, 10초 뒤 KILL을 보낸다. root가 `kill -1`을 보내면 host 전체가 멈춘다.
+  ```
+  sudo -u <lane user> /bin/sh -c '[ "$(id -u)" -ne 0 ] && exec /usr/bin/kill -s TERM -- -1'
+  sleep 10
+  sudo -u <lane user> /bin/sh -c '[ "$(id -u)" -ne 0 ] && exec /usr/bin/kill -s KILL -- -1'
+  ```
+- 다음 census가 `{"status": "OK", "live": []}`인지 확인한다. 2의 경우에는 이슈에 정리했다고 댓글을 남기고 `needs-lane-cleanup`을 뗀다. 다음 실행의 `reap`이 세션을 해제한다.
+- census가 중간에 끊겨 레인 프로세스가 멈춘 채 남았으면, 레인 계정으로 `kill -s CONT -- -1`을 보낸다. 다음 census도 끝에서 CONT를 보내므로 저절로 풀린다.
+- 수동 census는 dispatch가 없을 때만 한다. host의 census 잠금은 helper 밖의 수동 실행을 막지 못한다.
 
 ## Wrapper contract
 

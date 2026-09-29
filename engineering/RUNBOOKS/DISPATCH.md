@@ -585,7 +585,11 @@ For PR deliverables, READY_FOR_MERGE is true only when all are true:
   and unchanged;
 - project-specific merge prerequisites are satisfied.
 
-User still makes the merge decision.
+User still makes the merge decision. In program mode, User decision M1
+(2026-09-29) delegates only the merge executor: `operation=merge` merges when
+this predicate is computed true, pinned to the computed head, and anything not
+computable goes to User (`AGENTS.md` §13, `docs/PROGRAM_MODE.md` §0). The
+predicate itself is unchanged.
 
 ## 19. No-change / non-code completion
 

@@ -1,0 +1,266 @@
+#!/usr/bin/python3 -I
+"""ASTRA GLM persistent supervisor — OpenCode + Z.AI Coding Plan.
+
+Official argv (see evidence glm-opencode-argv.txt):
+  /opt/astra/libexec/opencode run --format json --auto --dir WORKTREE \
+      --title TITLE [--model PROVIDER/MODEL] -- PROMPT
+Resume (at most one):
+  ... run --format json --auto --dir WORKTREE -s SESSION_ID -- RESUME_PROMPT
+
+Session list discovery via `opencode session list --format json`.
+Prefix: opencode-cli:<id>. Supervisor must outlive adapter; session DB
+row alone is not treated as durable without a live supervised process.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import signal
+import subprocess
+import sys
+import time
+
+OPENCODE_BIN = "/opt/astra/libexec/opencode"
+MAX_RESUMES = 1
+DISCOVER_DEADLINE = 120.0
+POST_EXIT_GRACE = 8.0
+POLL_INTERVAL = 1.5
+RESUME_PROMPT = ("The previous OpenCode run exited abnormally before the "
+                 "assigned task was completed. Resume work on the same "
+                 "approved task scope and report evidence.")
+SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def builder_home():
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+def child_env():
+    home = builder_home()
+    return {"HOME": home,
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "XDG_CONFIG_HOME": str(Path(home) / ".config"),
+            "XDG_DATA_HOME": str(Path(home) / ".local/share"),
+            "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
+
+
+def atomic_write(path, payload):
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, json.dumps(payload, sort_keys=True).encode())
+    finally:
+        os.close(fd)
+    os.rename(tmp, path)
+
+
+def write_status(session_dir, state, **extra):
+    payload = {"state": state, "supervisor_pid": os.getpid(),
+               "supervisor_sid": os.getsid(0), "at": time.time()}
+    payload.update(extra)
+    atomic_write(session_dir / "status.json", payload)
+
+
+def list_sessions(worktree):
+    try:
+        out = subprocess.run(
+            [OPENCODE_BIN, "session", "list", "--format", "json"],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(worktree), env=child_env())
+        if out.returncode != 0:
+            return None
+        data = json.loads(out.stdout)
+        ids = set()
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    sid = item.get("id") or item.get("sessionID") or item.get("session_id")
+                    if sid:
+                        ids.add(str(sid))
+        elif isinstance(data, dict):
+            for item in data.get("sessions", data.get("data", [])) or []:
+                if isinstance(item, dict):
+                    sid = item.get("id") or item.get("sessionID") or item.get("session_id")
+                    if sid:
+                        ids.add(str(sid))
+        return ids
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def read_prompt(prompt_file):
+    return Path(prompt_file).read_text(encoding="utf-8")
+
+
+def cli_argv(prompt, worktree, title, model=None, resume_id=None):
+    argv = [OPENCODE_BIN, "run", "--format", "json", "--auto",
+            "--dir", str(worktree)]
+    if resume_id is None:
+        argv += ["--title", title]
+    else:
+        argv += ["-s", resume_id]
+    if model:
+        argv += ["-m", model]
+    argv += ["--", prompt]
+    return argv
+
+
+def supervise(job):
+    worktree = Path(job["worktree"])
+    session_dir = Path(job["session_dir"])
+    prompt_file = job["prompt_file"]
+    request = job["launch_request_id"]
+    title = job.get("title") or f"astra-{request}"
+    model = job.get("model") or None
+    prompt = read_prompt(prompt_file)
+
+    out_log = open(session_dir / "cli.out.log", "ab", buffering=0)
+    err_log = open(session_dir / "cli.err.log", "ab", buffering=0)
+    child = {"proc": None}
+
+    def on_term(_signo, _frame):
+        write_status(session_dir, "KILLED", reason="SIGTERM to supervisor")
+        if child["proc"] is not None and child["proc"].poll() is None:
+            child["proc"].terminate()
+        os._exit(143)
+
+    signal.signal(signal.SIGTERM, on_term)
+
+    baseline = list_sessions(worktree) or set()
+    try:
+        child["proc"] = subprocess.Popen(
+            cli_argv(prompt, worktree, title, model=model),
+            cwd=str(worktree), env=child_env(),
+            stdin=subprocess.DEVNULL, stdout=out_log, stderr=err_log)
+    except OSError as exc:
+        write_status(session_dir, "SPAWN_FAILED", reason=str(exc))
+        atomic_write(session_dir / "result.json", {
+            "outcome": "FAILED_PRESTART", "session_id": None,
+            "reason": f"opencode CLI failed to start: {exc}"})
+        return 0
+
+    write_status(session_dir, "RUNNING", cli_pid=child["proc"].pid,
+                 worktree=str(worktree))
+
+    session_id = None
+    result_written = False
+    deadline = time.monotonic() + DISCOVER_DEADLINE
+    resumes = 0
+
+    def record_session(cli_id):
+        nonlocal session_id, result_written
+        session_id = f"opencode-cli:{cli_id}"
+        atomic_write(session_dir / "session.json", {
+            "session_id": session_id, "cli_session_id": cli_id,
+            "launch_request_id": request, "worktree": str(worktree),
+            "supervisor_pid": os.getpid(),
+            "cli_pid": child["proc"].pid, "resumed": resumes > 0,
+            "at": time.time()})
+        if not result_written:
+            if child["proc"].poll() is not None:
+                return False
+            atomic_write(session_dir / "result.json",
+                         {"outcome": "CONFIRMED", "session_id": session_id})
+            result_written = True
+        return True
+
+    while True:
+        if session_id is None:
+            current = list_sessions(worktree)
+            if current is not None and current - baseline:
+                cli_id = sorted(current - baseline)[0]
+                if not record_session(cli_id):
+                    write_status(session_dir, "EXITED",
+                                 reason="session appeared after CLI exit")
+                    atomic_write(session_dir / "result.json", {
+                        "outcome": "FAILED_PRESTART", "session_id": None,
+                        "reason": "opencode session registered only after "
+                                  "CLI exit; not treated as durable"})
+                    return 0
+                write_status(session_dir, "RUNNING",
+                             cli_pid=child["proc"].pid,
+                             session_id=session_id, worktree=str(worktree))
+        rc = child["proc"].poll()
+        if rc is not None:
+            if session_id is None:
+                grace_end = time.monotonic() + POST_EXIT_GRACE
+                while time.monotonic() < grace_end and session_id is None:
+                    time.sleep(1.0)
+                    current = list_sessions(worktree)
+                    if current is not None and current - baseline:
+                        # CLI already gone — not durable.
+                        break
+                write_status(session_dir, "EXITED", exit_code=rc,
+                             cli_pid=child["proc"].pid)
+                atomic_write(session_dir / "result.json", {
+                    "outcome": "FAILED_PRESTART", "session_id": None,
+                    "reason": f"opencode CLI exited {rc} before a durable "
+                              "supervised session was confirmed"})
+                return 0
+            elif rc != 0 and resumes < MAX_RESUMES:
+                resumes += 1
+                write_status(session_dir, "RESUMING", exit_code=rc,
+                             attempt=resumes, session_id=session_id)
+                try:
+                    child["proc"] = subprocess.Popen(
+                        cli_argv(RESUME_PROMPT, worktree, title, model=model,
+                                 resume_id=session_id.split(":", 1)[1]),
+                        cwd=str(worktree), env=child_env(),
+                        stdin=subprocess.DEVNULL,
+                        stdout=out_log, stderr=err_log)
+                except OSError:
+                    write_status(session_dir, "EXITED", exit_code=rc,
+                                 session_id=session_id,
+                                 resume_error="respawn failed")
+                    return 0
+                continue
+            write_status(session_dir, "EXITED", exit_code=rc,
+                         session_id=session_id, cli_pid=child["proc"].pid,
+                         resumes=resumes)
+            return 0
+        if session_id is None and time.monotonic() > deadline \
+                and not result_written:
+            atomic_write(session_dir / "result.json", {
+                "outcome": "UNKNOWN", "session_id": None,
+                "reason": "opencode CLI running but no durable session id "
+                          "observed within deadline"})
+            result_written = True
+            write_status(session_dir, "RUNNING_UNIDENTIFIED",
+                         cli_pid=child["proc"].pid, worktree=str(worktree))
+        time.sleep(POLL_INTERVAL if session_id is None else 15.0)
+        if session_id is not None:
+            write_status(session_dir, "RUNNING", cli_pid=child["proc"].pid,
+                         session_id=session_id, worktree=str(worktree),
+                         resumes=resumes)
+
+
+def main(argv):
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    if len(argv) != 1:
+        print("usage: astra-glm-supervisor <job.json>", file=sys.stderr)
+        return 2
+    try:
+        job = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 2
+    required = {"launch_request_id", "worktree", "session_dir", "prompt_file"}
+    if not isinstance(job, dict) or not required <= set(job) \
+            or not SAFE_ID.match(str(job.get("launch_request_id", ""))):
+        return 2
+    try:
+        return supervise(job)
+    except Exception as exc:
+        try:
+            write_status(Path(job["session_dir"]), "SUPERVISOR_ERROR",
+                         reason=f"{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -47,7 +47,8 @@ def builder_home():
 def child_env():
     return {"HOME": str(builder_home()),
             "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "LANG": "C.UTF-8"}
+            "LANG": "C.UTF-8",
+            "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
 
 
 def credentials_path():

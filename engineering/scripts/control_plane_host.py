@@ -432,6 +432,31 @@ def lane_census(lane):
     return live
 
 
+@contextmanager
+def census_lock(lane, policy):
+    """One frozen census per lane at a time.
+
+    Two concurrent censuses of one lane would SIGSTOP each other and could leave the lane
+    frozen, so the host serializes them. The wait is bounded by the census's own timeout.
+    """
+    if lane not in WRAPPERS:
+        raise HostError("unknown lane")
+    try:
+        fd = os.open(str(Path(policy["ledger_path"]).parent / f"census-{lane}.lock"),
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise HostError("census lock unavailable; lane quiescence unverifiable") from exc
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            raise HostError("unsafe census lock file")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def lane_quiescence(lane, policy, *, census=None):
     if proc_hides_processes():
         raise HostError("/proc hides processes (hidepid); lane quiescence cannot be verified")
@@ -443,7 +468,10 @@ def lane_quiescence(lane, policy, *, census=None):
     if has_subordinate_ids(uid):
         raise HostError("lane UID has subordinate uid/gid ranges; its user-namespace processes would be invisible")
     # The outside scan is kept as a second witness; the frozen census is the race-free one.
-    return sorted(set(live_processes(uid)) | set((census or lane_census)(lane)))
+    outside = live_processes(uid)
+    with census_lock(lane, policy):
+        frozen = (census or lane_census)(lane)
+    return sorted(set(outside) | set(frozen))
 
 
 def lane_empty(lane, policy, quiescence, grace=None, clock=time.monotonic, sleep=time.sleep):

@@ -1,0 +1,235 @@
+#!/usr/bin/python3 -I
+"""ASTRA DEVIN persistent supervisor — launch contract v2, PERSISTENT_SUPERVISOR.
+
+Installed at /opt/astra/libexec/astra-devin-supervisor (root-owned).
+Spawned detached (own session, stdio redirected) by astra-devin-adapter
+as the astra-builder-devin identity. It owns one local `devin` CLI run
+per launch request: it keeps the builder work alive after the caller
+(helper/wrapper/adapter/Actions job) exits, discovers the resumable CLI
+session id, records a durable session/status trail on disk, and performs
+at most one bounded resume after an abnormal CLI exit. It never retries
+blindly and never reports an unobserved session as durable.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import signal
+import subprocess
+import sys
+import time
+
+DEVIN_BIN = "/opt/astra/libexec/devin"
+MODEL = "swe-2"
+PERMISSION_MODE = "dangerous"
+MAX_RESUMES = 1
+DISCOVER_DEADLINE = 120.0   # seconds to observe a resumable session id
+POST_EXIT_GRACE = 8.0       # extra list checks after early child exit
+POLL_INTERVAL = 1.5
+RESUME_PROMPT = ("The previous Devin CLI run exited abnormally before the "
+                 "assigned task was completed. Resume work on the same "
+                 "approved task scope and report evidence.")
+SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def builder_home():
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+def child_env():
+    return {"HOME": builder_home(),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
+
+
+def atomic_write(path, payload):
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, json.dumps(payload, sort_keys=True).encode())
+    finally:
+        os.close(fd)
+    os.rename(tmp, path)
+
+
+def write_status(session_dir, state, **extra):
+    payload = {"state": state, "supervisor_pid": os.getpid(),
+               "supervisor_sid": os.getsid(0), "at": time.time()}
+    payload.update(extra)
+    atomic_write(session_dir / "status.json", payload)
+
+
+def list_sessions(worktree):
+    """Return the set of CLI session ids registered for this worktree."""
+    try:
+        out = subprocess.run(
+            [DEVIN_BIN, "list", "--format", "json"],
+            capture_output=True, text=True, timeout=30,
+            cwd=worktree, env=child_env())
+        if out.returncode != 0:
+            return None
+        return {s.get("id") for s in json.loads(out.stdout)
+                if isinstance(s, dict) and s.get("id")}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def cli_argv(prompt_file, resume_id=None):
+    argv = [DEVIN_BIN, "--model", MODEL,
+            "--permission-mode", PERMISSION_MODE,
+            "--respect-workspace-trust", "false"]
+    if resume_id is None:
+        argv += ["-p", "--prompt-file", prompt_file]
+    else:
+        argv += ["-r", resume_id, "-p", RESUME_PROMPT]
+    return argv
+
+
+def supervise(job):
+    worktree = Path(job["worktree"])
+    session_dir = Path(job["session_dir"])
+    prompt_file = job["prompt_file"]
+    request = job["launch_request_id"]
+
+    out_log = open(session_dir / "cli.out.log", "ab", buffering=0)
+    err_log = open(session_dir / "cli.err.log", "ab", buffering=0)
+
+    child = {"proc": None}
+
+    def on_term(_signo, _frame):
+        write_status(session_dir, "KILLED", reason="SIGTERM to supervisor")
+        if child["proc"] is not None and child["proc"].poll() is None:
+            child["proc"].terminate()
+        os._exit(143)
+
+    signal.signal(signal.SIGTERM, on_term)
+
+    baseline = list_sessions(worktree) or set()
+    try:
+        child["proc"] = subprocess.Popen(
+            cli_argv(prompt_file), cwd=worktree, env=child_env(),
+            stdin=subprocess.DEVNULL, stdout=out_log, stderr=err_log)
+    except OSError as exc:
+        # The CLI never started: provably no session was created.
+        write_status(session_dir, "SPAWN_FAILED", reason=str(exc))
+        atomic_write(session_dir / "result.json", {
+            "outcome": "FAILED_PRESTART", "session_id": None,
+            "reason": f"devin CLI failed to start: {exc}"})
+        return 0
+
+    write_status(session_dir, "RUNNING", cli_pid=child["proc"].pid,
+                 worktree=str(worktree))
+
+    session_id = None
+    result_written = False
+    deadline = time.monotonic() + DISCOVER_DEADLINE
+    resumes = 0
+
+    def record_session(cli_id):
+        nonlocal session_id, result_written
+        session_id = f"devin-cli:{cli_id}"
+        atomic_write(session_dir / "session.json", {
+            "session_id": session_id, "cli_session_id": cli_id,
+            "launch_request_id": request, "worktree": str(worktree),
+            "supervisor_pid": os.getpid(),
+            "cli_pid": child["proc"].pid, "resumed": resumes > 0,
+            "at": time.time()})
+        if not result_written:
+            atomic_write(session_dir / "result.json",
+                         {"outcome": "CONFIRMED", "session_id": session_id})
+            result_written = True
+
+    while True:
+        if session_id is None:
+            current = list_sessions(worktree)
+            if current is not None and current - baseline:
+                record_session(sorted(current - baseline)[0])
+                write_status(session_dir, "RUNNING",
+                             cli_pid=child["proc"].pid,
+                             session_id=session_id, worktree=str(worktree))
+        rc = child["proc"].poll()
+        if rc is not None:
+            if session_id is None:
+                # Grace window: the session store may lag an abrupt exit.
+                grace_end = time.monotonic() + POST_EXIT_GRACE
+                while time.monotonic() < grace_end and session_id is None:
+                    time.sleep(1.0)
+                    current = list_sessions(worktree)
+                    if current is not None and current - baseline:
+                        record_session(sorted(current - baseline)[0])
+                if session_id is None:
+                    write_status(session_dir, "EXITED", exit_code=rc,
+                                 cli_pid=child["proc"].pid)
+                    atomic_write(session_dir / "result.json", {
+                        "outcome": "FAILED_PRESTART", "session_id": None,
+                        "reason": f"devin CLI exited {rc} before any "
+                                  "resumable session was registered"})
+                    return 0
+            elif rc != 0 and resumes < MAX_RESUMES:
+                resumes += 1
+                write_status(session_dir, "RESUMING", exit_code=rc,
+                             attempt=resumes, session_id=session_id)
+                try:
+                    child["proc"] = subprocess.Popen(
+                        cli_argv(prompt_file,
+                                 resume_id=session_id.split(":", 1)[1]),
+                        cwd=worktree, env=child_env(),
+                        stdin=subprocess.DEVNULL,
+                        stdout=out_log, stderr=err_log)
+                except OSError:
+                    write_status(session_dir, "EXITED", exit_code=rc,
+                                 session_id=session_id,
+                                 resume_error="respawn failed")
+                    return 0
+                continue
+            write_status(session_dir, "EXITED", exit_code=rc,
+                         session_id=session_id, cli_pid=child["proc"].pid,
+                         resumes=resumes)
+            return 0
+        if session_id is None and time.monotonic() > deadline \
+                and not result_written:
+            # CLI still running but no resumable session id observed.
+            atomic_write(session_dir / "result.json", {
+                "outcome": "UNKNOWN", "session_id": None,
+                "reason": "devin CLI running but no resumable session id "
+                          "observed within deadline"})
+            result_written = True
+            write_status(session_dir, "RUNNING_UNIDENTIFIED",
+                         cli_pid=child["proc"].pid, worktree=str(worktree))
+        time.sleep(POLL_INTERVAL if session_id is None else 15.0)
+        if session_id is not None:
+            write_status(session_dir, "RUNNING", cli_pid=child["proc"].pid,
+                         session_id=session_id, worktree=str(worktree),
+                         resumes=resumes)
+
+
+def main(argv):
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    if len(argv) != 1:
+        print("usage: astra-devin-supervisor <job.json>", file=sys.stderr)
+        return 2
+    try:
+        job = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 2
+    required = {"launch_request_id", "worktree", "session_dir", "prompt_file"}
+    if not isinstance(job, dict) or not required <= set(job) \
+            or not SAFE_ID.match(str(job.get("launch_request_id", ""))):
+        return 2
+    try:
+        return supervise(job)
+    except Exception as exc:
+        try:
+            write_status(Path(job["session_dir"]), "SUPERVISOR_ERROR",
+                         reason=f"{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

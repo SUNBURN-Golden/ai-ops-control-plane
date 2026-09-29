@@ -307,6 +307,11 @@ write, PR creation, admin, secrets, delete or merge permission.
 
 Builder credentials are scoped to their assigned repository/task branch/PR and
 have no merge/admin authority. Reviewer credentials are read/comment only.
+Program mode decision M4 (User, 2026-09-29) departs from this: lanes do not get
+separate GitHub identities, so a lane token can merge or push directly. User
+accepts that residual (`docs/PROGRAM_MODE.md` §13). No gate reads GitHub text
+as authority; gates read host pins, the host-recorded plan and live PR state
+(`docs/PROGRAM_MODE.md` §4.2).
 
 Repo-scoped credentials are preferred over one all-repositories write token.
 

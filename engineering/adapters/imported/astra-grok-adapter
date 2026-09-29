@@ -47,7 +47,8 @@ def child_env():
     return {"HOME": str(builder_home()),
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "LANG": "C.UTF-8",
-            "GROK_HOME": str(builder_home() / ".grok")}
+            "GROK_HOME": str(builder_home() / ".grok"),
+            "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
 
 
 def auth_path():

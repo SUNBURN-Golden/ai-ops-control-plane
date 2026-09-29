@@ -39,7 +39,38 @@ def node(node_id="n1", floor="A1", **extra):
 
 
 def now_iso():
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # time.gmtime() alone reads the coarse clock, which can lag time.time() (the ledger's
+    # clock) across a second boundary and make a fresh comment look older than its session.
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()))
+
+
+SUDOERS = cp.ROOT / ".github/control-plane/sudoers-aiops-program.example"
+# The runner rules that predate program mode (docs/CONTROL_PLANE_RUNTIME.md).
+BASE_RUNNER_RULES = ("launch", "^status --launch-request-id [0-9a-f]{24}$",
+                     "^preflight --builder-id (DEVIN|GROK_BUILD|GLM)$")
+
+
+def sudoers_runner_rules(text):
+    """Argument patterns of the AIOPS_PROGRAM_HOST alias, as the sudoers parser reads them."""
+    body = text.split("Cmnd_Alias AIOPS_PROGRAM_HOST =", 1)[1].split("\n\n", 1)[0].replace("\\\n", " ")
+    rules = []
+    for entry in re.split(r"(?<!\\),", body):
+        command, _, args = entry.strip().partition(" ")
+        assert command == "/opt/astra/bin/astra-host-control", entry
+        # A backslash before : \ , = # or blank is removed; an unescaped one of those ends the entry.
+        assert not re.search(r"(?<!\\)[#:,=]", args), f"unescaped sudoers special character in {args}"
+        rules.append(re.sub(r"\s+", " ", re.sub(r"\\([:\\,= \t#])", r"\1", args)).strip())
+    return rules
+
+
+RUNNER_RULES = (*BASE_RUNNER_RULES, *sudoers_runner_rules(SUDOERS.read_text(encoding="utf-8")))
+
+
+def sudoers_allows(arguments, rules=RUNNER_RULES):
+    """sudo >= 1.9.10: a ^...$ argument pattern must match the whole space-joined argument line."""
+    line = " ".join(arguments)
+    return any(re.search(rule, line) if rule.startswith("^") and rule.endswith("$") else rule == line
+               for rule in rules)
 
 
 def signed_delivery(packet, pr=7, head=HEAD):
@@ -205,6 +236,8 @@ class FakeHost:
             host.result_for(packet, "CONFIRMED", session_id="cli:" + packet["launch_request_id"])))
 
     def __call__(self, arguments, packet=None):
+        # Every helper call the runtime makes must be one the installed sudoers rules admit.
+        assert sudoers_allows(arguments), f"sudoers would refuse the runner: {arguments}"
         # The real host_call turns a nonzero helper exit into ControlPlaneError.
         try:
             return self.dispatch(arguments, packet)
@@ -1075,6 +1108,62 @@ class ProgramModeTests(unittest.TestCase):
             prog.validate_plan(plan([node("n1", deliverable_mode="NON_CODE_EVIDENCE")]), self.cfg)
         a3 = prog.validate_plan(plan([{"id": "a", "title": "t", "spec": "s", "audit_floor": "A3"}]), self.cfg)
         self.assertEqual(a3["nodes"][0]["astra_gate"], "ARCHITECTURE")
+
+
+class SudoersExampleTests(unittest.TestCase):
+    """The runner's sudoers rules admit exactly the helper calls program mode makes."""
+
+    H24, H40 = "0123456789abcdef01234567", "0123456789abcdef0123456789abcdef01234567"
+    COMMENT = f"https://github.com/{REPO}/issues/7#issuecomment-99"
+    REVIEW = f"https://github.com/{REPO}/pull/8#pullrequestreview-5"
+
+    def test_program_calls_are_admitted(self):
+        for arguments in (
+                ["status", "--lanes"], ["task-status", "--repository", REPO, "--task", "KIX.P1-N2_A"],
+                ["reap", "--launch-request-id", self.H24, "--evidence", self.COMMENT, "--pin-stdin"],
+                ["reap", "--launch-request-id", self.H24, "--evidence", self.REVIEW, "--pin-stdin"],
+                ["materialize-begin", "--program", "zari", "--node", "n1", "--repository", REPO,
+                 "--plan-commit", self.H40],
+                ["materialize-finish", "--program", "zari", "--node", "n1", "--request", self.H24,
+                 "--outcome", "CREATED", "--issue", "12"],
+                ["materialize-finish", "--program", "zari", "--node", "n1", "--request", self.H24,
+                 "--outcome", "UNKNOWN"],
+                ["materialize-status", "--program", "zari", "--node", "n1"],
+                ["materialize-plan", "--program", "zari", "--node", "n1", "--from", self.H40, "--to", self.H40],
+                ["preflight", "--builder-id", "CURSOR"]):
+            with self.subTest(arguments=arguments):
+                self.assertTrue(sudoers_allows(arguments, sudoers_runner_rules(SUDOERS.read_text())))
+
+    def test_operator_commands_and_loose_forms_are_refused(self):
+        for arguments in (
+                ["migrate", "--to", "2"], ["init"],
+                ["reconcile", "--launch-request-id", self.H24, "--evidence", self.COMMENT, "--no-session"],
+                ["materialize-resolve", "--program", "zari", "--node", "n1", "--request", self.H24,
+                 "--evidence", self.COMMENT, "--not-created"],
+                ["reap", "--launch-request-id", self.H24, "--evidence", self.COMMENT],  # unsigned form
+                ["reap", "--launch-request-id", self.H24, "--evidence", self.COMMENT, "--pin-stdin", "--x"],
+                ["reap", "--launch-request-id", self.H24.upper(), "--evidence", self.COMMENT, "--pin-stdin"],
+                ["reap", "--launch-request-id", self.H24, "--evidence",
+                 "https://evil.test/o/r/issues/1#issuecomment-1", "--pin-stdin"],
+                ["reap", "--launch-request-id", self.H24, "--evidence",
+                 self.COMMENT.replace("issues/7", "pull/7"), "--pin-stdin"],
+                ["status", "--lanes", "--launch-request-id", self.H24], ["status", "--lanes;id"],
+                ["task-status", f"--repository={REPO}", "--task", "ZARI-N1"],
+                ["task-status", "--repository", REPO, "--task", "zari-n1"],
+                ["materialize-finish", "--program", "zari", "--node", "n1", "--request", self.H24,
+                 "--outcome", "CREATED"],
+                ["materialize-begin", "--program", "-x", "--node", "n1", "--repository", REPO,
+                 "--plan-commit", self.H40],
+                ["preflight", "--builder-id", "cursor"], ["launch", "--packet", "/tmp/x"]):
+            with self.subTest(arguments=arguments):
+                self.assertFalse(sudoers_allows(arguments))
+
+    def test_the_parser_reads_escapes_like_sudo(self):
+        rules = sudoers_runner_rules(SUDOERS.read_text())
+        self.assertTrue(any("https://github[.]com/" in rule and "#issuecomment-" in rule for rule in rules))
+        with self.assertRaisesRegex(AssertionError, "unescaped"):
+            sudoers_runner_rules("Cmnd_Alias AIOPS_PROGRAM_HOST = \\\n"
+                                 "    /opt/astra/bin/astra-host-control ^reap --evidence https://x$\n\n")
 
 
 if __name__ == "__main__":

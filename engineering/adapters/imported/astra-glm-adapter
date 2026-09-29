@@ -48,7 +48,8 @@ def child_env():
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "LANG": "C.UTF-8",
             "XDG_CONFIG_HOME": str(builder_home() / ".config"),
-            "XDG_DATA_HOME": str(builder_home() / ".local/share")}
+            "XDG_DATA_HOME": str(builder_home() / ".local/share"),
+            "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
 
 
 def auth_path():
