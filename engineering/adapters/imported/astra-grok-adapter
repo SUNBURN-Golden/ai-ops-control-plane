@@ -1,0 +1,472 @@
+#!/usr/bin/python3 -I
+"""ASTRA GROK_BUILD builder adapter — launch contract v2 (local Grok CLI).
+
+Installed at /opt/astra/libexec/astra-grok-adapter (root-owned).
+Invoked by /opt/astra/bin/astra-builder-grok-build via sudo as the
+astra-builder-grokbuild identity. The builder sandbox is a host-local,
+detached supervisor process running official `grok` CLI in a per-request
+worktree (execution_mode PERSISTENT_SUPERVISOR). This process only
+performs admission-side setup and spawn; it never receives GitHub control
+tokens, runner HOME, or the ASTRA_HOST_INFLIGHT_FD control lock.
+
+Session durability: the supervisor outlives this process and the
+launching job, and the resumable Grok CLI session id is recorded under
+the per-request state directory before CONFIRMED is returned. A bare
+CLI exit or session-file presence alone is never treated as durable.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import signal
+import stat
+import subprocess
+import sys
+import time
+import uuid
+
+GROK_BIN = Path("/opt/astra/libexec/grok")
+SUPERVISOR = Path("/opt/astra/libexec/astra-grok-supervisor")
+WORKTREE_ROOT = Path("/opt/astra/worktrees/grokbuild")
+STATE_ROOT = WORKTREE_ROOT / ".sessions"
+LANE_USER = "astra-builder-grokbuild"  # the only identity the quiescence census may run as
+IDENTITY = ("repository", "task_id", "task_revision", "builder_id",
+            "launch_request_id", "attempt_id")
+SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+RESULT_WAIT = 100.0
+
+
+def builder_home():
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def child_env():
+    return {"HOME": str(builder_home()),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "GROK_HOME": str(builder_home() / ".grok")}
+
+
+def auth_path():
+    return builder_home() / ".grok" / "auth.json"
+
+
+def config_path():
+    return builder_home() / ".grok" / "config.toml"
+
+
+def fail(reason):
+    print(json.dumps({"status": "FAIL", "builder_id": "GROK_BUILD", "reason": reason},
+                     sort_keys=True))
+    return 0
+
+
+def result_for(packet, outcome, reason=None, session_id=None):
+    result = {key: packet[key] for key in IDENTITY}
+    result.update(outcome=outcome, session_id=session_id)
+    if reason:
+        result["reason"] = reason
+    return result
+
+
+def root_owned_tool(path):
+    try:
+        info = path.lstat()
+        return (stat.S_ISREG(info.st_mode) and info.st_uid == 0
+                and not stat.S_IMODE(info.st_mode) & 0o022
+                and os.access(path, os.X_OK))
+    except OSError:
+        return False
+
+
+def protected_secret(path):
+    try:
+        info = path.lstat()
+        return (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and not stat.S_IMODE(info.st_mode) & 0o077
+                and info.st_nlink == 1)
+    except OSError:
+        return False
+
+
+def worktree_ready():
+    try:
+        info = WORKTREE_ROOT.lstat()
+        return (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+                and stat.S_IMODE(info.st_mode) == 0o700)
+    except OSError:
+        return False
+
+
+def cli_auth_ok(timeout=30):
+    """Read-only check that builder-owned Grok auth exists and looks usable."""
+    path = auth_path()
+    if not protected_secret(path):
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict) or not data:
+        return False
+    now = time.time()
+
+    def _exp_ok(exp):
+        if exp is None:
+            return True
+        if isinstance(exp, (int, float)):
+            return exp > now - 60
+        if isinstance(exp, str) and exp.strip():
+            s = exp.strip().replace("Z", "+00:00")
+            try:
+                from datetime import datetime
+                return datetime.fromisoformat(s).timestamp() > now - 60
+            except ValueError:
+                return False
+        return False
+
+    for entry in data.values():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("key") or entry.get("refresh_token"):
+            if _exp_ok(entry.get("expires_at")):
+                return True
+    return False
+
+
+def prerequisites():
+    if not root_owned_tool(GROK_BIN):
+        return "grok CLI binary missing or unsafe"
+    if not root_owned_tool(SUPERVISOR):
+        return "supervisor missing or unsafe"
+    if not worktree_ready():
+        return "worktree root missing or unsafe"
+    if not protected_secret(auth_path()):
+        return "builder Grok auth store missing or unsafe"
+    if not config_path().is_file():
+        return "builder Grok config missing"
+    return None
+
+
+def preflight():
+    reason = prerequisites()
+    if reason is not None:
+        return fail(reason)
+    if not cli_auth_ok():
+        return fail("grok CLI auth check failed")
+    print(json.dumps({
+        "status": "PASS", "builder_id": "GROK_BUILD", "launch_contract_version": 2,
+        "execution_mode": "PERSISTENT_SUPERVISOR", "parallel_safe": True,
+        "worktree_root": str(WORKTREE_ROOT),
+    }, sort_keys=True))
+    return 0
+
+
+SIGNER_TEMPLATE = """\
+# ASTRA session signer (docs/PROGRAM_MODE.md section 4.2). Private to this session:
+# never print, copy or quote this file. Run it with /usr/bin/python3 -I <this file> ...
+import hashlib, hmac, re, sys
+KEY, KIND, BOUND, REQUEST = {key!r}, {kind!r}, {bound!r}, {request!r}
+# A reviewer escalates with the DECISION_REQUIRED verdict, so its blockers are only BLOCKED/STALLED.
+BLOCKERS = ("BLOCKED", "STALLED") if KIND == "REVIEW" else ("DECISION_REQUIRED", "BLOCKED", "STALLED")
+
+
+def mac(fields):
+    return hmac.new(bytes.fromhex(KEY), "|".join(fields).encode(), hashlib.sha256).hexdigest()
+
+
+args = sys.argv[1:]
+if len(args) == 1 and args[0] in BLOCKERS:
+    print(f"ASTRA_BLOCKED_V1 kind={{args[0]}} launch={{REQUEST}} mac={{mac(('ASTRA_BLOCKED_V1', REQUEST, args[0]))}}")
+elif KIND == "REVIEW":
+    if (len(args) != 4 or args[0] not in ("PASS", "PASS_WITH_NOTES", "FAIL", "DECISION_REQUIRED")
+            or args[1] not in ("A1", "A2") or args[2] not in ("A1", "A2", "A3") or args[3] not in ("NO", "YES")):
+        sys.exit("usage: PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED <depth A1|A2> <required A1|A2|A3> NO|YES")
+    review, head = BOUND
+    print(f"ASTRA_REVIEW_V1 review={{review}} head={{head}} verdict={{args[0]}} depth={{args[1]}} "
+          f"required={{args[2]}} contract_change={{args[3]}} mac={{mac(('ASTRA_REVIEW_V1', review, head, *args))}}")
+else:
+    if len(args) != 2 or not re.fullmatch(r"[1-9][0-9]{{0,9}}", args[0]) or not re.fullmatch(r"[0-9a-f]{{40}}", args[1]):
+        sys.exit("usage: <pr number> <40-hex head sha>")
+    (request,) = BOUND
+    print(f"ASTRA_DELIVERY_V1 pr={{args[0]}} head={{args[1]}} mac={{mac(('ASTRA_DELIVERY_V1', request, *args))}}")
+"""
+HEX = re.compile(r"[0-9a-f]+")
+
+
+def write_signer(session_dir, packet):
+    """Write the session's private signer; None when the packet carries no signing nonce."""
+    if packet.get("schema_version") != 2:
+        return None
+    request = packet.get("launch_request_id")
+    if packet.get("role") == "REVIEWER":
+        key, kind = packet.get("review_nonce"), "REVIEW"
+        bound = (packet.get("review_request_id"), packet.get("head_sha"))
+        lengths = (24, 40)
+    else:
+        key, kind, bound, lengths = packet.get("delivery_nonce"), "DELIVERY", (request,), (24,)
+    if not isinstance(key, str) or len(key) != 32 or not HEX.fullmatch(key):
+        return None
+    if not isinstance(request, str) or len(request) != 24 or not HEX.fullmatch(request):
+        return None
+    for value, length in zip(bound, lengths):
+        if not isinstance(value, str) or (length and (len(value) != length or not HEX.fullmatch(value))):
+            return None
+    path = session_dir / "signer.py"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(SIGNER_TEMPLATE.format(key=key, kind=kind, bound=bound, request=request))
+    return path
+
+
+def build_prompt(packet, signer=None):
+    common = [
+        f"repository: {packet['repository']}",
+        f"task_id: {packet['task_id']}",
+        f"task_revision: {packet['task_revision']}",
+        f"task_pointer: {packet.get('task_pointer', '')}",
+        f"task_spec_pointer: {packet.get('task_spec_pointer', '')}",
+        f"task_spec_revision: {packet.get('task_spec_revision', '')}",
+        f"approval_pointer: {packet.get('approval_pointer', '')}",
+        f"authoritative_doc_pointers: {packet.get('authoritative_doc_pointers', '')}",
+        f"launch_request_id: {packet['launch_request_id']}",
+    ]
+    if packet.get("schema_version") == 2 and packet.get("role") == "REVIEWER":
+        # Program mode (docs/PROGRAM_MODE.md section 4): read-only, non-author review.
+        return "\n".join([
+            "ASTRA control-plane dispatch (INDEPENDENT REVIEW, read-only).",
+            "You are a non-author reviewer running locally via Grok CLI in an",
+            "isolated per-request worktree. Do not commit, push, edit the pull",
+            "request, comment code suggestions for others to apply, or merge.",
+            f"Review pull request #{packet.get('pr_number')} at exact head {packet.get('head_sha')}",
+            "against the task specification, repository rules and acceptance",
+            f"criteria, at depth {packet.get('audit_floor', 'A1')} (A2 adds concurrency, state,",
+            "persistence, payment, security and protocol behavior).",
+            "When the review is complete, choose the verdict and run exactly:",
+            f"  /usr/bin/python3 -I {signer} <PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED> <A1|A2> <A1|A2|A3> <NO|YES>",
+            "The arguments are: the verdict; the depth you actually reviewed at; the",
+            "minimum depth the actual diff requires under the repository rules",
+            "(A3 for invariant, schema, public-contract, blockchain, financial or",
+            "authority-boundary changes), independent of the task's audit floor; and",
+            "whether the change alters a contract.",
+            "Submit one GitHub pull request review whose body starts with the single",
+            "line that command prints, followed by the findings. Do not edit that",
+            "review afterwards and do not post the line anywhere else. The signer file",
+            "is private to this session: never print, copy or quote its contents.",
+            "If you cannot complete the review (for example the head changed or the",
+            f"PR does not build), run `/usr/bin/python3 -I {signer} BLOCKED` (or STALLED)",
+            "and post the line it prints on the task issue with the reason.",
+            "Then end the session.",
+            *common,
+            f"owner_lane: {packet.get('owner_lane')}",
+        ])
+    if signer is not None:
+        delivery = [
+            f"Push your work to the branch astra/{str(packet['task_id']).lower()} and open (or",
+            "update) the pull request from that branch; a delivery from any other",
+            "branch is refused. When the pull request is ready, run exactly:",
+            f"  /usr/bin/python3 -I {signer} <pr number> <40-hex head sha>",
+            "and post one comment on the task issue containing the single line it",
+            "prints, then end the session. If blocked, run",
+            f"`/usr/bin/python3 -I {signer} <DECISION_REQUIRED|BLOCKED|STALLED>` and post",
+            "the line it prints with the reason instead. The signer file is private",
+            "to this session: never print, copy or quote its contents.",
+        ]
+    else:
+        delivery = [
+            "When the pull request is ready, post one comment on the task issue with",
+            "the exact line `ASTRA_DELIVERY_V1 pr=<number> head=<40-hex head sha>`,",
+            "then end the session.",
+        ]
+    return "\n".join([
+        "ASTRA control-plane dispatch (BUILDER_STANDARD).",
+        "You are the assigned builder running locally via Grok CLI in an",
+        "isolated per-task worktree. Work only within the referenced",
+        "approved task scope. Investigate, implement, test/fix/retest, and",
+        "report evidence in the worktree.",
+        *delivery,
+        *([] if signer is not None else ["If blocked, post DECISION_REQUIRED, BLOCKED or STALLED with the reason",
+                                         "and end the session."]),
+        "Never merge.",
+        *common,
+    ])
+
+
+def launch():
+    try:
+        packet = json.loads(sys.stdin.read(1024 * 1024 + 1))
+    except ValueError:
+        print(json.dumps({"outcome": "FAILED_PRESTART",
+                          "reason": "malformed launch packet"}))
+        return 1
+    if not isinstance(packet, dict) or any(k not in packet for k in IDENTITY):
+        print(json.dumps({"outcome": "FAILED_PRESTART",
+                          "reason": "launch packet missing identity fields"}))
+        return 1
+    request = str(packet["launch_request_id"])
+    if not SAFE_ID.match(request):
+        print(json.dumps(result_for(
+            packet, "FAILED_PRESTART", "unsafe launch_request_id")))
+        return 0
+    reason = prerequisites()
+    if reason is not None:
+        print(json.dumps(result_for(packet, "FAILED_PRESTART", reason)))
+        return 0
+    if not cli_auth_ok():
+        print(json.dumps(result_for(packet, "FAILED_PRESTART",
+                                    "grok CLI auth check failed")))
+        return 0
+
+    session_dir = STATE_ROOT / request
+    worktree = WORKTREE_ROOT / f"wt-{request}"
+    try:
+        STATE_ROOT.mkdir(mode=0o700, exist_ok=True)
+        os.mkdir(session_dir, 0o700)
+        os.mkdir(worktree, 0o700)
+    except OSError as exc:
+        print(json.dumps(result_for(
+            packet, "FAILED_PRESTART",
+            f"per-request state/worktree setup failed: {exc.strerror or exc}")))
+        return 0
+
+    try:
+        signer = write_signer(session_dir, packet)
+    except OSError as exc:
+        print(json.dumps(result_for(
+            packet, "FAILED_PRESTART", f"session signer setup failed: {exc.strerror or exc}")))
+        return 0
+    if signer is None and packet.get("role") == "REVIEWER":
+        print(json.dumps(result_for(
+            packet, "FAILED_PRESTART", "reviewer packet lacks a valid review_nonce, head or review id")))
+        return 0
+    prompt_file = session_dir / "prompt.txt"
+    prompt_file.write_text(build_prompt(packet, signer), encoding="utf-8")
+    os.chmod(prompt_file, 0o600)
+    cli_session_uuid = str(uuid.uuid4())
+    job_file = session_dir / "job.json"
+    job_file.write_text(json.dumps({
+        "launch_request_id": request,
+        "worktree": str(worktree),
+        "session_dir": str(session_dir),
+        "prompt_file": str(prompt_file),
+        "cli_session_uuid": cli_session_uuid,
+    }, sort_keys=True), encoding="utf-8")
+    os.chmod(job_file, 0o600)
+
+    try:
+        sup_log = open(session_dir / "supervisor.log", "ab", buffering=0)
+        subprocess.Popen(
+            [str(SUPERVISOR), str(job_file)],
+            stdin=subprocess.DEVNULL, stdout=sup_log, stderr=sup_log,
+            cwd=str(worktree), env=child_env(),
+            start_new_session=True, close_fds=True)
+    except OSError as exc:
+        print(json.dumps(result_for(
+            packet, "FAILED_PRESTART",
+            f"supervisor failed to start: {exc}")))
+        return 0
+
+    result_file = session_dir / "result.json"
+    deadline = time.monotonic() + RESULT_WAIT
+    while time.monotonic() < deadline:
+        try:
+            outcome = json.loads(result_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            time.sleep(0.5)
+            continue
+        code = outcome.get("outcome")
+        session_id = outcome.get("session_id")
+        if code == "CONFIRMED" and isinstance(session_id, str) \
+                and session_id.startswith("grok-cli:"):
+            print(json.dumps(result_for(packet, "CONFIRMED",
+                                        session_id=session_id)))
+            return 0
+        if code == "FAILED_PRESTART":
+            print(json.dumps(result_for(
+                packet, "FAILED_PRESTART",
+                outcome.get("reason") or "supervisor reported prestart failure")))
+            return 0
+        if code == "UNKNOWN":
+            print(json.dumps(result_for(
+                packet, "UNKNOWN",
+                outcome.get("reason") or "supervisor outcome unresolved")))
+            return 0
+        time.sleep(0.5)
+    print(json.dumps(result_for(
+        packet, "UNKNOWN",
+        "supervisor did not report a durable outcome within deadline")))
+    return 0
+
+
+def diag_env():
+    print(json.dumps({"env_names": sorted(os.environ)}))
+    return 0
+
+
+def census(kill=os.kill, proc="/proc"):
+    """Race-free census of this lane UID's processes (the host's quiescence probe).
+
+    kill(-1, SIGSTOP) stops every process of this UID and cannot race a fork: the kernel
+    aborts any fork that sees the pending stop, and kill(-1) walks the task list under the
+    lock that attaching a child needs. Until SIGCONT the stopped set can only shrink, so the
+    listing below is complete. Only the lane identity may run it (never root).
+    """
+    uid = os.getuid()
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        name = None
+    if uid == 0 or os.geteuid() != uid or name != LANE_USER:
+        # Only this lane's own identity: never root, the control identity or another lane.
+        print(json.dumps({"status": "FAIL", "reason": "census must run as the lane identity"}))
+        return 1
+    me, live = os.getpid(), []
+    try:
+        try:
+            kill(-1, signal.SIGSTOP)
+        except ProcessLookupError:
+            pass
+        with os.scandir(proc) as entries:
+            for entry in entries:
+                if not entry.name.isdecimal() or int(entry.name) == me:
+                    continue
+                try:
+                    text = Path(entry.path, "status").read_text(encoding="utf-8", errors="replace")
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                ids = next((line.split()[1:5] for line in text.splitlines() if line.startswith("Uid:")), None)
+                if not ids or len(ids) != 4 or not all(value.isdecimal() for value in ids):
+                    raise OSError(f"unparseable {entry.path}/status")
+                if str(uid) in ids:
+                    live.append(int(entry.name))
+    except OSError as exc:
+        print(json.dumps({"status": "FAIL", "reason": f"census unverifiable: {exc}"}))
+        return 1
+    finally:
+        try:
+            kill(-1, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+    print(json.dumps({"status": "OK", "live": sorted(live)}))
+    return 0
+
+
+def main(argv):
+    if argv == ["--preflight"]:
+        return preflight()
+    if argv == ["--launch"]:
+        return launch()
+    if argv == ["--diag-env"]:
+        return diag_env()
+    if argv == ["--quiescence"]:
+        return census()
+    print("usage: astra-grok-adapter --preflight | --launch | --diag-env | --quiescence",
+          file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

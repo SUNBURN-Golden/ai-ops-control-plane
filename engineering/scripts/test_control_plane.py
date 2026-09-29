@@ -159,7 +159,7 @@ class DispatchBoundaryTests(unittest.TestCase):
                     'user.email=offline@example.invalid', '-c', 'core.hooksPath=/dev/null', *args],
                     cwd=root, text=True, capture_output=True, check=True).stdout.strip()
             git('init', '-q', '..')
-            paths = ('scripts/control_plane_cursor.py', 'scripts/control_plane_flow_gateway.py',
+            paths = ('adapters/cursor/astra-cursor-adapter', 'scripts/control_plane_flow_gateway.py',
                      '.github/control-plane/activation.json')
             for name in paths:
                 path = root/name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text('baseline\n')

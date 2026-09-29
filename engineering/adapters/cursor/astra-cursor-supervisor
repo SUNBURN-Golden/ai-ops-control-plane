@@ -1,0 +1,145 @@
+#!/usr/bin/python3 -I
+"""ASTRA CURSOR session supervisor (no systemd).
+
+Installed at /opt/astra/libexec/astra-cursor-supervisor (root-owned). Started
+by astra-cursor-adapter as the astra-builder-cursor identity in its own
+session (setsid), so it outlives the adapter, the wrapper and the launching
+job. When it ends, the host init (tini) reaps it. It is the durable owner of
+one Cursor CLI run:
+
+1. clone the repository into the per-request worktree (blob-less, bounded) and
+   read the prompt. A failure here is a definite prestart failure, because no
+   provider session exists yet;
+2. create the provider chat and persist `cursor-cli:<chat id>` as CONFIRMED.
+   From the chat request on, any failure is UNKNOWN, because a provider
+   session may exist;
+3. run the agent on that chat to completion, then record status.json.
+
+The prompt is read from the adapter's 0600 prompt.txt. It names the session
+signer's path but never its key, so passing it as the CLI's prompt argument
+discloses no secret. The packet is never passed to any process. status.json is
+informational only: the host releases a session by lane UID quiescence, never
+by this file.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import subprocess
+import sys
+import time
+
+CONFIG = Path("/etc/astra/cursor-lane.json")
+GIT = "/usr/bin/git"
+CHAT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,159}")
+REPOSITORY = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+CLONE_TIMEOUT = 45  # seconds
+CHAT_TIMEOUT = 40   # seconds; with the clone, under the adapter's 100 s result wait
+
+
+def child_env():
+    return {"HOME": pwd.getpwuid(os.getuid()).pw_dir,
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "GIT_TERMINAL_PROMPT": "0"}
+
+
+def write_state(path, value):
+    """Atomic owner-only JSON write: readers never see a partial file."""
+    temporary = path.with_name(path.name + ".tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, sort_keys=True))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def load_job(path):
+    job = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(job, dict) or not isinstance(job.get("repository"), str) \
+            or not REPOSITORY.fullmatch(job["repository"]):
+        raise ValueError("invalid job")
+    for key in ("worktree", "session_dir", "prompt_file", "model"):
+        if not isinstance(job.get(key), str) or not job[key]:
+            raise ValueError(f"invalid job field {key}")
+    return job
+
+
+def cli_path():
+    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    return config["cli"]
+
+
+def supervise(job, cli, env):
+    session_dir, worktree = Path(job["session_dir"]), Path(job["worktree"])
+    result_file, status_file = session_dir / "result.json", session_dir / "status.json"
+    started = time.time()
+    try:
+        # Blob-less partial clone, bounded so the adapter (RESULT_WAIT 100 s) always sees
+        # FAILED_PRESTART or CONFIRMED: clone + chat stay under CLONE_TIMEOUT + CHAT_TIMEOUT.
+        subprocess.run([GIT, "clone", "--filter=blob:none", "--no-hardlinks", "--quiet", "--",
+                        f"https://github.com/{job['repository']}.git", str(worktree)],
+                       check=True, capture_output=True, timeout=CLONE_TIMEOUT, env=env, cwd=str(session_dir),
+                       stdin=subprocess.DEVNULL)
+        prompt = Path(job["prompt_file"]).read_text(encoding="utf-8")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        write_state(result_file, {"outcome": "FAILED_PRESTART", "session_id": None,
+                                  "reason": "repository clone or prompt failed before any provider session"})
+        write_state(status_file, {"state": "EXITED", "phase": "clone", "started": started, "ended": time.time()})
+        return 0
+    try:
+        created = subprocess.run([cli, "create-chat"], check=True, capture_output=True, text=True, timeout=CHAT_TIMEOUT,
+                                 env=env, cwd=str(worktree), stdin=subprocess.DEVNULL)
+        chat = created.stdout.strip()
+        if not CHAT.fullmatch(chat):
+            raise ValueError("unrecognized provider chat id")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        write_state(result_file, {"outcome": "UNKNOWN", "session_id": None,
+                                  "reason": "provider chat creation unresolved; a session may exist"})
+        write_state(status_file, {"state": "EXITED", "phase": "create-chat", "started": started,
+                                  "ended": time.time()})
+        return 0
+    session_id = "cursor-cli:" + chat
+    write_state(result_file, {"outcome": "CONFIRMED", "session_id": session_id})
+    write_state(status_file, {"state": "RUNNING", "session_id": session_id, "supervisor_pid": os.getpid(),
+                              "started": started})
+    argv = [cli, "--print", "--force", "--trust", "--output-format", "json", "--model", job["model"],
+            "--resume", chat, "--workspace", str(worktree), prompt]
+    returncode = None
+    try:
+        with open(session_dir / "output.log", "ab", buffering=0) as out, \
+             open(session_dir / "error.log", "ab", buffering=0) as err:
+            returncode = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                        env=env, cwd=str(worktree), check=False).returncode
+    except OSError:
+        returncode = None
+    write_state(status_file, {"state": "EXITED" if returncode is not None else "SUPERVISOR_ERROR",
+                              "session_id": session_id, "returncode": returncode,
+                              "started": started, "ended": time.time()})
+    return 0
+
+
+def main(argv):
+    os.umask(0o077)
+    if len(argv) != 1:
+        print("usage: astra-cursor-supervisor <job.json>", file=sys.stderr)
+        return 2
+    try:
+        job = load_job(argv[0])
+    except (OSError, ValueError):
+        return 2  # the adapter times out to UNKNOWN; nothing was started
+    try:
+        cli = cli_path()
+    except (OSError, ValueError, KeyError, TypeError):
+        write_state(Path(job["session_dir"]) / "result.json",
+                    {"outcome": "FAILED_PRESTART", "session_id": None, "reason": "cursor lane config unreadable"})
+        return 0
+    return supervise(job, cli, child_env())
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

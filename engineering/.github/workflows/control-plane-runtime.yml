@@ -4,12 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "preflight or dispatch"
+        description: "preflight, dispatch, or a program-mode operation (docs/PROGRAM_MODE.md)"
         required: true
         type: choice
         options:
           - preflight
           - dispatch
+          - lanes
+          - materialize
+          - start
+          - review
+          - reap
+          - merge-check
+          - merge
       issue_number:
         description: "Canonical GitHub task issue number (required for dispatch)"
         required: false
@@ -34,6 +41,11 @@ on:
         description: "Explicit retry: next attempt number from the control record; empty for the first attempt"
         required: false
         type: string
+      program_args:
+        description: "Program-mode JSON arguments (program, node, plan_commit, slot, launch_request_id, evidence, pr_number)"
+        required: false
+        type: string
+        default: "{}"
       builder_id:
         description: "Builder for preflight"
         required: false
@@ -50,7 +62,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: astra-control-${{ github.repository }}-${{ inputs.issue_number || 'preflight' }}
+  group: astra-control-${{ github.repository }}-${{ inputs.issue_number || inputs.program_args || 'preflight' }}
   cancel-in-progress: false
 
 jobs:
@@ -66,6 +78,7 @@ jobs:
       EXPECTED_ISSUE_BODY_SHA256: ${{ inputs.expected_issue_body_sha256 }}
       EXPECTED_ATTEMPT_ID: ${{ inputs.expected_attempt_id }}
       PREFLIGHT_BUILDER: ${{ inputs.builder_id }}
+      PROGRAM_ARGS: ${{ inputs.program_args }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -128,3 +141,120 @@ jobs:
           --launch-request-id "$LAUNCH_REQUEST_ID"
           --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
 
+      - name: Validate program input
+        if: ${{ contains(fromJSON('["start","review","reap","merge-check","merge"]'), inputs.operation) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "issue_number must be a positive integer for ${{ inputs.operation }}" >&2
+            exit 2
+          fi
+
+      - name: Program lane board
+        if: ${{ inputs.operation == 'lanes' }}
+        run: python3 -I scripts/control_plane_program.py lanes
+
+      - name: Program materialize
+        if: ${{ inputs.operation == 'materialize' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+        run: python3 -I scripts/control_plane_program.py materialize --args-json "$PROGRAM_ARGS"
+
+      - name: Program start (prepare writer)
+        id: pstart
+        if: ${{ inputs.operation == 'start' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+        run: >-
+          python3 -I scripts/control_plane_program.py start
+          --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+          --packet "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-packet.json"
+
+      - name: Program review (prepare reviewer)
+        id: preview
+        if: ${{ inputs.operation == 'review' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+        run: >-
+          python3 -I scripts/control_plane_program.py review
+          --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+          --packet "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-packet.json"
+
+      - name: Launch program session through protected host admission
+        if: ${{ (inputs.operation == 'start' && steps.pstart.outputs.launch_required == 'true') || (inputs.operation == 'review' && steps.preview.outputs.launch_required == 'true') }}
+        run: >-
+          python3 -I scripts/control_plane.py launch-dispatch
+          --packet "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-packet.json"
+          --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
+
+      - name: Finalize program writer launch
+        if: ${{ always() && inputs.operation == 'start' && steps.pstart.outputs.launch_required == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+          LAUNCH_REQUEST_ID: ${{ steps.pstart.outputs.launch_request_id }}
+        run: >-
+          python3 -I scripts/control_plane.py finalize-dispatch
+          --issue-number "$ISSUE_NUMBER"
+          --launch-request-id "$LAUNCH_REQUEST_ID"
+          --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
+
+      - name: Finalize program reviewer launch
+        if: ${{ always() && inputs.operation == 'review' && steps.preview.outputs.launch_required == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+          LAUNCH_REQUEST_ID: ${{ steps.preview.outputs.launch_request_id }}
+        run: >-
+          python3 -I scripts/control_plane_program.py finalize-review
+          --issue-number "$ISSUE_NUMBER"
+          --launch-request-id "$LAUNCH_REQUEST_ID"
+          --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
+
+      - name: Program reap (verified release)
+        if: ${{ inputs.operation == 'reap' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+        run: python3 -I scripts/control_plane_program.py reap --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+
+      - name: Program merge readiness (computed, no merge)
+        if: ${{ inputs.operation == 'merge-check' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+        run: python3 -I scripts/control_plane_program.py merge-check --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+
+      - name: Program merge (User decision M1; only a computed READY_FOR_MERGE, pinned to its head)
+        if: ${{ inputs.operation == 'merge' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+        run: python3 -I scripts/control_plane_program.py merge --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+
+      - name: Wake the coordinator (best effort, never changes the outcome)
+        if: ${{ always() && contains(fromJSON('["materialize","start","review","reap","merge"]'), inputs.operation) }}
+        continue-on-error: true
+        env:
+          ROUTINE_TOKEN: ${{ secrets.ASTRA_COORDINATOR_ROUTINE_TOKEN }}
+          ROUTINE_ID: ${{ vars.ASTRA_COORDINATOR_ROUTINE_ID }}
+          OP: ${{ inputs.operation }}
+        shell: bash
+        # The token stays in the environment: never in a process argument (/proc/<pid>/cmdline).
+        run: |
+          python3 -I - <<'PY'
+          import json, os, re, urllib.request
+          token, routine = os.environ.get("ROUTINE_TOKEN", ""), os.environ.get("ROUTINE_ID", "")
+          if not token or not re.fullmatch(r"trig_[A-Za-z0-9]+", routine):
+              print("coordinator wake not configured")
+              raise SystemExit(0)
+          text = json.dumps({"event": "control-plane-run", "operation": os.environ["OP"],
+                             "target": os.environ.get("ASTRA_TARGET_REPOSITORY", ""),
+                             "issue": os.environ.get("ISSUE_NUMBER", ""), "run_id": os.environ["GITHUB_RUN_ID"]})
+          request = urllib.request.Request(
+              f"https://api.anthropic.com/v1/claude_code/routines/{routine}/fire",
+              data=json.dumps({"text": text}).encode(), method="POST",
+              headers={"Authorization": f"Bearer {token}", "anthropic-beta": "experimental-cc-routine-2026-04-01",
+                       "anthropic-version": "2023-06-01", "Content-Type": "application/json"})
+          try:
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  print(f"coordinator wake HTTP {response.status}")
+          except Exception as exc:  # best effort: the hourly heartbeat covers a lost wake
+              print(f"coordinator wake failed: {type(exc).__name__}")
+          PY

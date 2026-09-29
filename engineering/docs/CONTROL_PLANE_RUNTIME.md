@@ -43,7 +43,9 @@ control 계정의 HOME/secret store도 builder에 열지 않는다.
 
 runner의 sudo 허용은 고정 helper의 `launch`, 정확한 세 builder별
 `preflight --builder-id ...` command, 읽기 전용
-`status --launch-request-id <24자리 hex>` command만으로 제한한다. `status`는 sudoers에서
+`status --launch-request-id <24자리 hex>` command만으로 제한한다(program mode는
+아래 "runner가 sudo로 부를 수 있는 새 명령"의 `status --lanes`, `task-status`, `reap`,
+`materialize-*`를 더한다). `status`는 sudoers에서
 그 인수 형식만 허용하고(가능하면 정규식), ledger를 바꾸지 않는다. 이 항목이 없으면
 host-preflight와 모든 재시도가 fail-closed로 거부된다. shell, 임의 Python, 임의 인수,
 `init`, `reconcile`, root 실행을 허용하지 않는다. builder에는 이 sudo 권한이 없다.
@@ -123,6 +125,60 @@ control record 작성자는 그 토큰의 login이다. 이 결정은 `AGENTS.md`
 발송 경로는 self-hosted runner의 `control-plane-runtime.yml` 하나다. Actions 없는 발송 경로는
 실행 소스를 승인된 GitHub commit에 결속하고 이 workflow와 같은 serialization/route fence를
 공유하기 전에는 추가하지 않는다(PR #34 A3 review F2/F3).
+
+## Program mode host 명령 (ledger v2)
+
+`docs/PROGRAM_MODE.md` §3·§4·§6·§8.2, `RUNBOOKS/DISPATCH.md` §25.
+
+**설치 순서**
+1. 새 helper를 설치한다.
+2. 곧바로 운영자가 `migrate --to 2`를 실행한다.
+   - v1 ledger에서는 migrate를 뺀 모든 명령이 거부된다. 그래서 이전 전에는 발송이 fail-closed로 멈춘다.
+   - migrate는 exclusive in-flight 잠금 아래에서 돈다. 먼저 `<ledger>.v1-backup-<ts>` 백업을 만들고, 한 트랜잭션 안에서 다음을 한다.
+     - 열 추가(role, lane, review_key)
+     - 기존 행의 lane 채우기
+     - 인덱스 교체(`one_active_writer`, `one_active_review`, `one_active_per_lane`)
+     - `materializations` 생성
+   - 같은 레인에 활성 행이 둘이면 인덱스 생성이 실패해 전부 되돌아간다. 그때는 먼저 reconcile한다.
+
+**runner가 sudo로 부를 수 있는 새 명령.** 인수 형식은 정규식으로 제한한다.
+- `status --launch-request-id <id>`의 응답 필드가 늘었다.
+  - 추가 필드: role, lane, repository, task, attempt_id, owner_lane, `reserved_at`(host 예약 시각, 초 단위 내림), resolution, pin, evidence, `released_at`. 리뷰어 행에는 review id, head, PR 번호도 붙는다.
+  - packet과 서명 키는 절대 돌려주지 않는다.
+  - reap은 `reserved_at`보다 앞선 산출물이나 리뷰를 증거로 받지 않는다.
+- `task-status --repository <owner/repo> --task <TASK_ID>`: 한 작업의 모든 launch 행을 돌려준다(읽기 전용, 형식은 위와 같다). merge-check과 리뷰 발송의 근거다.
+- `status --lanes`: 읽기 전용 레인 현황.
+- `reap --launch-request-id <24 hex> --evidence <https URL> [--pin-stdin]`
+  - CONFIRMED 행만, 그 레인 builder UID의 live process가 0개일 때 `RECONCILED/SESSION_TERMINAL_VERIFIED`로 바꾼다.
+  - `--pin-stdin`이면 stdin으로 `{"pin": "<서명된 한 줄>"}`만 받는다. 서명 키가 있는 세션은 서명된 줄 없이 해제하지 않는다. 받는 줄은 전달 줄, 판정 줄, 또는 그 세션 launch id의 차단 줄(`ASTRA_BLOCKED_V1`)이다.
+    - 저장된 packet의 `delivery_nonce` 또는 `review_nonce`로 HMAC을 검증한다.
+    - 리뷰 판정은 그 세션의 review id와 head를 가리켜야 한다.
+    - 다른 작업이 이미 고정한 PR을 전달물로 가리키면 거부한다.
+    - 검증된 결과를 해제 기록에 고정한다.
+  - **write-once:** 같은 요청을 다시 부르면 저장된 결과를 돌려준다. 이때 evidence와 pin이 처음과 같아야 하고, 다르면 거부한다.
+  - 정지 확인은 바깥 `/proc` 스캔과, 레인 wrapper `--quiescence`(레인 계정이 자기 프로세스를 모두 SIGSTOP으로 멈추고 목록을 만든 뒤 SIGCONT로 푸는 경합 없는 점검)를 함께 쓴다. control identity가 wrapper를 실행하는 sudo 규칙에 `--quiescence`를 더한다.
+  - 정지 확인은 fail-closed다. 아래 중 하나라도 해당하면 거부한다.
+    - `/proc`에 hidepid가 있다.
+    - helper의 PID namespace가 `/proc`의 namespace가 아니다(`NSpid`가 1단계가 아님).
+    - 레인 UID에 `/etc/subuid` 또는 `/etc/subgid` 범위가 있다.
+    - `/proc/<pid>/status`를 읽거나 해석할 수 없다.
+  - 세션을 끄지 않는다.
+  - adapter의 `status.json`은 빌더가 쓸 수 있는 곳에 있어 위조가 가능하다. 그래서 증거로 쓰지 않는다.
+- `launch`는 adapter가 `FAILED_PRESTART`를 보고해도, 같은 정지 확인으로 레인이 비었음을 본 뒤에만(최대 10초) 슬롯을 돌려준다. 그렇지 않으면 `UNKNOWN`으로 기록한다.
+- `launch`는 이미 해제된(RECONCILED) 요청을 다시 받으면 저장된 결과를 재생하지 않는다. 대신 `FAILED_PRESTART`("already released")를 돌려준다. 재개는 언제나 새 시도다.
+- `materialize-begin --program <id> --node <id> --repository <owner/repo> --plan-commit <40 hex>`
+- `materialize-finish --program <id> --node <id> --request <24 hex> --outcome CREATED|UNKNOWN [--issue N]`
+- `materialize-status --program <id> --node <id>`
+- `materialize-plan --program <id> --node <id> --from <40 hex> --to <40 hex>`: plan commit compare-and-swap.
+
+**운영자 전용 명령.** runner는 금지다.
+- `migrate --to 2`
+- `materialize-resolve --program <id> --node <id> --request <24 hex> --not-created --evidence <URL>`
+  - 미생성을 확인한 요청 ID를 봉인한다. 봉인된 요청은 다시 쓰지 않는다.
+
+**레인당 세션 1개**
+- 동시 세션 한도는 host `max_active_sessions`다. program mode에서는 켜진 레인 수까지 올린다.
+- 같은 작업에서는 활성 WRITER와 REVIEWER가 서로 배제된다.
 
 ## Wrapper contract
 

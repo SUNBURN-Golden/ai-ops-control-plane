@@ -7,8 +7,10 @@ import http.client
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -45,6 +47,7 @@ ALLOWED_LAUNCH_STATES = (
     "CONFIRMED",
     "FAILED_PRESTART",
     "UNKNOWN",
+    "RELEASED",  # program mode: CONFIRMED session verified terminal on the host (reap)
 )
 HOST_COMMAND = ("/usr/bin/sudo", "-n", "-u", "astra-control", "/opt/astra/bin/astra-host-control")
 STATUS_PROBE_REQUEST = "0" * 24  # never produced by stable_id's sha256 prefix in practice
@@ -56,16 +59,23 @@ RUNTIME_PATHS = (
     ".github/control-plane/graph-policy.example.json",
     ".github/control-plane/projects.json",
     "scripts/control_plane.py", "scripts/control_plane_host.py",
+    "scripts/control_plane_program.py", "scripts/test_control_plane_program.py",
+    "docs/PROGRAM_MODE.md", "docs/COORDINATOR_PLAYBOOK.md",
+    "adapters/imported/astra-devin-adapter", "adapters/imported/astra-grok-adapter",
+    "adapters/imported/astra-glm-adapter", "adapters/imported/astra-builder-devin",
+    "adapters/imported/astra-builder-grok-build", "adapters/imported/astra-builder-glm",
+    "adapters/imported/SHA256SUMS", "scripts/test_control_plane_adapters.py",
+    "adapters/cursor/astra-builder-cursor", "adapters/cursor/astra-cursor-adapter",
+    "adapters/cursor/astra-cursor-supervisor", "adapters/cursor/SHA256SUMS",
     "scripts/control_plane_boundary.py", "scripts/control_plane_boundary_hook.sh",
     "scripts/control_plane_boundary_probe.sh",
     "scripts/test_control_plane.py", "scripts/test_control_plane_host.py",
     "scripts/test_control_plane_cursor.py",
-    "scripts/control_plane_cursor.py", "scripts/test_control_plane_cursor_adapter.py",
     "scripts/control_plane_flow.py", "scripts/control_plane_flow_gateway.py",
     "scripts/control_plane_flow_cli.py", "scripts/test_control_plane_flow.py",
     "scripts/test_control_plane_flow_routes.py", "scripts/test_control_plane_flow_lane.py",
     "scripts/test_control_plane_astra_consumer.py",
-    ".github/control-plane/cursor-adapter.example.json", ".github/control-plane/flow-policy.example.json",
+    ".github/control-plane/cursor-lane.example.json", ".github/control-plane/flow-policy.example.json",
     "docs/BUILDER_LANES.md", "docs/ASTRA_SLACK.md",
     "scripts/test_control_plane_boundary.py",
     "scripts/control_plane_install.py", "scripts/test_control_plane_install.py",
@@ -311,6 +321,7 @@ def new_control_record(envelope: Dict[str, str], cfg: Dict[str, Any], attempt: i
         "launch_request_id": stable_id("launch", cfg["repository"], envelope["TASK_ID"], envelope["TASK_REVISION"], attempt),
         "launch_state": "NOT_STARTED",
         "attempt_id": attempt,
+        "owner_lane": None,  # set by the first CONFIRMED launch; never changes afterwards
         "owner_session_id": None,
         "last_error": None,
     }
@@ -540,13 +551,18 @@ def host_preflight(builder_id: Optional[str]) -> None:
     print(json.dumps({"status": "PASS", "builders": reports}, sort_keys=True))
 
 
-def verify_dispatch_binding(body: str, envelope: dict) -> None:
-    expected = {"TASK_ID": "EXPECTED_TASK_ID", "TASK_REVISION": "EXPECTED_TASK_REVISION",
-                "BUILDER_ID": "EXPECTED_BUILDER_ID"}
-    for field, key in expected.items():
-        if not os.environ.get(key) or os.environ[key] != envelope.get(field):
+def verify_dispatch_binding(body: str, envelope: dict, expected: Optional[Dict[str, str]] = None) -> None:
+    # `expected` is the pinned authorization. Manual dispatch reads it from the
+    # workflow inputs; program mode passes the values it rendered from the plan.
+    pinned = expected if expected is not None else {
+        key: os.environ.get(key, "") for key in (
+            "EXPECTED_TASK_ID", "EXPECTED_TASK_REVISION", "EXPECTED_BUILDER_ID", "EXPECTED_ISSUE_BODY_SHA256")}
+    fields = {"TASK_ID": "EXPECTED_TASK_ID", "TASK_REVISION": "EXPECTED_TASK_REVISION",
+              "BUILDER_ID": "EXPECTED_BUILDER_ID"}
+    for field, key in fields.items():
+        if not pinned.get(key) or pinned[key] != envelope.get(field):
             raise ControlPlaneError("dispatch authorization mismatch: " + field)
-    digest = os.environ.get("EXPECTED_ISSUE_BODY_SHA256", "")
+    digest = pinned.get("EXPECTED_ISSUE_BODY_SHA256", "")
     if not re.fullmatch(r"[0-9a-f]{64}", digest) or hashlib.sha256(body.encode()).hexdigest() != digest:
         raise ControlPlaneError("dispatch authorization mismatch: issue body")
 
@@ -567,14 +583,23 @@ def record_attempt_id(record: Dict[str, Any]) -> int:
     return attempt
 
 
-def host_request_state(launch_request_id: str) -> Optional[str]:
+def host_request_status(launch_request_id: str) -> Dict[str, Any]:
     report = host_call(["status", "--launch-request-id", launch_request_id])
     if report.get("launch_request_id") != launch_request_id:
         raise ControlPlaneError("host status identity mismatch")
     state = report.get("state")
     if state is not None and not isinstance(state, str):
         raise ControlPlaneError("host status returned an invalid state")
-    return state
+    return report
+
+
+def host_request_state(launch_request_id: str) -> Optional[str]:
+    return host_request_status(launch_request_id).get("state")
+
+
+VERIFIED_RELEASE = "SESSION_TERMINAL_VERIFIED"
+# Terminal releases a resume may rely on: host-verified reap, or operator reconcile with evidence.
+TERMINAL_RELEASES = (VERIFIED_RELEASE, "SESSION_TERMINAL")
 
 
 def require_fenced_attempt(record: Dict[str, Any]) -> str:
@@ -583,11 +608,19 @@ def require_fenced_attempt(record: Dict[str, Any]) -> str:
     # prestart failure, an operator reconciliation, or (for a record that never
     # consumed send authority) no reservation at all.
     state = record["launch_state"]
-    if state == "CONFIRMED":
-        raise ControlPlaneError("retry refused: a CONFIRMED owner exists; reassignment is a separate fenced action")
     request = record.get("launch_request_id")
     if not isinstance(request, str) or not request:
         raise ControlPlaneError("control record has invalid launch_request_id")
+    if state in {"CONFIRMED", "RELEASED"}:
+        # Program-mode resume: allowed only after the host itself verified the
+        # session terminal (reap). A CONFIRMED record with that host result is a
+        # lost RELEASED projection and is repaired by this same path.
+        status = host_request_status(request)
+        if status.get("state") == "RECONCILED" and status.get("resolution") in TERMINAL_RELEASES:
+            return status["resolution"]
+        if state == "RELEASED":
+            raise ControlPlaneError("retry refused: record says RELEASED but the host has no verified release")
+        raise ControlPlaneError("retry refused: a CONFIRMED owner exists; reassignment is a separate fenced action")
     host_state = host_request_state(request)
     if host_state in {"FAILED_PRESTART", "RECONCILED"}:
         return host_state
@@ -621,10 +654,16 @@ def new_attempt_record(previous: Dict[str, Any], envelope: Dict[str, str], cfg: 
     summary["last_error"] = str(previous.get("last_error"))[:MAX_HISTORY_ERROR] if previous.get("last_error") else None
     summary["fenced_by_host_state"] = fenced_by
     record["previous_attempts"] = [*history, summary]
+    owner = previous.get("owner_lane")
+    if owner is not None:
+        # Ownership outlives sessions: a resume keeps the lane that first confirmed.
+        if record["builder_id"] != owner:
+            raise ControlPlaneError(f"retry refused: task is owned by lane {owner}; a resume keeps the owner lane")
+        record["owner_lane"] = owner
     return record
 
 
-def prepare_dispatch(issue_number: int, packet_path: Path) -> None:
+def prepare_dispatch(issue_number: int, packet_path: Path, expected: Optional[Dict[str, str]] = None) -> None:
     cfg = load_config()
     require_runtime_enabled()
     token = os.environ.get("GITHUB_TOKEN")
@@ -647,7 +686,7 @@ def prepare_dispatch(issue_number: int, packet_path: Path) -> None:
 
     envelope = parse_task_envelope(issue.get("body") or "")
     validate_task(envelope, cfg)
-    verify_dispatch_binding(issue.get("body") or "", envelope)
+    verify_dispatch_binding(issue.get("body") or "", envelope, expected)
     issue_url = issue.get("html_url") or ""
     if envelope["CANONICAL_TASK_POINTER"] != issue_url:
         raise ControlPlaneError("CANONICAL_TASK_POINTER must equal the canonical issue URL")
@@ -688,6 +727,11 @@ def prepare_dispatch(issue_number: int, packet_path: Path) -> None:
                 raise ControlPlaneError(
                     "FAILED_PRESTART requires explicit retry authorization: dispatch with "
                     f"expected_attempt_id={current_attempt + 1}")
+            if state == "RELEASED":
+                # The released request id is RECONCILED on the host; re-sending it would
+                # revive a dead session in the record. A resume is always a new attempt.
+                raise ControlPlaneError(
+                    f"RELEASED task: a resume requires expected_attempt_id={current_attempt + 1}")
     else:
         if requested_attempt not in (None, 1):
             raise ControlPlaneError("no control record exists; the first attempt is expected_attempt_id=1")
@@ -699,15 +743,10 @@ def prepare_dispatch(issue_number: int, packet_path: Path) -> None:
     # Duplicates return before provider preflight or any model invocation.
     host_preflight(envelope["BUILDER_ID"])
 
-    # Under the workflow's per-task concurrency lock, consume the one existing
-    # pending action by durably moving NOT_STARTED -> SUBMITTING before any
-    # external builder wrapper can run.
-    record["launch_state"] = "SUBMITTING"
-    record["last_error"] = None
-    api.update_comment(comment["id"], render_control_record(record))
-
     packet = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "role": "WRITER",
+        "owner_lane": envelope["BUILDER_ID"],
         "repository": cfg["repository"],
         "project": cfg["project"],
         "task_issue": issue_number,
@@ -722,12 +761,30 @@ def prepare_dispatch(issue_number: int, packet_path: Path) -> None:
         "launch_request_id": record["launch_request_id"],
         "attempt_id": record["attempt_id"],
         "control_comment_id": comment["id"],
+        # Keys this session's delivery signer (docs/PROGRAM_MODE.md section 6); only the writer lane
+        # and the host ledger ever read it, so no other lane can sign this attempt's delivery.
+        "delivery_nonce": secrets.token_hex(16),
     }
-    packet_path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Packet first: if it cannot be written, the record stays NOT_STARTED and nothing is stranded.
+    write_private_json(packet_path, packet)
+
+    # Under the workflow's per-task concurrency lock, consume the one existing
+    # pending action by durably moving NOT_STARTED -> SUBMITTING before any
+    # external builder wrapper can run.
+    record["launch_state"] = "SUBMITTING"
+    record["last_error"] = None
+    api.update_comment(comment["id"], render_control_record(record))
     write_github_output("launch_required", "true")
     write_github_output("builder_id", envelope["BUILDER_ID"])
     write_github_output("launch_request_id", record["launch_request_id"])
     write_github_output("control_comment_id", str(comment["id"]))
+
+
+def write_private_json(path: Path, value: Dict[str, Any]) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)  # the mode argument applies only when the file is new
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
 def bound_result(result: dict, expected: dict) -> dict:
@@ -785,6 +842,9 @@ def finalize_dispatch(issue_number: int, result_path: Path, launch_request_id: s
             record["launch_state"] = "CONFIRMED"
             record["owner_session_id"] = session.strip()
             record["last_error"] = None
+            record["confirmed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            if record.get("owner_lane") is None:
+                record["owner_lane"] = record["builder_id"]
     if outcome == "FAILED_PRESTART":
         record["launch_state"] = "FAILED_PRESTART"
         record["last_error"] = str(result.get("reason") or "adapter reported FAILED_PRESTART")

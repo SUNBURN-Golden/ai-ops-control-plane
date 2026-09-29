@@ -1,9 +1,12 @@
 # AI Engineering Control Plane
 
-NO STANDING ROUTINES.
-NO POLLING.
+NO STANDING ROUTINES (sole exception: the program-mode coordinator, event-triggered plus one hourly heartbeat).
+NO POLLING (the heartbeat recomputes state from GitHub; it does not watch sessions).
 NO REASONING WHEN A RULE CAN DECIDE.
 ONE NORMALIZED EVENT → ONE SHORT ACTION → END SESSION.
+
+Program mode (User decisions of 2026-09-29, `docs/PROGRAM_MODE.md`, A3 design PASS at `424a661`)
+runs every registered product from one User "start" command through the same gates below.
 
 User decides. Astra owns architecture, architecture exceptions and explicit milestone/release gates.
 The mechanical layer dispatches deterministically; Grok is only an optional command relay.
@@ -34,7 +37,9 @@ pointers.
 | BUILDER | One configured autonomous writer: DEVIN, GROK_BUILD, GLM or CURSOR; investigate → implement → test/debug → PR/evidence | Change approved architecture silently; write outside the assigned task/worktree; merge |
 | REVIEWER | Configured non-author read-only reviewer; may be a different builder lane or User-designated external lane | Modify the reviewed change or become a second writer |
 | CHEAP_WORKER | Explicitly authorized mechanical work | Become a second writer on a substantive task |
-| MECHANICAL_LAYER | Actor validation, task serialization, builder dispatch, durable control record, event dedupe, gate aggregation | Perform semantic engineering or architecture judgment |
+| COORDINATOR | Program mode only (Claude Sonnet): follow `docs/COORDINATOR_PLAYBOOK.md`; call fixed operations (materialize, start, review, reap, merge-check, merge); route questions; post progress | Write or review code; judge design; choose a lane (the mechanical layer computes it); create task issues directly; touch the host; merge other than through `operation=merge` (User decision M1) |
+| OPUS | Program mode only (Claude Opus): first answerer for DECISION_REQUIRED; may approve a *small design exception* (`docs/PROGRAM_MODE.md` §5) | Author code in the task it rules on; audit a design it drafted; approve anything outside the small-exception definition |
+| MECHANICAL_LAYER | Actor validation, task serialization, builder dispatch, durable control record, event dedupe, gate aggregation, lane selection in the fixed order | Perform semantic engineering or architecture judgment |
 | SLACK | Command/status/decision cockpit | Persistent source of technical truth |
 | GITHUB | Persistent source of truth and durable control-record projection | Be treated as an atomic lock merely because comments exist |
 
@@ -97,7 +102,8 @@ Grok is an optional messenger / command runner, not the control plane.
 
 Grok may:
 
-- forward an explicit authenticated User command to a fixed control-plane command;
+- forward an explicit authenticated User command to a fixed control-plane command,
+  including the User's program-mode "start" command;
 - execute exactly one pre-authorized mechanical action named by a normalized event;
 - relay exact CI/review/audit/blocker pointers;
 - post one short status or receipt;
@@ -223,6 +229,14 @@ may designate an independent non-author architecture auditor with a durable
 task/revision/scope pointer. The substitute does not inherit Astra's design
 authority.
 
+Program-mode question path (User decision 2026-09-29): DECISION_REQUIRED goes to
+OPUS first, then ASTRA when Opus escalates, then USER when Astra requires it.
+OPUS may approve only a small design exception: a choice inside the approved
+blueprint that changes no approved invariant, schema or public contract,
+authority or security boundary, protocol or financial semantics, persistence
+format or product scope, and that is reversible within the task. Everything else
+keeps the Astra → User path below.
+
 Approved consequential contract must change:
 stop → Astra analysis → User decision → durable GitHub decision/task revision
 → resume.
@@ -319,7 +333,11 @@ launch when an owner exists or launch state is UNKNOWN.
 
 Grok never merges.
 A reviewer PASS or required Astra PASS is not a merge command.
-Only User authorizes merge.
+Only User authorizes merge. Program mode decision M1 (User, 2026-09-29) delegates
+only the merge executor to the coordinator, through `operation=merge`. The merge
+still requires the computed READY_FOR_MERGE of `RUNBOOKS/DISPATCH.md` §18, pinned
+to the exact head, and anything not computable goes to User. Outside program mode,
+User merges.
 
 READY_FOR_MERGE is a derived mechanical predicate for the current task revision
 and current HEAD. It is not a status string that an arbitrary actor may assert.
@@ -350,6 +368,13 @@ Use available subscription capacity for useful implementation, adversarial tests
 regression and non-author review. Do not spend tokens merely to exhaust a quota.
 Default: one autonomous owner and one independent reviewer; an additional
 read-only review is scoped to an unresolved risk, not a second implementation.
+Program mode (User decision 2026-09-29) assigns lanes mechanically. The builder is
+the first idle lane in the order DEVIN → GROK_BUILD → GLM → CURSOR. The reviewer
+is the first idle lane in the same order, excluding the task's owner lane.
+Rules:
+- one session per lane, and at most one session per enabled lane in total;
+- A1 gets one reviewer; A2 and above get two;
+- an owner lane never changes once a task is confirmed.
 No additional paid usage, quota purchase, account cycling or automatic fallback.
 Grok quota is never a reason to interrupt the builder's own fix/retest loop.
 

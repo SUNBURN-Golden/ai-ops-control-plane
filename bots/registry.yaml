@@ -259,6 +259,7 @@ bots:
     parent: 개발총괄
     domain: DEV
     repo: "https://github.com/BeautifulMind-JT/kix-protocol"
+    extra_repos: ["https://github.com/BeautifulMind-JT/kix-commerce-apps"]
     status: ACTIVE
     audit: 정상
     last_audited: "2026-09-17"

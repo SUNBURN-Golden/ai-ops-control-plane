@@ -719,3 +719,128 @@ Grok usage, User interventions, review findings, rework and integration
 conflicts. Report unavailable usage metrics as unknown.
 
 
+
+## 25. Program mode
+
+Design: `docs/PROGRAM_MODE.md` (A3 design PASS at `424a661`).
+Operations: `scripts/control_plane_program.py`.
+Coordinator decision table: `docs/COORDINATOR_PLAYBOOK.md`.
+Everything in §1–§24 still applies. Program mode changes three things only: who
+creates the canonical task, how lanes are chosen, and when a session slot is
+released.
+
+Canonical task (`operation=materialize`):
+- the plan is `.aiops/program.json` in the product repository at an exact
+  `plan_commit`;
+- `TASK_ID = <PROGRAM>-<NODE>`;
+- the host records a SUBMITTING create request before the GitHub create call;
+- an UNKNOWN create is never re-sent because a listing shows no issue;
+- the issue carries `ASTRA_TASK_KEY_V1 ... request=<id>`;
+- duplicate open issues stop as `DUPLICATE_TASK`.
+
+Authority: every lane posts with the same GitHub account, so GitHub text
+(issue bodies, the control record, review bodies) is never a gate input. Gates
+read the host ledger, the plan at the host-recorded `plan_commit`, and live PR
+state. The control record is a projection.
+
+Writer (`operation=start`):
+- `depends_on` nodes must be DONE (their pinned delivery PR merged at the
+  delivered head); otherwise `WAITING_ON_DEPENDENCIES`; program nodes are PR
+  deliverables only;
+- the host plan commit advances only right before the envelope is rewritten;
+- a record in SUBMITTING or UNKNOWN whose request the host has fenced
+  (FAILED_PRESTART or RECONCILED) resumes as attempt + 1;
+- the lane is the first idle program lane (DEVIN, GROK_BUILD, GLM, CURSOR)
+  in the fixed order, or, for a resume, the owner lane: the lane
+  of the task's first host writer session;
+- the envelope is rendered from the plan and pinned by its body hash;
+- a stale `plan_commit` is refused (`STALE_PLAN`);
+- the launch then follows §6–§8 unchanged.
+
+Session release (`operation=reap`):
+- runs after the session posts its deliverable (`ASTRA_DELIVERY_V1`, a review
+  verdict, DECISION_REQUIRED, BLOCKED or STALLED);
+- the host retires the CONFIRMED row only when the lane UID has no live
+  process, by an outside `/proc` scan plus a race-free census taken inside the
+  lane (`--quiescence`: freeze every lane process with kill(-1, SIGSTOP),
+  list, thaw);
+- an adapter's FAILED_PRESTART frees the slot only after the host sees the
+  lane empty; otherwise the launch is UNKNOWN and the slot is kept;
+- `start` returns DONE, and never redispatches, once the pinned delivery PR is
+  merged at its delivered head;
+- the control record shows `RELEASED`; ownership is unchanged;
+- UNKNOWN or SUBMITTING stays operator-only (§9).
+
+Resume:
+- uses the explicit retry of §7 (`attempt_id + 1`) on the same owner lane;
+- is admitted only when the host shows the previous request RECONCILED as
+  `SESSION_TERMINAL_VERIFIED` (reap) or `SESSION_TERMINAL` (operator reconcile
+  with the session id); the host never replays a released request;
+- a CONFIRMED record with that host result is a lost projection and is repaired
+  first.
+
+Review (`operation=review`, mirrored in `reviews[]`):
+- runs only after the host has pinned a signed delivery for the released
+  current writer attempt, and the live PR is still at that head;
+- the audit floor comes from the plan; the issue body must equal the envelope
+  rendered from the host-recorded plan;
+- the review id binds the repository, task, delivering writer launch id, head
+  and slot;
+- the reviewer lane is the first idle program lane, excluding every writer lane
+  of the task and the lane of the other slot;
+- a slot released without a verdict (the reviewer's own signed blocker, or an
+  operator reconcile) is re-dispatched as attempt + 1, at most
+  `MAX_REVIEW_SESSIONS` (3) sessions per slot and head, then
+  `REVIEW_RETRIES_EXHAUSTED`; launch ids the host already holds are skipped;
+- a head change invalidates the review.
+
+Session signatures and pins (`operation=reap`):
+- each writer and reviewer packet carries a fresh secret (`delivery_nonce`,
+  `review_nonce`), readable only by that session's lane UID and the host
+  ledger; the adapter gives the session a private signer that prints
+  `ASTRA_DELIVERY_V1 pr=<n> head=<sha> mac=<hmac>` or
+  `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...> depth=<A1|A2>
+  required=<A1|A2|A3> contract_change=<NO|YES> mac=<hmac>`, where `depth` is
+  VERIFIED_REVIEW_DEPTH and `required` is VERIFIED_REQUIRED_DEPTH (§13);
+- a blocker is the session's own signed line
+  `ASTRA_BLOCKED_V1 kind=<DECISION_REQUIRED|BLOCKED|STALLED> launch=<id> mac=<hmac>`;
+  unsigned text never releases a session, and the host refuses to release a
+  keyed session without a signed line;
+- a writer's evidence is a control-actor comment on this task written after
+  the attempt's host reservation, with exactly one signed delivery or blocker
+  line; a delivery's PR must come from the task branch `astra/<task id>`;
+- a reviewer's evidence is its PR review at the reviewed head, after its host
+  reservation, with exactly one signed line for its review id, or a fresh task
+  comment with its signed blocker line;
+- the task a launch belongs to comes from the issue's task key and the host
+  materialization, never from the control record;
+- the host verifies the MAC with the stored packet, refuses a PR that is
+  already another task's delivery, and pins the result write-once: a repeated
+  reap must present the same evidence and line.
+
+Merge readiness (`operation=merge-check`):
+- computes §18 for the exact head from host pins: the current writer's pinned
+  delivery must name this PR and head, for the current task revision (the host
+  row's revision must equal the one derived from the host-recorded plan
+  commit); verdicts count only when pinned for this delivery's review ids,
+  from distinct lanes that never wrote the task; any active review blocks;
+  dependencies must be DONE;
+- EFFECTIVE_AUDIT_FLOOR = max(plan AUDIT_FLOOR, every pinned
+  VERIFIED_REQUIRED_DEPTH) sets the review count, the required review depth
+  and the second review slot; A3 adds ASTRA_GATE=ARCHITECTURE; program mode
+  promotes a plan A0 to A1 (no §16 qualification path exists);
+- the verification gate requires every check named in the product's
+  `program_required_checks` to have succeeded on the head, and no observed run
+  to be incomplete or failing; an undeclared list is not ready;
+- anything not machine-computable makes it not ready: Astra gates,
+  undeclared project merge prerequisites, labels `needs-user`, `blocked` and
+  `decision-required`;
+- User decision M1 (2026-09-29) delegates the merge executor: `operation=merge`
+  recomputes this predicate and merges only when it is true, with the merge
+  pinned to that exact head (`sha`), so a later push makes GitHub refuse it.
+
+Scheduling (lanes free up in this priority order):
+1. resumes of the lane's owned tasks;
+2. pending reviews that lane can take;
+3. new builds, only while tasks waiting for review or fix number fewer than
+   `max_active_sessions`.
