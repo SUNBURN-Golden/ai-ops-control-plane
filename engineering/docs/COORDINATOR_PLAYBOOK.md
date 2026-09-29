@@ -60,17 +60,17 @@ Wait for the run to finish (a few seconds) and read its outcome before acting on
 | # | Condition | Action |
 |---|---|---|
 | 1 | Task issue closed as completed, or its delivered PR is merged | Node DONE. If the PR merged but the issue is open, close the issue as completed with the merge link. |
-| 2 | Host or record shows `UNKNOWN` or `SUBMITTING`; or a run reported `MATERIALIZE_UNKNOWN`, `DUPLICATE_TASK`, `STALE_PLAN`, `PLAN_NOT_MERGED` or `host refused` | Label `needs-operator`, notify the operator (§5) and stop on this node. |
+| 2 | Host or record shows `UNKNOWN` or `SUBMITTING`; or a run reported `MATERIALIZE_UNKNOWN`, `DUPLICATE_TASK`, `STALE_PLAN`, `PLAN_NOT_MERGED`, `REVIEW_RETRIES_EXHAUSTED` or `host refused` | Label `needs-operator`, notify the operator (§5) and stop on this node. |
 | 3 | No materialized issue yet, all `depends_on` nodes are DONE, and fewer than `max_active_sessions` tasks are waiting for review or fix | `materialize` |
 | 4 | Issue exists; there is no control record, or it is `NOT_STARTED` or `FAILED_PRESTART` without an owner lane | `start` (`NO_IDLE_LANE` and `WAITING_ON_DEPENDENCIES` are fine; retry next run) |
-| 5 | Record `CONFIRMED`, and the newest comment is a signed `ASTRA_DELIVERY_V1 ... mac=...` line, `DECISION_REQUIRED`, `BLOCKED` or `STALLED` | `reap` with that comment's URL as the evidence |
+| 5 | Record `CONFIRMED`, and the newest comment carries a signed `ASTRA_DELIVERY_V1 ... mac=...` or `ASTRA_BLOCKED_V1 ... launch=<this launch> mac=...` line | `reap` with that comment's URL as the evidence. Unsigned `DECISION_REQUIRED`/`BLOCKED`/`STALLED` text is never evidence; wait. |
 | 6 | Record `CONFIRMED`, no deliverable yet | Wait. After 6 h, flag `SESSION_OVERDUE` on the Lane Board. Never reap without a deliverable. |
 | 7 | `RELEASED`, and the newest marker is an unanswered `DECISION_REQUIRED`, `BLOCKED` or `STALLED` | Question path (§4) |
 | 8 | `RELEASED`, and the newest `ASTRA_CONSULT_V1` or Astra answer is `ANSWERED` or `APPROVED_SMALL_EXCEPTION` | `start` (resume on the owner lane) |
 | 9 | `RELEASED`; the delivered PR's head has completed check runs and at least one failed | Post `CI_FEEDBACK` with the failing check names and links, then `start` (resume) |
 | 10 | `RELEASED`; the delivered head is CI green; a required review slot for that head has no entry | `review` with the lowest missing slot (A1: 1; A2/A3: 1, then 2) |
 | 11 | A review entry is `CONFIRMED`, and a PR review carries its signed `ASTRA_REVIEW_V1 review=<its id> ... mac=...` line | `reap` for that review's `launch_request_id`, with that review's URL as evidence |
-| 11a | A review entry is `CONFIRMED`, no PR review names its id, and the newest task comment is `BLOCKED` or `STALLED` | `reap` with that comment's URL; the next `review` for the slot re-dispatches it |
+| 11a | A review entry is `CONFIRMED`, and the newest task comment carries its signed `ASTRA_BLOCKED_V1 ... launch=<its launch> mac=...` line | `reap` with that comment's URL; the next `review` for the slot re-dispatches it (at most 3 sessions; `REVIEW_RETRIES_EXHAUSTED` goes to row 2) |
 | 12 | All required reviews for the head are released and any verdict is `FAIL` | Post `REVIEW_FEEDBACK` linking the reviews, then `start` (resume) |
 | 13 | A verdict is `DECISION_REQUIRED` or `contract_change=YES` | Question path (§4) |
 | 14 | All required reviews PASS for the head | `merge-check`. If ready and M1 is delegated, merge through the workflow with `sha=<head>`. If ready and M1 is not delegated, label `ready-for-merge`, post `READY_FOR_MERGE head=<sha>` on the PR, and notify the User (§5) with that head; the User merges with that exact head. If not ready, post the reasons once per head. |

@@ -697,7 +697,8 @@ class ProgramModeHostTests(unittest.TestCase):
                 self.ledger.reap(value["launch_request_id"], EVIDENCE, self.policy, pin=pin,
                                  quiescence=lambda lane, policy: [])
         self.assertEqual(self.ledger.status(w["launch_request_id"])["state"], "CONFIRMED")
-        self.reap(w)
+        self.ledger.reap(w["launch_request_id"], EVIDENCE, self.policy, pin=self.signed_delivery(w),
+                         quiescence=lambda lane, policy: [])
         self.launch(r)
         for pin, expected in ((self.signed_review(r).replace("verdict=PASS", "verdict=FAIL"), "MAC"),
                               (self.signed_review(r, head="b" * 40), "review request and head"),
@@ -706,6 +707,37 @@ class ProgramModeHostTests(unittest.TestCase):
                 self.ledger.reap(r["launch_request_id"], EVIDENCE, self.policy, pin=pin,
                                  quiescence=lambda lane, policy: [])
         self.assertEqual(self.ledger.status(r["launch_request_id"])["state"], "CONFIRMED")
+
+    def signed_blocker(self, value, kind="BLOCKED", nonce=None, launch=None):
+        launch = launch or value["launch_request_id"]
+        key = nonce or value.get("review_nonce") or value["delivery_nonce"]
+        return f"ASTRA_BLOCKED_V1 kind={kind} launch={launch} mac={host.pin_mac(key, ('ASTRA_BLOCKED_V1', launch, kind))}"
+
+    def test_a_signed_blocker_releases_either_role_without_a_result(self):
+        w = self.reaped_writer()
+        done = self.ledger.reap(w["launch_request_id"], EVIDENCE, self.policy, pin=self.signed_blocker(w, "STALLED"),
+                                quiescence=lambda lane, policy: [])
+        self.assertEqual(done["pin"], {"kind": "BLOCKER", "blocker": "STALLED"})
+        r = reviewer(review_nonce="2" * 32)
+        self.launch(r)
+        done = self.ledger.reap(r["launch_request_id"], EVIDENCE, self.policy, pin=self.signed_blocker(r),
+                                quiescence=lambda lane, policy: [])
+        self.assertEqual(done["pin"]["kind"], "BLOCKER")
+
+    def test_blocker_pins_are_bound_to_the_session(self):
+        w = self.reaped_writer()
+        other = writer(1, "GROK_BUILD", delivery_nonce="4" * 32)
+        cases = [
+            (self.signed_blocker(w, nonce="9" * 32), "MAC"),                          # another session's key
+            (self.signed_blocker(w, launch=other["launch_request_id"]), "this session's launch"),
+            (self.signed_blocker(w).replace("kind=BLOCKED", "kind=STALLED"), "MAC"),   # edited after signing
+            (None, "signed line is required"),                                         # unsigned text pins nothing
+        ]
+        for pin, expected in cases:
+            with self.subTest(expected=expected), self.assertRaisesRegex(host.HostError, expected):
+                self.ledger.reap(w["launch_request_id"], EVIDENCE, self.policy, pin=pin,
+                                 quiescence=lambda lane, policy: [])
+        self.assertEqual(self.ledger.status(w["launch_request_id"])["state"], "CONFIRMED")
 
     def test_one_pr_is_the_delivery_of_one_task(self):
         first = self.reaped_writer()
@@ -736,13 +768,15 @@ class ProgramModeHostTests(unittest.TestCase):
                                  quiescence=lambda lane, policy: [1])  # repeat never re-checks the lane
         self.assertEqual((again["repeated"], again["pin"]["pr"]), (True, 7))
         for evidence, other in ((EVIDENCE + "0", pin), (EVIDENCE, self.signed_delivery(w, pr=8)), (EVIDENCE, None)):
-            with self.subTest(evidence=evidence, other=other), self.assertRaisesRegex(host.HostError, "write-once"):
+            with self.subTest(evidence=evidence, other=other), \
+                 self.assertRaisesRegex(host.HostError, "write-once|signed line is required"):
                 self.ledger.reap(w["launch_request_id"], evidence, self.policy, pin=other,
                                  quiescence=lambda lane, policy: [])
 
     def test_released_request_is_never_replayed(self):
         w = self.reaped_writer()
-        self.reap(w)
+        self.ledger.reap(w["launch_request_id"], EVIDENCE, self.policy, pin=self.signed_delivery(w),
+                         quiescence=lambda lane, policy: [])
         replay = self.launch(w)
         self.assertEqual((replay["outcome"], replay["session_id"]), ("FAILED_PRESTART", None))
         self.assertEqual(self.ledger.status(w["launch_request_id"])["state"], "RECONCILED")

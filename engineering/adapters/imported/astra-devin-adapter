@@ -145,7 +145,8 @@ SIGNER_TEMPLATE = """\
 # ASTRA session signer (docs/PROGRAM_MODE.md section 4.2). Private to this session:
 # never print, copy or quote this file. Run it with /usr/bin/python3 -I <this file> ...
 import hashlib, hmac, re, sys
-KEY, KIND, BOUND = {key!r}, {kind!r}, {bound!r}
+KEY, KIND, BOUND, REQUEST = {key!r}, {kind!r}, {bound!r}, {request!r}
+BLOCKERS = ("DECISION_REQUIRED", "BLOCKED", "STALLED")
 
 
 def mac(fields):
@@ -153,7 +154,9 @@ def mac(fields):
 
 
 args = sys.argv[1:]
-if KIND == "REVIEW":
+if len(args) == 1 and args[0] in BLOCKERS:
+    print(f"ASTRA_BLOCKED_V1 kind={{args[0]}} launch={{REQUEST}} mac={{mac(('ASTRA_BLOCKED_V1', REQUEST, args[0]))}}")
+elif KIND == "REVIEW":
     if (len(args) != 3 or args[0] not in ("PASS", "PASS_WITH_NOTES", "FAIL", "DECISION_REQUIRED")
             or args[1] not in ("A1", "A2") or args[2] not in ("NO", "YES")):
         sys.exit("usage: PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED A1|A2 NO|YES")
@@ -173,13 +176,16 @@ def write_signer(session_dir, packet):
     """Write the session's private signer; None when the packet carries no signing nonce."""
     if packet.get("schema_version") != 2:
         return None
+    request = packet.get("launch_request_id")
     if packet.get("role") == "REVIEWER":
         key, kind = packet.get("review_nonce"), "REVIEW"
         bound = (packet.get("review_request_id"), packet.get("head_sha"))
         lengths = (24, 40)
     else:
-        key, kind, bound, lengths = packet.get("delivery_nonce"), "DELIVERY", (packet.get("launch_request_id"),), (None,)
+        key, kind, bound, lengths = packet.get("delivery_nonce"), "DELIVERY", (request,), (24,)
     if not isinstance(key, str) or len(key) != 32 or not HEX.fullmatch(key):
+        return None
+    if not isinstance(request, str) or len(request) != 24 or not HEX.fullmatch(request):
         return None
     for value, length in zip(bound, lengths):
         if not isinstance(value, str) or (length and (len(value) != length or not HEX.fullmatch(value))):
@@ -187,7 +193,7 @@ def write_signer(session_dir, packet):
     path = session_dir / "signer.py"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(SIGNER_TEMPLATE.format(key=key, kind=kind, bound=bound))
+        handle.write(SIGNER_TEMPLATE.format(key=key, kind=kind, bound=bound, request=request))
     return path
 
 
@@ -221,18 +227,24 @@ def build_prompt(packet, signer=None):
             "line that command prints, followed by the findings. Do not edit that",
             "review afterwards and do not post the line anywhere else. The signer file",
             "is private to this session: never print, copy or quote its contents.",
-            "If the head changes during review, stop and report that instead.",
+            "If you cannot complete the review (for example the head changed or the",
+            f"PR does not build), run `/usr/bin/python3 -I {signer} BLOCKED` (or STALLED)",
+            "and post the line it prints on the task issue with the reason.",
             "Then end the session.",
             *common,
             f"owner_lane: {packet.get('owner_lane')}",
         ])
     if signer is not None:
         delivery = [
-            "When the pull request is ready, run exactly:",
+            f"Push your work to the branch astra/{str(packet['task_id']).lower()} and open (or",
+            "update) the pull request from that branch; a delivery from any other",
+            "branch is refused. When the pull request is ready, run exactly:",
             f"  /usr/bin/python3 -I {signer} <pr number> <40-hex head sha>",
             "and post one comment on the task issue containing the single line it",
-            "prints, then end the session. The signer file is private to this",
-            "session: never print, copy or quote its contents.",
+            "prints, then end the session. If blocked, run",
+            f"`/usr/bin/python3 -I {signer} <DECISION_REQUIRED|BLOCKED|STALLED>` and post",
+            "the line it prints with the reason instead. The signer file is private",
+            "to this session: never print, copy or quote its contents.",
         ]
     else:
         delivery = [

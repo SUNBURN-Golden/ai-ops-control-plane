@@ -745,7 +745,11 @@ state. The control record is a projection.
 
 Writer (`operation=start`):
 - `depends_on` nodes must be DONE (their pinned delivery PR merged at the
-  delivered head); otherwise `WAITING_ON_DEPENDENCIES`;
+  delivered head); otherwise `WAITING_ON_DEPENDENCIES`; program nodes are PR
+  deliverables only;
+- the host plan commit advances only right before the envelope is rewritten;
+- a record in SUBMITTING or UNKNOWN whose request the host has fenced
+  (FAILED_PRESTART or RECONCILED) resumes as attempt + 1;
 - the lane is the first idle program lane (DEVIN, GROK_BUILD, GLM, CURSOR)
   in the fixed order, or, for a resume, the owner lane: the lane
   of the task's first host writer session;
@@ -777,8 +781,10 @@ Review (`operation=review`, mirrored in `reviews[]`):
   and slot;
 - the reviewer lane is the first idle program lane, excluding every writer lane
   of the task and the lane of the other slot;
-- a slot released without a verdict (blocker reap or operator reconcile) is
-  re-dispatched as attempt + 1;
+- a slot released without a verdict (the reviewer's own signed blocker, or an
+  operator reconcile) is re-dispatched as attempt + 1, at most
+  `MAX_REVIEW_SESSIONS` (3) sessions per slot and head, then
+  `REVIEW_RETRIES_EXHAUSTED`; launch ids the host already holds are skipped;
 - a head change invalidates the review.
 
 Session signatures and pins (`operation=reap`):
@@ -788,12 +794,18 @@ Session signatures and pins (`operation=reap`):
   `ASTRA_DELIVERY_V1 pr=<n> head=<sha> mac=<hmac>` or
   `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...> depth=<A1|A2>
   contract_change=<NO|YES> mac=<hmac>`;
+- a blocker is the session's own signed line
+  `ASTRA_BLOCKED_V1 kind=<DECISION_REQUIRED|BLOCKED|STALLED> launch=<id> mac=<hmac>`;
+  unsigned text never releases a session, and the host refuses to release a
+  keyed session without a signed line;
 - a writer's evidence is a control-actor comment on this task written after
-  the attempt's host reservation, with exactly one signed delivery line or a
-  blocker marker;
+  the attempt's host reservation, with exactly one signed delivery or blocker
+  line; a delivery's PR must come from the task branch `astra/<task id>`;
 - a reviewer's evidence is its PR review at the reviewed head, after its host
-  reservation, with exactly one signed line for its review id; a blocker
-  comment is accepted only when no review names that review id;
+  reservation, with exactly one signed line for its review id, or a fresh task
+  comment with its signed blocker line;
+- the task a launch belongs to comes from the issue's task key and the host
+  materialization, never from the control record;
 - the host verifies the MAC with the stored packet, refuses a PR that is
   already another task's delivery, and pins the result write-once: a repeated
   reap must present the same evidence and line.

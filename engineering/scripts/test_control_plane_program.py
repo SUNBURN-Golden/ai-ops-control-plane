@@ -47,6 +47,12 @@ def signed_delivery(packet, pr=7, head=HEAD):
     return f"ASTRA_DELIVERY_V1 pr={pr} head={head} mac={mac}"
 
 
+def signed_blocker(packet, kind="BLOCKED", nonce=None):
+    key = nonce or packet.get("review_nonce") or packet["delivery_nonce"]
+    launch = packet["launch_request_id"]
+    return f"ASTRA_BLOCKED_V1 kind={kind} launch={launch} mac={host.pin_mac(key, ('ASTRA_BLOCKED_V1', launch, kind))}"
+
+
 def signed_review(packet, verdict="PASS", depth="A1", change="NO", nonce=None):
     fields = ("ASTRA_REVIEW_V1", packet["review_request_id"], packet["head_sha"], verdict, depth, change)
     mac = host.pin_mac(nonce or packet["review_nonce"], fields)
@@ -297,13 +303,21 @@ class ProgramModeTests(unittest.TestCase):
                          "CONFIRMED")
         return {**started, "launch_request_id": packet["launch_request_id"], "packet": packet}
 
-    def pr(self, pr=7, sha=HEAD, **overrides):
+    def pr(self, pr=7, sha=HEAD, ref="astra/zari-n1", **overrides):
         self.gh.pulls[pr] = {"state": "open", "draft": False, "mergeable_state": "clean", "merged": False,
-                             "head": {"sha": sha, "repo": {"full_name": REPO}}, "base": {"ref": "main"},
+                             "head": {"sha": sha, "ref": ref, "repo": {"full_name": REPO}}, "base": {"ref": "main"},
                              **overrides}
 
-    def deliver(self, issue, writer, pr=7, head=HEAD, green=True, body=None, **comment):
-        self.pr(pr, head)
+    def comment_url(self, issue, body, **comment):
+        posted = self.gh.create_comment(issue, body, **comment)
+        return f"https://github.com/{REPO}/issues/{issue}#issuecomment-{posted['id']}"
+
+    def blocked(self, issue, session, kind="BLOCKED", **comment):
+        return self.comment_url(issue, f"{kind}: see reason\n\n" + signed_blocker(session["packet"], kind), **comment)
+
+    def deliver(self, issue, writer, pr=7, head=HEAD, green=True, body=None, keep_pr=False, **comment):
+        if not keep_pr:
+            self.pr(pr, head, ref=prog.branch_for(writer["packet"]["task_id"]))
         self.gh.checks[head] = [{"status": "completed", "conclusion": "success" if green else "failure"}]
         text = body if body is not None else "Ready.\n\n" + signed_delivery(writer["packet"], pr, head)
         posted = self.gh.create_comment(issue, text, **comment)
@@ -388,7 +402,8 @@ class ProgramModeTests(unittest.TestCase):
             ({"draft": True}, "non-draft"),
             ({"mergeable_state": "unstable"}, "must be clean"),
             ({"base": {"ref": "release"}}, "default branch"),
-            ({"head": {"sha": HEAD, "repo": {"full_name": "fork/ZARI"}}}, "this repository"),
+            ({"head": {"sha": HEAD, "ref": "astra/zari-n1", "repo": {"full_name": "fork/ZARI"}}}, "this repository"),
+            ({"head": {"sha": HEAD, "ref": "feature/x", "repo": {"full_name": REPO}}}, "task branch astra/zari-n1"),
         ]
         for overrides, expected in cases:
             with self.subTest(overrides=overrides):
@@ -513,14 +528,20 @@ class ProgramModeTests(unittest.TestCase):
         second = self.materialized("n2")
         second_writer = self.launch_writer(second, "n2")
         self.assertEqual(second_writer["lane"], "DEVIN")  # DEVIN is idle again after its release
-        # A line copied from task n1 does not verify under task n2's key.
-        copied = self.gh.create_comment(second, signed_delivery(first_writer["packet"]))
+        # n1's line copied onto n2 names n1's PR, which is not on n2's branch.
+        with self.assertRaisesRegex(cp.ControlPlaneError, "this task's branch astra/zari-n2"):
+            prog.reap(second, second_writer["launch_request_id"],
+                      self.comment_url(second, signed_delivery(first_writer["packet"])))
+        # A line signed with n1's key for a PR on n2's branch does not verify under n2's session.
+        self.pr(8, "b" * 40, ref="astra/zari-n2")
         with self.assertRaisesRegex(cp.ControlPlaneError, "MAC"):
             prog.reap(second, second_writer["launch_request_id"],
-                      f"https://github.com/{REPO}/issues/{second}#issuecomment-{copied['id']}")
-        # n2's own writer signing n1's PR is refused too.
-        with self.assertRaisesRegex(cp.ControlPlaneError, "already the delivery of task ZARI-N1"):
-            prog.reap(second, second_writer["launch_request_id"], self.deliver(second, second_writer))
+                      self.comment_url(second, signed_delivery(first_writer["packet"], 8, "b" * 40)))
+        # n2's own writer signing n1's PR is refused: that PR comes from n1's branch (the host also refuses a
+        # PR another task already pinned).
+        with self.assertRaisesRegex(cp.ControlPlaneError, "this task's branch astra/zari-n2"):
+            prog.reap(second, second_writer["launch_request_id"],
+                      self.deliver(second, second_writer, keep_pr=True))
 
     def test_r6_control_record_edits_do_not_change_readiness(self):
         issue, _ = self.released_writer()
@@ -534,9 +555,7 @@ class ProgramModeTests(unittest.TestCase):
     def test_r7_reviewer_released_without_a_verdict_is_retried(self):
         issue, _ = self.released_writer()
         first = self.launch_review(issue)
-        blocked = self.gh.create_comment(issue, "BLOCKED: the PR does not build locally")
-        prog.reap(issue, first["launch_request_id"],
-                  f"https://github.com/{REPO}/issues/{issue}#issuecomment-{blocked['id']}")
+        prog.reap(issue, first["launch_request_id"], self.blocked(issue, first))
         retry = self.launch_review(issue)
         self.assertEqual((retry["status"], retry["attempt"]), ("PREPARED", 2))
         prog.reap(issue, retry["launch_request_id"], self.post_review(7, retry))
@@ -550,14 +569,51 @@ class ProgramModeTests(unittest.TestCase):
                                    f"https://github.com/{REPO}/issues/{issue}")
         self.assertEqual(self.launch_review(issue)["attempt"], 2)
 
-    def test_a_posted_verdict_cannot_be_discarded_by_a_blocker_reap(self):
-        issue, _ = self.released_writer()
+    def test_n1_a_fail_verdict_cannot_be_discarded_to_re_roll_the_review(self):
+        issue, writer = self.released_writer()
         review = self.launch_review(issue)
         self.post_review(7, review, verdict="FAIL")
-        blocked = self.gh.create_comment(issue, "BLOCKED: re-roll please")
-        with self.assertRaisesRegex(cp.ControlPlaneError, "a verdict for this review request exists"):
-            prog.reap(issue, review["launch_request_id"],
-                      f"https://github.com/{REPO}/issues/{issue}#issuecomment-{blocked['id']}")
+        # The writer's lane (same account) breaks the genuine line, then tries to release the reviewer.
+        self.gh.reviews[7][-1]["body"] = "edited away"
+        for evidence in (self.comment_url(issue, "BLOCKED: re-roll please"),
+                         self.comment_url(issue, signed_blocker({**review["packet"]},
+                                                                nonce=writer["packet"]["delivery_nonce"]))):
+            with self.subTest(evidence=evidence), self.assertRaises(cp.ControlPlaneError):
+                prog.reap(issue, review["launch_request_id"], evidence)
+        self.assertEqual(self.host.ledger.status(review["launch_request_id"])["state"], "CONFIRMED")
+        again = prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
+        self.assertEqual(again["status"], "REVIEW_EXISTS")  # no re-roll: the session is still the slot's
+        self.assertIn("0 of 1 required", self.reasons(issue))
+
+    def test_unsigned_markers_never_release_a_session(self):
+        issue = self.materialized()
+        writer = self.launch_writer(issue)
+        for text in ("DECISION_REQUIRED: which API?", "BLOCKED", f"ASTRA_DELIVERY_V1 pr=7 head={HEAD}"):
+            with self.subTest(text=text), self.assertRaisesRegex(cp.ControlPlaneError, "exactly one signed"):
+                prog.reap(issue, writer["launch_request_id"], self.comment_url(issue, text))
+        both = signed_delivery(writer["packet"]) + "\n" + signed_blocker(writer["packet"])
+        self.pr(ref="astra/zari-n1")
+        with self.assertRaisesRegex(cp.ControlPlaneError, "exactly one signed"):
+            prog.reap(issue, writer["launch_request_id"], self.comment_url(issue, both))
+        self.assertEqual(self.record(issue)["launch_state"], "CONFIRMED")
+
+    def test_review_retries_are_bounded(self):
+        issue, _ = self.released_writer()
+        for _ in range(prog.MAX_REVIEW_SESSIONS):
+            review = self.launch_review(issue)
+            prog.reap(issue, review["launch_request_id"], self.blocked(issue, review, "STALLED"))
+        with self.assertRaisesRegex(cp.ControlPlaneError, "REVIEW_RETRIES_EXHAUSTED"):
+            prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
+
+    def test_n2_a_never_admitted_tombstone_does_not_wedge_the_slot(self):
+        issue, writer = self.released_writer()
+        prepared = prog.prepare_review(issue, 1, self.file("lost.json"), preflight=lambda lane: True)
+        lost = json.loads(self.file("lost.json").read_text())["launch_request_id"]  # the launch step never ran
+        self.host.ledger.reconcile(lost, None, f"https://github.com/{REPO}/issues/{issue}", no_session=True,
+                                   sender_fenced=True, never_admitted=True)
+        retry = self.launch_review(issue)
+        self.assertEqual((prepared["attempt"], retry["attempt"]), (1, 2))
+        self.assertNotEqual(retry["launch_request_id"], lost)
 
     def test_f3_an_edited_record_cannot_revive_a_released_session(self):
         issue, writer = self.released_writer()
@@ -570,6 +626,29 @@ class ProgramModeTests(unittest.TestCase):
         # The same request (and so a new packet) is refused by the host: never a revived CONFIRMED.
         self.assertNotEqual(state, "CONFIRMED")
         self.assertEqual(self.host.ledger.status(writer["launch_request_id"])["state"], "RECONCILED")
+        # P3-a: the host has fenced that request, so the next start resumes as a new attempt.
+        resumed = self.launch_writer(issue)
+        self.assertEqual((resumed["status"], resumed["attempt"], resumed["lane"]), ("PREPARED", 2, "DEVIN"))
+
+    def test_n3_the_plan_advances_only_when_the_envelope_is_rewritten(self):
+        issue, _ = self.released_writer()
+        self.launch_review(issue)
+        self.gh.contents[PLAN2] = plan()
+        self.gh.compare[(PLAN1, PLAN2)] = "ahead"
+        busy = prog.start(issue, "zari", "n1", PLAN2, self.file("p.json"), preflight=lambda lane: True)
+        self.assertEqual(busy["status"], "TASK_ACTIVE")
+        self.assertEqual(self.host.ledger.materialize_status("zari", "n1")["plan_commit"], PLAN1)
+        prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)  # body still matches
+
+    def test_reap_ignores_an_edited_record_task_id(self):
+        self.gh.contents[PLAN1] = plan([node("n1"), node("n2")])
+        first = self.materialized("n1")
+        self.launch_writer(first)
+        second = self.materialized("n2")
+        other = self.launch_writer(second, "n2")
+        self.edit_record(first, lambda record: record.update(task_id="ZARI-N2"))
+        with self.assertRaisesRegex(cp.ControlPlaneError, "not a host launch of this task"):
+            prog.reap(first, other["launch_request_id"], self.blocked(first, other))
 
     # ------------------------------------------------------------------ reap evidence
 
@@ -594,14 +673,16 @@ class ProgramModeTests(unittest.TestCase):
         writer = self.launch_writer(issue)
         other = self.gh.new_issue("other", "x")
         unsigned = f"ASTRA_DELIVERY_V1 pr=7 head={HEAD}"
+        self.pr(9, ref="feature/other")  # a PR outside the task branch
         cases = [
             (self.deliver(issue, writer, created_at="2000-01-01T00:00:00Z"), "predates"),
             (self.deliver(issue, writer, login="someone-else"), "not from the control actor"),
             (self.deliver(other, writer), "comment URL on this task issue"),
             (f"https://github.com/{REPO}/pull/7#pullrequestreview-1", "comment URL"),
-            (self.deliver(issue, writer, body=unsigned), "no signed ASTRA_DELIVERY_V1"),
+            (self.deliver(issue, writer, body=unsigned), "exactly one signed"),
             (self.deliver(issue, writer, body=signed_delivery(writer["packet"]) + "\n" +
-                          signed_delivery(writer["packet"], 8)), "more than one"),
+                          signed_delivery(writer["packet"], 8)), "exactly one signed"),
+            (self.comment_url(issue, signed_delivery(writer["packet"], 9)), "this task's branch"),
         ]
         for evidence, expected in cases:
             with self.subTest(expected=expected):
@@ -612,9 +693,7 @@ class ProgramModeTests(unittest.TestCase):
     def test_blocker_reap_releases_without_a_delivery(self):
         issue = self.materialized()
         writer = self.launch_writer(issue)
-        blocked = self.gh.create_comment(issue, "DECISION_REQUIRED: which API version?")
-        prog.reap(issue, writer["launch_request_id"],
-                  f"https://github.com/{REPO}/issues/{issue}#issuecomment-{blocked['id']}")
+        prog.reap(issue, writer["launch_request_id"], self.blocked(issue, writer, "DECISION_REQUIRED"))
         record = self.record(issue)
         self.assertEqual((record["launch_state"], record.get("delivery")), ("RELEASED", None))
         self.assertEqual(record["last_deliverable"]["kind"], "DECISION_REQUIRED")
@@ -764,7 +843,8 @@ class ProgramModeTests(unittest.TestCase):
     def test_a_dependency_merged_at_another_head_is_not_done(self):
         self.gh.contents[PLAN1] = plan([node("n1"), node("n2", depends_on=["n1"])])
         self.released_writer(node_id="n1")
-        self.gh.pulls[7].update(merged=True, state="closed", head={"sha": "b" * 40, "repo": {"full_name": REPO}})
+        self.gh.pulls[7].update(merged=True, state="closed",
+                                head={"sha": "b" * 40, "ref": "astra/zari-n1", "repo": {"full_name": REPO}})
         second = self.materialized("n2")
         waiting = prog.start(second, "zari", "n2", PLAN1, self.file("p.json"), preflight=lambda lane: True)
         self.assertEqual(waiting["status"], "WAITING_ON_DEPENDENCIES")
@@ -872,6 +952,8 @@ class ProgramModeTests(unittest.TestCase):
             prog.validate_plan(plan([{"id": "a b", "title": "t", "spec": "s"}]), self.cfg)
         with self.assertRaisesRegex(cp.ControlPlaneError, "case-insensitive"):
             prog.validate_plan(plan([node("n1"), node("N1")]), self.cfg)
+        with self.assertRaisesRegex(cp.ControlPlaneError, "PR only"):
+            prog.validate_plan(plan([node("n1", deliverable_mode="NON_CODE_EVIDENCE")]), self.cfg)
         a3 = prog.validate_plan(plan([{"id": "a", "title": "t", "spec": "s", "audit_floor": "A3"}]), self.cfg)
         self.assertEqual(a3["nodes"][0]["astra_gate"], "ARCHITECTURE")
 

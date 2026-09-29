@@ -150,7 +150,7 @@ control record 작성자는 그 토큰의 login이다. 이 결정은 `AGENTS.md`
 - `status --lanes`: 읽기 전용 레인 현황.
 - `reap --launch-request-id <24 hex> --evidence <https URL> [--pin-stdin]`
   - CONFIRMED 행만, 그 레인 builder UID의 live process가 0개일 때 `RECONCILED/SESSION_TERMINAL_VERIFIED`로 바꾼다.
-  - `--pin-stdin`이면 stdin으로 `{"pin": "<서명된 한 줄>"}`만 받는다.
+  - `--pin-stdin`이면 stdin으로 `{"pin": "<서명된 한 줄>"}`만 받는다. 서명 키가 있는 세션은 서명된 줄 없이 해제하지 않는다. 받는 줄은 전달 줄, 판정 줄, 또는 그 세션 launch id의 차단 줄(`ASTRA_BLOCKED_V1`)이다.
     - 저장된 packet의 `delivery_nonce` 또는 `review_nonce`로 HMAC을 검증한다.
     - 리뷰 판정은 그 세션의 review id와 head를 가리켜야 한다.
     - 다른 작업이 이미 고정한 PR을 전달물로 가리키면 거부한다.

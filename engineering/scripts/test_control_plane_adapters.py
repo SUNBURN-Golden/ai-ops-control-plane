@@ -61,6 +61,7 @@ class AdapterPromptTests(unittest.TestCase):
                 self.assertIn("read-only", prompt)
                 self.assertIn("Do not commit, push", prompt)
                 self.assertIn(f"/usr/bin/python3 -I {signer} <PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED>", prompt)
+                self.assertIn(f"/usr/bin/python3 -I {signer} BLOCKED", prompt)
                 self.assertNotIn("d" * 32, prompt)  # the key stays in the signer file
                 self.assertNotIn("ASTRA_DELIVERY_V1", prompt)
 
@@ -71,6 +72,8 @@ class AdapterPromptTests(unittest.TestCase):
                 signer = adapter.write_signer(self.session(name, "writer"), WRITER)
                 prompt = adapter.build_prompt(WRITER, signer)
                 self.assertIn(f"/usr/bin/python3 -I {signer} <pr number> <40-hex head sha>", prompt)
+                self.assertIn("branch astra/t-1", prompt)
+                self.assertIn(f"/usr/bin/python3 -I {signer} <DECISION_REQUIRED|BLOCKED|STALLED>", prompt)
                 self.assertNotIn("e" * 32, prompt)
                 self.assertIn("Never merge", prompt)
                 legacy = adapter.build_prompt({**BASE, "schema_version": 1})
@@ -91,6 +94,10 @@ class AdapterPromptTests(unittest.TestCase):
                 line = run_signer(delivery_signer, "12", "f" * 40).stdout.strip()
                 self.assertEqual(host.verify_pin(host_row(WRITER), line), {"kind": "DELIVERY", "pr": 12, "head": "f" * 40})
                 self.assertNotEqual(run_signer(delivery_signer, "12", "HEAD").returncode, 0)
+                for signer, packet in ((review_signer, REVIEWER), (delivery_signer, WRITER)):
+                    blocked = run_signer(signer, "STALLED").stdout.strip()
+                    self.assertEqual(host.verify_pin(host_row(packet), blocked), {"kind": "BLOCKER", "blocker": "STALLED"})
+                    self.assertNotEqual(run_signer(signer, "GIVE_UP").returncode, 0)
                 # Another session's key does not verify.
                 with self.assertRaises(host.HostError):
                     host.verify_pin(host_row({**WRITER, "delivery_nonce": "0" * 32}), line)

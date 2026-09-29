@@ -8,7 +8,8 @@ These are the host builder wrappers and adapters. The host operator imported the
 | `astra-*-adapter` | `/opt/astra/libexec/astra-*-adapter` (launch contract v2) |
 
 Program mode (`docs/PROGRAM_MODE.md` §4.2) changes `build_prompt` and adds `write_signer`:
-- `write_signer` puts a private `signer.py` (0600) in the 0700 session directory. It holds the packet's `review_nonce` or `delivery_nonce` and prints the session's signed marker line (`ASTRA_REVIEW_V1 ... mac=` or `ASTRA_DELIVERY_V1 ... mac=`). The host verifies the MAC at reap.
+- `write_signer` puts a private `signer.py` (0600) in the 0700 session directory. It holds the packet's `review_nonce` or `delivery_nonce` and prints the session's signed marker line: `ASTRA_REVIEW_V1 ... mac=`, `ASTRA_DELIVERY_V1 ... mac=`, or for either role `ASTRA_BLOCKED_V1 kind=... launch=... mac=`. The host verifies the MAC at reap, and refuses to release a keyed session without one of these lines.
+- the writer prompt names the task branch `astra/<task id>`; deliveries from any other branch are refused.
 - a schema v2 `REVIEWER` packet gets read-only review instructions and the command that prints its verdict line. A reviewer packet without a valid nonce is refused before any session starts (`FAILED_PRESTART`).
 - a schema v2 writer gets the command that prints its delivery line; a schema v1 writer keeps the unsigned legacy line.
 - the prompt names only the signer path, never the key.

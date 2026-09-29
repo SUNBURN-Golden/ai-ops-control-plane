@@ -207,6 +207,8 @@ flowchart TD
   - adapter는 세션 디렉터리(0700) 안에 서명 도구 `signer.py`(0600)를 둔다. 모델은 이 도구를 실행해 나온 한 줄을 그대로 올린다.
   - 판정 줄: `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...> depth=<A1|A2> contract_change=<NO|YES> mac=<HMAC-SHA256>`
   - 전달 줄: `ASTRA_DELIVERY_V1 pr=<n> head=<sha> mac=<HMAC-SHA256>`
+  - 차단 줄(작성자와 리뷰어 모두): `ASTRA_BLOCKED_V1 kind=<DECISION_REQUIRED|BLOCKED|STALLED> launch=<launch id> mac=<HMAC-SHA256>`
+  - **서명되지 않은 글은 어떤 세션도 해제하지 못한다.** host는 키가 있는 세션을 서명된 줄 없이 해제하지 않는다. 그래서 다른 레인이 `BLOCKED` 글을 올리거나 진짜 판정 줄을 고쳐도, 판정을 버리고 리뷰를 다시 뽑게 만들 수 없다.
   - 키는 공개되지 않는다. 그래서 다른 레인은 이 줄을 만들거나 고칠 수 없다. 작성자도 리뷰 판정을 만들 수 없고, 다른 작업의 전달 줄을 옮겨 써도 검증되지 않는다.
 - **host 고정 (write-once)**
   - host `reap`이 저장된 packet의 키로 MAC을 검증한다.
@@ -219,8 +221,9 @@ flowchart TD
   - 판정을 낸 레인은 서로 달라야 하고, 그 작업의 작성자 레인(host 기록)이 아니어야 한다.
   - PR에 올라온 글이나 control record의 `reviews[]`는 세지 않는다.
 - **판정 없이 끝난 리뷰어**
-  - 판정 없이 끝난 리뷰어는 차단 댓글(BLOCKED 등)을 evidence로 reap한다. 운영자가 reconcile할 수도 있다. 그다음 같은 슬롯을 attempt+1로 다시 발송한다.
-  - 그 review id로 올라온 판정이 PR에 이미 있으면, 차단 댓글로 reap할 수 없다. 판정을 버리지 못하게 하기 위해서다.
+  - 판정 없이 끝난 리뷰어는 자기 서명 도구로 만든 차단 줄을 evidence로 reap한다. 운영자가 reconcile할 수도 있다. 그다음 같은 슬롯을 attempt+1로 다시 발송한다.
+  - 다시 발송은 슬롯과 head마다 세션 3번까지다(`MAX_REVIEW_SESSIONS`). 그 뒤는 `REVIEW_RETRIES_EXHAUSTED`로 운영자가 본다.
+  - 새 attempt의 launch id가 host에 이미 있으면(예: 운영자의 never-admitted 기록) 그 id를 건너뛴다.
 
 ## 5. 질문 경로와 작은 설계 예외
 
@@ -264,10 +267,16 @@ adapter의 `status.json`은 참고용이다.
   - 그 댓글은 이번 시도의 host 예약 시각 이후에 쓰여야 한다(`status`의 `reserved_at`).
   - 서명된 전달 줄은 정확히 하나여야 한다.
 - 전달 줄이면 host가 검증한 뒤 PR 번호와 head를 고정한다(§4.2). 리뷰와 merge-check은 이 host 고정값만 쓴다.
-- **PR 하나는 작업 하나의 전달물이다.** 다른 작업이 이미 고정한 PR을 전달하면 host가 거부한다. 거부하지 않으면 그 PR의 실제 작성자가 두 번째 작업의 "비작성자" 리뷰어가 될 수 있다.
+- **PR 하나는 작업 하나의 전달물이다.** 이것을 두 겹으로 막는다. 막지 않으면 그 PR의 실제 작성자가 두 번째 작업의 "비작성자" 리뷰어가 될 수 있다.
+  - 전달 PR은 그 작업의 브랜치 `astra/<task id 소문자>`에서 와야 한다. PR의 head 브랜치는 만든 뒤 바꿀 수 없으므로, 다른 작업의 PR은 이 조건을 통과할 수 없다.
+  - 다른 작업이 이미 고정한 PR은 host가 거부한다.
+- program mode의 노드는 PR로만 끝난다(`deliverable_mode: PR`). PR이 아닌 산출물은 서명·고정할 방법이 없어서 plan 검증에서 거부한다.
 - 고정 뒤 PR head가 바뀌면 리뷰를 발송하지 않는다. 작성자가 다시 전달해야 한다.
 - 새 시도는 이전 시도의 전달과 리뷰를 이어받지 않는다.
-- 작업 소유 레인(owner lane)은 host 기록의 첫 작성자 세션 레인이다.
+- 작업 소유 레인(owner lane)은 host 기록의 첫 작성자 세션 레인이다. control record의 값은 쓰지 않는다.
+- reap이 어느 작업의 세션을 해제하는지는 이슈의 task key와 host materialization으로 정한다. control record의 `task_id`는 쓰지 않는다.
+- `start`는 plan commit을 envelope를 다시 쓰기 직전에만 올린다. 작업이 바쁘거나 빈 레인이 없어서 멈춘 `start`는 plan을 바꾸지 않는다.
+- 기록이 `SUBMITTING`이나 `UNKNOWN`이어도 host가 그 요청을 `FAILED_PRESTART`나 `RECONCILED`로 막아 둔 상태라면, `start`는 새 attempt로 재개한다.
 - **의존 노드**
   - `start`와 merge-check은 `depends_on` 노드가 DONE인지 기계적으로 확인한다.
   - DONE은 그 노드에 고정된 전달 PR이 전달된 head 그대로 병합된 경우다. PR이 없는 노드는 이슈가 completed로 닫힌 경우다.
@@ -507,11 +516,16 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
     - 레인 토큰이 우회할 수 없는 branch protection을 건다.
   - 이것은 User 결정 사항이다(M4, §12).
 - **CURSOR:** M3 결정에 따라 systemd 없는 adapter(`adapters/cursor/`)로 바꿨다. 이 adapter는 v2 packet을 stdin으로 받고, 서명 도구를 쓰며, 모든 프로세스가 helper의 launch 아래에 있다. 그래서 program mode 순서의 마지막 레인으로 선택된다. 호스트 설치와 자격 검증(P3) 전에는 host `enabled_builders`와 preflight가 막는다.
+- **세션 키는 그 세션의 모델이 읽을 수 있다:** 서명 도구 파일은 그 레인 UID 소유(0600)다. 그래서 리뷰 대상 PR 안의 prompt injection이 리뷰어 모델에게 키를 출력하게 만들 수 있다. 키가 새면 그 세션의 판정을 위조할 수 있다.
+  - 막는 방법: 키를 레인이 읽을 수 없는 별도 UID의 서명 helper에 두고, 레인은 실행만 하게 한다. wrapper가 packet에서 키를 떼어 그 helper에 넘긴다.
+  - 이것은 M4(레인 신원)와 함께 호스트 작업으로 한다.
 - **레인 UID 정지 확인의 전제:** 이 확인은 세 가지를 전제한다.
   - helper의 PID namespace가 `/proc`의 namespace와 같다(`NSpid` 1단계).
   - 레인 UID에 subuid/subgid 범위가 없다.
   - 레인 프로세스는 helper의 launch에서 시작된다.
   - 앞의 두 가지는 reap마다 확인하고, 맞지 않으면 거부한다. 세 번째는 supervisor 가져오기(P3)에서 확인한다.
+  - subuid/subgid는 `/etc/subuid`와 `/etc/subgid`만 읽는다. NSS나 libsubid로 범위를 주는 호스트라면 그 설정이 없음을 P3에서 확인한다.
+  - 레인 UID로 cron, at 같은 예약 실행이 없어야 한다(P3 확인). helper의 트리 밖에서 시작된 프로세스라도 helper와 같은 namespace라면 보이지만, 레인이 예약을 걸 수 없어야 운영 전제가 성립한다.
 - **동시성 상향:** 동시 세션이 1개에서 4개로 늘어, 실패도 동시에 여러 건 날 수 있다. ledger, boundary, 제품별 직렬화는 그대로 유지한다.
 - **Routine API와 실행 한도:** API는 실험 기능이다. 사건 유실이나 실행 거절이 생길 수 있어 지연을 보장하지 않는다(§8.1). 상태 기반 실행과 STALE 표시로 안전하게 멈추게 한다.
 - **스스로 끝나지 않는 세션:** 그 레인만 막힌다(§3.3). 운영자가 처리한다.

@@ -46,6 +46,8 @@ REVIEW_PIN_RE = re.compile(r"ASTRA_REVIEW_V1 review=([0-9a-f]{24}) head=([0-9a-f
                            r"verdict=(PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED) depth=(A[0-3]) "
                            r"contract_change=(NO|YES) mac=([0-9a-f]{64})")
 DELIVERY_PIN_RE = re.compile(r"ASTRA_DELIVERY_V1 pr=([1-9][0-9]{0,9}) head=([0-9a-f]{40}) mac=([0-9a-f]{64})")
+BLOCKER_PIN_RE = re.compile(r"ASTRA_BLOCKED_V1 kind=(DECISION_REQUIRED|BLOCKED|STALLED) launch=([0-9a-f]{24}) "
+                            r"mac=([0-9a-f]{64})")
 OPERATOR_ONLY = {"init", "reconcile", "migrate", "materialize-resolve"}
 MATERIALIZE_STATES = ("SUBMITTING", "CREATED", "UNKNOWN", "ABANDONED")
 CLEAN_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
@@ -218,16 +220,31 @@ def pin_mac(nonce, fields):
 
 
 def verify_pin(row, line):
-    """Verify a session-signed marker line against the stored packet. None pins nothing."""
+    """Verify a session-signed marker line against the stored packet.
+
+    A session whose packet carries a signing key is released only with one of its own
+    signed lines; None ("nothing pinned") is left for keyless legacy packets.
+    """
+    packet = parse_json(row["packet"])
+    key = packet.get("review_nonce" if row["role"] == "REVIEWER" else "delivery_nonce")
     if line is None:
+        if key is not None:
+            raise HostError("this session signs its markers; a signed line is required to release it")
         return {"kind": "NONE"}
     if not isinstance(line, str) or len(line) > 512:
         raise HostError("invalid pin line")
-    packet = parse_json(row["packet"])
-    if row["role"] == "REVIEWER":
+    blocker = BLOCKER_PIN_RE.fullmatch(line)
+    if blocker:
+        kind, launch, mac = blocker.groups()
+        if launch != packet["launch_request_id"]:
+            raise HostError("blocker pin does not name this session's launch")
+        fields = ("ASTRA_BLOCKED_V1", launch, kind)
+        pin = {"kind": "BLOCKER", "blocker": kind}
+        nonce = key
+    elif row["role"] == "REVIEWER":
         match, nonce = REVIEW_PIN_RE.fullmatch(line), packet.get("review_nonce")
         if not match:
-            raise HostError("a reviewer pin must be exactly one ASTRA_REVIEW_V1 line")
+            raise HostError("a reviewer pin must be exactly one ASTRA_REVIEW_V1 or ASTRA_BLOCKED_V1 line")
         review, head, verdict, depth, change, mac = match.groups()
         if review != packet.get("review_request_id") or head != packet.get("head_sha"):
             raise HostError("review pin does not name this session's review request and head")
@@ -237,7 +254,7 @@ def verify_pin(row, line):
     else:
         match, nonce = DELIVERY_PIN_RE.fullmatch(line), packet.get("delivery_nonce")
         if not match:
-            raise HostError("a writer pin must be exactly one ASTRA_DELIVERY_V1 line")
+            raise HostError("a writer pin must be exactly one ASTRA_DELIVERY_V1 or ASTRA_BLOCKED_V1 line")
         pr, head, mac = match.groups()
         fields = ("ASTRA_DELIVERY_V1", packet["launch_request_id"], pr, head)
         pin = {"kind": "DELIVERY", "pr": int(pr), "head": head}
