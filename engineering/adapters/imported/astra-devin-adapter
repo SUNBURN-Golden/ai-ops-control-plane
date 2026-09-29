@@ -146,7 +146,8 @@ SIGNER_TEMPLATE = """\
 # never print, copy or quote this file. Run it with /usr/bin/python3 -I <this file> ...
 import hashlib, hmac, re, sys
 KEY, KIND, BOUND, REQUEST = {key!r}, {kind!r}, {bound!r}, {request!r}
-BLOCKERS = ("DECISION_REQUIRED", "BLOCKED", "STALLED")
+# A reviewer escalates with the DECISION_REQUIRED verdict, so its blockers are only BLOCKED/STALLED.
+BLOCKERS = ("BLOCKED", "STALLED") if KIND == "REVIEW" else ("DECISION_REQUIRED", "BLOCKED", "STALLED")
 
 
 def mac(fields):
@@ -259,8 +260,9 @@ def build_prompt(packet, signer=None):
         "approved task scope. Investigate, implement, test/fix/retest, and",
         "report evidence in the worktree.",
         *delivery,
-        "If blocked, post DECISION_REQUIRED, BLOCKED or STALLED with the reason",
-        "and end the session. Never merge.",
+        *([] if signer is not None else ["If blocked, post DECISION_REQUIRED, BLOCKED or STALLED with the reason",
+                                         "and end the session."]),
+        "Never merge.",
         *common,
     ])
 

@@ -73,6 +73,7 @@ class AdapterPromptTests(unittest.TestCase):
                 prompt = adapter.build_prompt(WRITER, signer)
                 self.assertIn(f"/usr/bin/python3 -I {signer} <pr number> <40-hex head sha>", prompt)
                 self.assertIn("branch astra/t-1", prompt)
+                self.assertNotIn("If blocked, post DECISION_REQUIRED", prompt)  # only signed blockers count
                 self.assertIn(f"/usr/bin/python3 -I {signer} <DECISION_REQUIRED|BLOCKED|STALLED>", prompt)
                 self.assertNotIn("e" * 32, prompt)
                 self.assertIn("Never merge", prompt)
@@ -98,6 +99,10 @@ class AdapterPromptTests(unittest.TestCase):
                     blocked = run_signer(signer, "STALLED").stdout.strip()
                     self.assertEqual(host.verify_pin(host_row(packet), blocked), {"kind": "BLOCKER", "blocker": "STALLED"})
                     self.assertNotEqual(run_signer(signer, "GIVE_UP").returncode, 0)
+                # A reviewer escalates only through the verdict; a writer may block on a decision.
+                self.assertNotEqual(run_signer(review_signer, "DECISION_REQUIRED").returncode, 0)
+                decision = run_signer(delivery_signer, "DECISION_REQUIRED").stdout.strip()
+                self.assertEqual(host.verify_pin(host_row(WRITER), decision)["blocker"], "DECISION_REQUIRED")
                 # Another session's key does not verify.
                 with self.assertRaises(host.HostError):
                     host.verify_pin(host_row({**WRITER, "delivery_nonce": "0" * 32}), line)
@@ -298,12 +303,23 @@ class CursorLaneTests(unittest.TestCase):
         result, _ = self.run_supervisor(self.job(), git_code=1)
         self.assertEqual(result["outcome"], "FAILED_PRESTART")  # no provider session can exist yet
         self.assertEqual(self.calls(), [])
+        self.reset_job_dirs()
+        job = self.job()
+        Path(job["prompt_file"]).unlink()
+        result, _ = self.run_supervisor(job)
+        self.assertEqual(result["outcome"], "FAILED_PRESTART")  # the prompt is read before any chat exists
+        self.assertEqual(self.calls(), [])
         for mode in ("chat-fails", "bad-chat"):
             with self.subTest(mode=mode):
                 (self.root / "mode").write_text(mode)
                 self.reset_job_dirs()
                 result, _ = self.run_supervisor(self.job())
                 self.assertEqual(result["outcome"], "UNKNOWN")  # a provider session may exist
+
+    def test_setup_finishes_inside_the_adapter_wait(self):
+        self.assertLess(self.supervisor.CLONE_TIMEOUT + self.supervisor.CHAT_TIMEOUT, self.adapter.RESULT_WAIT)
+        text = (CURSOR / "astra-cursor-supervisor").read_text()
+        self.assertIn('"--filter=blob:none"', text)
 
     def test_no_launch_secret_reaches_any_process_argument(self):
         packet = {**REVIEWER, "builder_id": "CURSOR"}

@@ -7,8 +7,9 @@ session (setsid), so it outlives the adapter, the wrapper and the launching
 job. When it ends, the host init (tini) reaps it. It is the durable owner of
 one Cursor CLI run:
 
-1. clone the repository into the per-request worktree. A failure here is a
-   definite prestart failure, because no provider session exists yet;
+1. clone the repository into the per-request worktree (blob-less, bounded) and
+   read the prompt. A failure here is a definite prestart failure, because no
+   provider session exists yet;
 2. create the provider chat and persist `cursor-cli:<chat id>` as CONFIRMED.
    From the chat request on, any failure is UNKNOWN, because a provider
    session may exist;
@@ -35,6 +36,8 @@ CONFIG = Path("/etc/astra/cursor-lane.json")
 GIT = "/usr/bin/git"
 CHAT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,159}")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+CLONE_TIMEOUT = 45  # seconds
+CHAT_TIMEOUT = 40   # seconds; with the clone, under the adapter's 100 s result wait
 
 
 def child_env():
@@ -76,17 +79,20 @@ def supervise(job, cli, env):
     result_file, status_file = session_dir / "result.json", session_dir / "status.json"
     started = time.time()
     try:
-        subprocess.run([GIT, "clone", "--no-hardlinks", "--quiet", "--",
+        # Blob-less partial clone, bounded so the adapter (RESULT_WAIT 100 s) always sees
+        # FAILED_PRESTART or CONFIRMED: clone + chat stay under CLONE_TIMEOUT + CHAT_TIMEOUT.
+        subprocess.run([GIT, "clone", "--filter=blob:none", "--no-hardlinks", "--quiet", "--",
                         f"https://github.com/{job['repository']}.git", str(worktree)],
-                       check=True, capture_output=True, timeout=900, env=env, cwd=str(session_dir),
+                       check=True, capture_output=True, timeout=CLONE_TIMEOUT, env=env, cwd=str(session_dir),
                        stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
+        prompt = Path(job["prompt_file"]).read_text(encoding="utf-8")
+    except (OSError, ValueError, subprocess.SubprocessError):
         write_state(result_file, {"outcome": "FAILED_PRESTART", "session_id": None,
-                                  "reason": "repository clone failed before any provider session"})
+                                  "reason": "repository clone or prompt failed before any provider session"})
         write_state(status_file, {"state": "EXITED", "phase": "clone", "started": started, "ended": time.time()})
         return 0
     try:
-        created = subprocess.run([cli, "create-chat"], check=True, capture_output=True, text=True, timeout=90,
+        created = subprocess.run([cli, "create-chat"], check=True, capture_output=True, text=True, timeout=CHAT_TIMEOUT,
                                  env=env, cwd=str(worktree), stdin=subprocess.DEVNULL)
         chat = created.stdout.strip()
         if not CHAT.fullmatch(chat):
@@ -101,7 +107,6 @@ def supervise(job, cli, env):
     write_state(result_file, {"outcome": "CONFIRMED", "session_id": session_id})
     write_state(status_file, {"state": "RUNNING", "session_id": session_id, "supervisor_pid": os.getpid(),
                               "started": started})
-    prompt = Path(job["prompt_file"]).read_text(encoding="utf-8")
     argv = [cli, "--print", "--force", "--trust", "--output-format", "json", "--model", job["model"],
             "--resume", chat, "--workspace", str(worktree), prompt]
     returncode = None

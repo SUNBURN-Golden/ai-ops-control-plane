@@ -519,8 +519,10 @@ class ProgramModeTests(unittest.TestCase):
         self.assertIn("differs from the envelope", reasons)
         self.assertIn("0 of 2 required", reasons)       # the floor still comes from the plan
         self.assertIn("Astra gate ARCHITECTURE", reasons)
-        with self.assertRaisesRegex(cp.ControlPlaneError, "differs from the envelope"):
-            prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
+        # D2: review restores the envelope from the host record and the plan instead of wedging.
+        prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
+        self.assertEqual(self.gh.issues[issue]["body"], body)
+        self.assertNotIn("differs from the envelope", self.reasons(issue))
 
     def test_r5_one_pr_cannot_be_the_delivery_of_two_tasks(self):
         self.gh.contents[PLAN1] = plan([node("n1"), node("n2")])
@@ -596,6 +598,16 @@ class ProgramModeTests(unittest.TestCase):
         with self.assertRaisesRegex(cp.ControlPlaneError, "exactly one signed"):
             prog.reap(issue, writer["launch_request_id"], self.comment_url(issue, both))
         self.assertEqual(self.record(issue)["launch_state"], "CONFIRMED")
+
+    def test_d1_a_reviewer_escalation_is_a_verdict_never_a_retry(self):
+        issue, _ = self.released_writer()
+        review = self.launch_review(issue)
+        with self.assertRaisesRegex(cp.ControlPlaneError, "escalates with the DECISION_REQUIRED verdict"):
+            prog.reap(issue, review["launch_request_id"], self.blocked(issue, review, "DECISION_REQUIRED"))
+        prog.reap(issue, review["launch_request_id"], self.post_review(7, review, verdict="DECISION_REQUIRED"))
+        self.assertIn("returned DECISION_REQUIRED", self.reasons(issue))
+        again = prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
+        self.assertEqual(again["status"], "REVIEW_EXISTS")  # the slot is answered, not re-rolled
 
     def test_review_retries_are_bounded(self):
         issue, _ = self.released_writer()

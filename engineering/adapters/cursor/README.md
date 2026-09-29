@@ -15,7 +15,7 @@ The lane follows the same contract as the DEVIN, GROK_BUILD and GLM lanes (`../i
 2. It checks the qualified configuration, the CLI digest, the account fields and the exact model.
 3. It creates the 0700 session directory and the private signer (`signer.py`, 0600), and writes `prompt.txt` and `job.json` (0600).
 4. It starts the supervisor in its own session and waits for `result.json`.
-5. The supervisor clones the repository into the per-request worktree. A clone failure is `FAILED_PRESTART`.
+5. The supervisor clones the repository into the per-request worktree (blob-less partial clone, 45 s cap) and reads the prompt. A failure here is `FAILED_PRESTART`.
 6. It runs `create-chat` and persists `cursor-cli:<chat>` as `CONFIRMED`. Any failure from the chat request on is `UNKNOWN`.
 7. It runs the agent on that chat to completion, then writes `status.json`. That file is informational only: `reap` uses lane UID quiescence.
 8. Every lane process descends from the helper's launch. There is no systemd user unit, so the quiescence precondition holds.
@@ -35,6 +35,6 @@ The preflight report carries `harness: CURSOR_CLI` and the exact `model`, which 
 - Give the lane account git read access to the target repositories.
 - Install these three files and the configuration, and register the wrapper's digest.
 - Qualify the CLI flags used by the supervisor on the installed version: `status --format json`, `models`, `create-chat`, `--print --force --trust --output-format json --model --resume --workspace`.
-- Run one diagnostic canary.
+- Run one diagnostic canary. It must show that the Cursor CLI leaves no process behind under the lane UID after the session ends (otherwise `reap` never passes), and that the clone plus `create-chat` finish inside the adapter's 100 s wait.
 
 `SHA256SUMS` holds the digests of these reviewed sources.

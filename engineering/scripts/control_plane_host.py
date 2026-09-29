@@ -238,6 +238,8 @@ def verify_pin(row, line):
         kind, launch, mac = blocker.groups()
         if launch != packet["launch_request_id"]:
             raise HostError("blocker pin does not name this session's launch")
+        if row["role"] == "REVIEWER" and kind == "DECISION_REQUIRED":
+            raise HostError("a reviewer escalates with the DECISION_REQUIRED verdict, not a blocker")
         fields = ("ASTRA_BLOCKED_V1", launch, kind)
         pin = {"kind": "BLOCKER", "blocker": kind}
         nonce = key

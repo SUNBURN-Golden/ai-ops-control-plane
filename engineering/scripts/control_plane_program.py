@@ -620,8 +620,11 @@ def prepare_review(issue_number: int, slot: int, packet_path: Path,
     delivery = pin_of(writer, "DELIVERY")
     if delivery is None:
         raise ProgramError("review waits for a host-pinned ASTRA_DELIVERY_V1 of the released current writer attempt")
-    if (issue.get("body") or "") != rendered_body(issue, plan, node, mstatus, writer["lane"]):
-        raise ProgramError("task issue body differs from the envelope rendered from the host-recorded plan")
+    body = rendered_body(issue, plan, node, mstatus, writer["lane"])
+    if (issue.get("body") or "") != body:
+        # The envelope is fully determined by the host record and the plan: restore it, never trust it.
+        api._request("PATCH", f"/issues/{issue_number}", {"body": body})
+        issue = {**issue, "body": body}
     comment, record = control_record(api, cfg, issue_number)
     if record is None:
         raise ProgramError("task has no control record")
@@ -869,7 +872,8 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     if delivery is None or (delivery["pr"], delivery["head"]) != (pr_number, head):
         reasons.append("the host-pinned delivery of the current writer attempt does not name this PR head")
     elif (issue.get("body") or "") != rendered_body(issue, plan, node, mstatus, writer["lane"]):
-        reasons.append("task issue body differs from the envelope rendered from the host-recorded plan")
+        reasons.append("task issue body differs from the envelope rendered from the host-recorded plan "
+                       "(operation=review restores it)")
     labels = {label.get("name") for label in issue.get("labels", [])}
     if labels & BLOCKING_LABELS:
         reasons.append(f"unresolved blocker labels: {sorted(labels & BLOCKING_LABELS)}")

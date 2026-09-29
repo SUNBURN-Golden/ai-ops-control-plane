@@ -223,6 +223,12 @@ flowchart TD
 - **판정 없이 끝난 리뷰어**
   - 판정 없이 끝난 리뷰어는 자기 서명 도구로 만든 차단 줄을 evidence로 reap한다. 운영자가 reconcile할 수도 있다. 그다음 같은 슬롯을 attempt+1로 다시 발송한다.
   - 다시 발송은 슬롯과 head마다 세션 3번까지다(`MAX_REVIEW_SESSIONS`). 그 뒤는 `REVIEW_RETRIES_EXHAUSTED`로 운영자가 본다.
+  - 리뷰어의 차단 줄은 BLOCKED와 STALLED만 된다. 리뷰어가 사람의 결정이 필요하다고 보면 판정 `DECISION_REQUIRED`로 남긴다. 그 판정은 merge-check을 막고 질문 경로로 간다. 서명 도구와 host 모두 리뷰어의 `DECISION_REQUIRED` 차단 줄을 거부한다. 그래서 질문이 "판정 없음"으로 바뀌어 다시 뽑히지 않는다.
+  - **운영자 주의(가려진 판정):** 리뷰어 세션이 끝났는데 reap할 서명 줄이 없으면, reconcile 전에 두 가지를 확인한다.
+    - 그 리뷰의 수정 기록(GraphQL `userContentEdits`)
+    - 세션 디렉터리의 `output.log`
+    - 같은 계정의 다른 레인이 진짜 판정 줄을 지웠을 수 있다. 판정이 FAIL이었으면 reconcile하지 말고 작성자 재개(REVIEW_FEEDBACK)로 처리한다.
+    - 강화안: host가 레인 세션 디렉터리에서 서명 줄을 직접 수집한다(`--collect`).
   - 새 attempt의 launch id가 host에 이미 있으면(예: 운영자의 never-admitted 기록) 그 id를 건너뛴다.
 
 ## 5. 질문 경로와 작은 설계 예외
@@ -275,6 +281,7 @@ adapter의 `status.json`은 참고용이다.
 - 새 시도는 이전 시도의 전달과 리뷰를 이어받지 않는다.
 - 작업 소유 레인(owner lane)은 host 기록의 첫 작성자 세션 레인이다. control record의 값은 쓰지 않는다.
 - reap이 어느 작업의 세션을 해제하는지는 이슈의 task key와 host materialization으로 정한다. control record의 `task_id`는 쓰지 않는다.
+- 이슈 본문은 host 기록과 plan으로 정해진다. 본문이 바뀌어 있으면 `operation=review`가 원래 envelope로 되돌린다. merge-check은 읽기만 하고, 본문이 다르면 준비 안 됨으로 보고한다. 메모는 본문이 아니라 댓글로 남긴다.
 - `start`는 plan commit을 envelope를 다시 쓰기 직전에만 올린다. 작업이 바쁘거나 빈 레인이 없어서 멈춘 `start`는 plan을 바꾸지 않는다.
 - 기록이 `SUBMITTING`이나 `UNKNOWN`이어도 host가 그 요청을 `FAILED_PRESTART`나 `RECONCILED`로 막아 둔 상태라면, `start`는 새 attempt로 재개한다.
 - **의존 노드**
