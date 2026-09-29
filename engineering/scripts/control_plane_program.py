@@ -612,9 +612,6 @@ def prepare_review(issue_number: int, slot: int, packet_path: Path,
     api = api_for(cfg)
     issue, plan, node, mstatus = task_context(api, cfg, issue_number)
     tid = task_id_for(plan["program"], node["id"])
-    floor = node["audit_floor"]
-    if REQUIRED_REVIEWS[floor] < slot:
-        raise ProgramError(f"audit floor {floor} does not require review slot {slot}")
     rows = task_rows(cfg, tid)
     writer = current_writer(rows)
     delivery = pin_of(writer, "DELIVERY")
@@ -623,8 +620,12 @@ def prepare_review(issue_number: int, slot: int, packet_path: Path,
     body = rendered_body(issue, plan, node, mstatus, writer["lane"])
     if (issue.get("body") or "") != body:
         # The envelope is fully determined by the host record and the plan: restore it, never trust it.
+        # This runs before the floor check, so an A0 task (no review slot) is repaired too.
         api._request("PATCH", f"/issues/{issue_number}", {"body": body})
         issue = {**issue, "body": body}
+    floor = node["audit_floor"]
+    if REQUIRED_REVIEWS[floor] < slot:
+        raise ProgramError(f"audit floor {floor} does not require review slot {slot}")
     comment, record = control_record(api, cfg, issue_number)
     if record is None:
         raise ProgramError("task has no control record")

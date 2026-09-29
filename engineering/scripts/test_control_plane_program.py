@@ -599,6 +599,17 @@ class ProgramModeTests(unittest.TestCase):
             prog.reap(issue, writer["launch_request_id"], self.comment_url(issue, both))
         self.assertEqual(self.record(issue)["launch_state"], "CONFIRMED")
 
+    def test_an_a0_task_body_is_repaired_too(self):
+        self.gh.contents[PLAN1] = plan([node(floor="A0")])
+        issue, _ = self.released_writer()
+        body = self.gh.issues[issue]["body"]
+        self.gh.issues[issue]["body"] = body + "\n\nA note someone added to the body."
+        with self.assertRaisesRegex(cp.ControlPlaneError, "does not require review slot 1"):
+            prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
+        self.assertEqual(self.gh.issues[issue]["body"], body)
+        check = prog.merge_check(issue, 7)
+        self.assertTrue(check["ready"], check["reasons"])  # A0: no review, and the envelope is back
+
     def test_d1_a_reviewer_escalation_is_a_verdict_never_a_retry(self):
         issue, _ = self.released_writer()
         review = self.launch_review(issue)

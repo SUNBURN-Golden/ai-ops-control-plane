@@ -74,7 +74,7 @@ Wait for the run to finish (a few seconds) and read its outcome before acting on
 | 12 | All required reviews for the head are released and any verdict is `FAIL` | Post `REVIEW_FEEDBACK` linking the reviews, then `start` (resume) |
 | 13 | A verdict is `DECISION_REQUIRED` or `contract_change=YES` | Question path (§4) |
 | 14 | All required reviews PASS for the head | `merge-check`. If ready and M1 is delegated, merge through the workflow with `sha=<head>`. If ready and M1 is not delegated, label `ready-for-merge`, post `READY_FOR_MERGE head=<sha>` on the PR, and notify the User (§5) with that head; the User merges with that exact head. If not ready, post the reasons once per head. |
-| 14a | `merge-check` reports "task issue body differs" | `review` with slot 1 (it restores the envelope; an answered slot returns `REVIEW_EXISTS`), then `merge-check` again |
+| 14a | `merge-check` reports "task issue body differs" | `review` with slot 1 (it restores the envelope; an answered slot returns `REVIEW_EXISTS`, an A0 task reports that no slot is required), then `merge-check` again |
 | 15 | Label `ready-for-merge` is present but the PR head is no longer the `READY_FOR_MERGE head=` it was given | Remove the label and post `READY_FOR_MERGE_WITHDRAWN head=<new sha>`; rows 9–14 apply to the new head. |
 
 ## 4. Question path (Opus → Astra → User)
