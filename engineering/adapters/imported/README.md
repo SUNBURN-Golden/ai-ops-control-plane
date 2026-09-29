@@ -23,5 +23,5 @@ The keys stay secret only while they stay out of process arguments and environme
 **Quiescence probe (`--quiescence`).** Every wrapper routes `--quiescence` to its adapter, which runs as the lane identity:
 - The adapter sends `kill(-1, SIGSTOP)` to every process of the lane UID. This cannot race a fork: the kernel aborts a fork that sees the pending stop.
 - It lists what remains from `/proc`, then sends `SIGCONT`.
-- It prints `{"status": "OK", "live": [...]}` and refuses to run as root.
+- It prints `{"status": "OK", "live": [...]}`. It runs only as its own lane account (`LANE_USER`): never as root, the control identity or another lane.
 - The host combines this census with its own outside scan. It uses both before a reap, and before accepting an adapter's `FAILED_PRESTART`, because the builder UID can write the adapter's result files.

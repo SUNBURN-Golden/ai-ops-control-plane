@@ -32,6 +32,7 @@ GROK_BIN = Path("/opt/astra/libexec/grok")
 SUPERVISOR = Path("/opt/astra/libexec/astra-grok-supervisor")
 WORKTREE_ROOT = Path("/opt/astra/worktrees/grokbuild")
 STATE_ROOT = WORKTREE_ROOT / ".sessions"
+LANE_USER = "astra-builder-grokbuild"  # the only identity the quiescence census may run as
 IDENTITY = ("repository", "task_id", "task_revision", "builder_id",
             "launch_request_id", "attempt_id")
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -414,7 +415,12 @@ def census(kill=os.kill, proc="/proc"):
     listing below is complete. Only the lane identity may run it (never root).
     """
     uid = os.getuid()
-    if uid == 0 or os.geteuid() != uid:
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        name = None
+    if uid == 0 or os.geteuid() != uid or name != LANE_USER:
+        # Only this lane's own identity: never root, the control identity or another lane.
         print(json.dumps({"status": "FAIL", "reason": "census must run as the lane identity"}))
         return 1
     me, live = os.getpid(), []

@@ -541,6 +541,7 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
     - 레인별 GitHub 신원을 쓰되 병합과 관리자 권한을 주지 않는다.
     - 레인 토큰이 우회할 수 없는 branch protection을 건다.
   - 이것은 User 결정 사항이다(M4, §12).
+  - 같은 이유로 필수 체크 확인은 두 가지를 전제한다. check run은 CI가 만들어야 하고, 레인 토큰에는 `checks:write`가 없어야 한다. 기본 브랜치 보호가 그 체크들을 요구해야 한다(`mergeable_state: clean`에 반영). 레인 토큰으로 가짜 `success` check run을 만들 수 있으면 이 확인은 증거가 되지 못한다. M4에서 함께 정한다.
 - **prestart 재시도:** `FAILED_PRESTART`(예: 45초 안에 끝나지 않는 CURSOR clone)는 다음 실행에서 다시 시도된다. 이 재시도에는 별도 상한이 없고, host `max_launches_per_24h`만 막는다. program mode에서는 이 값을 정해 둔다(P3).
 - **CURSOR:** M3 결정에 따라 systemd 없는 adapter(`adapters/cursor/`)로 바꿨다. 이 adapter는 v2 packet을 stdin으로 받고, 서명 도구를 쓰며, 모든 프로세스가 helper의 launch 아래에 있다. 그래서 program mode 순서의 마지막 레인으로 선택된다. 호스트 설치와 자격 검증(P3) 전에는 host `enabled_builders`와 preflight가 막는다.
 - **세션 키는 그 세션의 모델이 읽을 수 있다:** 서명 도구 파일은 그 레인 UID 소유(0600)다. 그래서 리뷰 대상 PR 안의 prompt injection이 리뷰어 모델에게 키를 출력하게 만들 수 있다. 키가 새면 그 세션의 판정을 위조할 수 있다.

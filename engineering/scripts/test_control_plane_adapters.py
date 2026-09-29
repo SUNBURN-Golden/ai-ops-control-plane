@@ -183,6 +183,7 @@ class AdapterPromptTests(unittest.TestCase):
             signals = []
             with self.subTest(adapter=name), patch.object(adapter.os, "getuid", return_value=1030), \
                  patch.object(adapter.os, "geteuid", return_value=1030), \
+                 patch.object(adapter.pwd, "getpwuid", return_value=MagicMock(pw_name=adapter.LANE_USER)), \
                  patch("sys.stdout", new_callable=io.StringIO) as stdout:
                 self.assertEqual(adapter.census(kill=lambda pid, sig: signals.append((pid, sig)), proc=str(proc)), 0)
                 self.assertEqual(json.loads(stdout.getvalue()), {"status": "OK", "live": [51, 53]})
@@ -193,6 +194,7 @@ class AdapterPromptTests(unittest.TestCase):
         proc = self.fake_proc({61: "garbage"})
         signals = []
         with patch.object(adapter.os, "getuid", return_value=1040), patch.object(adapter.os, "geteuid", return_value=1040), \
+             patch.object(adapter.pwd, "getpwuid", return_value=MagicMock(pw_name=adapter.LANE_USER)), \
              patch("sys.stdout", new_callable=io.StringIO) as stdout:
             self.assertEqual(adapter.census(kill=lambda pid, sig: signals.append(sig), proc=str(proc)), 1)
         self.assertEqual(json.loads(stdout.getvalue())["status"], "FAIL")
@@ -200,6 +202,14 @@ class AdapterPromptTests(unittest.TestCase):
         with patch.object(adapter.os, "getuid", return_value=0), patch.object(adapter.os, "geteuid", return_value=0), \
              patch("sys.stdout", new_callable=io.StringIO) as stdout:
             self.assertEqual(adapter.census(kill=lambda pid, sig: self.fail("root must never signal -1")), 1)
+        # Nor the control identity or another lane: only this adapter's own lane account.
+        for account in ("astra-control", "astra-builder-devin", None):
+            getpwuid = (MagicMock(side_effect=KeyError(1010)) if account is None
+                        else MagicMock(return_value=MagicMock(pw_name=account)))
+            with self.subTest(account=account), patch.object(adapter.os, "getuid", return_value=1010), \
+                 patch.object(adapter.os, "geteuid", return_value=1010), patch.object(adapter.pwd, "getpwuid", getpwuid), \
+                 patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(adapter.census(kill=lambda pid, sig: self.fail("a foreign identity signalled -1")), 1)
 
 
 FAKE_CLI = r"""#!/usr/bin/python3 -I
