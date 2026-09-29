@@ -1,4 +1,6 @@
-# Program mode — 설계 초안 v0
+# Program mode — 설계 초안 v1
+
+v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. 대응표는 §14에 있다.
 
 상태: **설계 초안**. 코드, 호스트, 활성화 기록은 바꾸지 않는다. 이 문서는
 `RUNTIME_PATHS`에 들어 있지 않다. 구현 전에 Astra A3 설계 감사와 User 승인이
@@ -24,13 +26,25 @@
 | D8 | 구조를 전부 만든 뒤 모든 제품을 한 번에 돌리고, 안 되는 부분을 고친다 |
 | 기존 | 단일 개인 토큰 (2026-09-28, `CONTROL_PLANE_RUNTIME.md` 기록) |
 
-**미결정 M1 (병합 위임):**
-- 기본값은 현행 그대로 User만 병합한다.
-- 선택안: 아래 조건을 모두 만족하면 현장 소장이 병합한다.
-  - 리뷰가 PASS 또는 PASS_WITH_NOTES이고, 막는 문제가 0이다.
-  - 현재 HEAD의 CI가 녹색이다.
-  - A3가 아니다.
-  - 충돌이 없다.
+**User 준비 현황 (2026-09-29):** 다음이 끝났다고 보고받았다.
+- claude.ai에 Slack을 연결했다.
+- Grok Build, GLM, Cursor의 구독과 로그인을 마쳤다.
+- Claude에 로그인했다.
+
+호스트의 실제 설치와 자격 검증 여부는 P3에서 따로 확인한다.
+
+**미결정 M1 (병합 실행 위임):** M1은 **병합을 실행하는 주체만** 바꾼다. 병합 조건은 바꾸지 않는다.
+- **기본값:** 현행 그대로 User가 병합한다.
+- **선택안:** 현장 소장이 `operation=merge`를 요청한다. 병합은 기계 계층이 계산한 결과가 참일 때만 일어난다.
+  1. 기계 계층이 그 PR의 정확한 HEAD에 대해 `DISPATCH.md` §18 `READY_FOR_MERGE`를 **전부** 계산한다. 여기에는 다음이 포함된다.
+     - 리뷰 깊이
+     - MILESTONE·RELEASE·ARCHITECTURE Astra 게이트
+     - 계약 변경 판정
+     - 제품별 병합 전제조건
+     - 검증 게이트
+  2. 결과가 참일 때만 GitHub merge를 부른다. 이때 `expectedHeadSha`를 그 HEAD로 고정한다.
+  3. 계산할 수 없는 조건이 있으면 준비 안 됨으로 본다. 예를 들어 제품 문서에 기계로 읽을 수 없는 병합 규칙이 있는 경우다. 이때는 User에게 넘긴다.
+  4. 현장 소장이 판정 결과를 텍스트로 주장해서는 병합할 수 없다(§18: "computed, never accepted as arbitrary text").
 
 ## 1. 역할
 
@@ -53,23 +67,25 @@
 
 ```mermaid
 flowchart TD
-  P[제품 Program Board<br/>승인된 계획 DAG] --> N{다음 ready 노드}
-  N --> L[select-lane builder]
-  L --> T[지시서 이슈 작성<br/>envelope v4, BUILDER_ID=선택 레인]
-  T --> D[operation=dispatch]
-  D --> B[빌더 세션] --> PR[PR]
-  PR --> CI{CI 녹색?}
-  CI -- 아니오 --> B
-  CI -- 예 --> R[select-lane reviewer<br/>빌더 레인 제외]
-  R --> RV[operation=review]
-  RV --> V{판정}
-  V -- FAIL --> B
+  P[제품 계획 DAG] --> N{다음 ready 노드<br/>WIP 상한 이내}
+  N --> MZ[operation=materialize<br/>결정적 TASK_ID로 이슈 1개]
+  MZ --> L[select-lane builder]
+  L --> D[operation=dispatch]
+  D --> B[빌더 세션] --> DL[PR + ASTRA_DELIVERY_V1<br/>세션 스스로 종료]
+  DL --> X1[operation=reap<br/>슬롯 반환, owner 유지]
+  X1 --> CI{CI 녹색?}
+  CI -- 아니오 --> RS[재개: 같은 owner lane<br/>attempt+1]
+  RS --> B
+  CI -- 예 --> R[select-lane reviewer<br/>owner 제외]
+  R --> RV[operation=review<br/>head_sha 고정]
+  RV --> X2[판정 후 reap]
+  X2 --> V{판정}
+  V -- FAIL --> RS
   V -- DECISION_REQUIRED --> Q[§5 질문 경로]
-  V -- PASS --> M[병합: User 또는 M1]
-  M --> X[operation=reap<br/>세션 종료 확인 후 정리]
-  X --> P
-  B -- DECISION_REQUIRED --> Q
-  Q --> B
+  Q --> RS
+  V -- PASS --> RM{READY_FOR_MERGE<br/>DISPATCH §18 전체}
+  RM -- 참 --> M[병합: User 또는 M1<br/>expectedHeadSha 고정]
+  M --> P
 ```
 
 - 제품끼리는 동시에 진행한다.
@@ -77,44 +93,106 @@ flowchart TD
 
 ## 3. 레인 선택 (기계 계산)
 
-**레인 상태의 원천은 host ledger다.**
-- 활성 행은 SUBMITTING, CONFIRMED, UNKNOWN 상태의 행이다.
-- 레인별 활성 수는 `json_extract(packet, '$.builder_id')`로 센다. 스키마를 바꿀 필요는 없다.
+### 3.1 작업 소유권과 세션 점유를 분리한다 (F1)
 
-**비어 있는 레인의 조건 (모두 만족):**
-1. runtime `enabled_builders`, host `enabled_builders`, 레인 자격 검증 기록이 모두 켜져 있다.
-2. 레인별 활성 수가 `max_active_per_lane` 미만이다. 이 값은 새 host policy 필드이고 기본값은 1이다.
-3. 전체 활성 수가 `max_active_sessions` 미만이다. D8(동시 개발)에 따라 이 값은 1에서 레인 수(4)로 올린다.
+- **작업 소유권(owner lane)**
+  - 작업을 처음 CONFIRMED한 빌더 레인이다. control record의 `owner_lane`에 기록한다.
+  - 작업이 끝날 때까지 바뀌지 않는다. 이는 `BUILDER_LANES.md`의 "다른 레인이 진행 중인 티켓을 가져가지 않는다"를 유지하는 것이다.
+- **세션 점유(slot)**
+  - host ledger의 활성 행이다(SUBMITTING, CONFIRMED, UNKNOWN).
+  - 세션 종료가 확인되면 **병합과 상관없이** 반환한다(§6).
+- **빌더 세션은 스스로 끝난다**
+  - 빌더는 PR과 `ASTRA_DELIVERY_V1` 댓글(PR URL, HEAD SHA)을 남기면 세션을 끝낸다.
+  - 막히면 `DECISION_REQUIRED`, `BLOCKED` 또는 `STALLED`를 남기고 끝낸다.
+  - 세션을 끝낼 수 없거나, 끝났는지 확인할 수 없는 제공자는 program mode 레인 자격을 얻지 못한다(P3).
+- **재개**
+  - 재개가 필요한 경우는 CI 실패, 리뷰 FAIL, 질문에 대한 답이 온 경우다.
+  - 같은 TASK_ID와 같은 owner lane으로 기존 명시적 재시도 절차를 밟는다(`expected_attempt_id = attempt_id + 1`).
+  - 이전 시도가 RECONCILED(§6)여야 한다. owner lane이 비어야 시작한다. 레인은 바꾸지 않는다.
+
+### 3.2 레인 상태와 선택
+
+**원천은 host ledger다.** ledger v2(§4.1)의 `lane`·`role` 열로 센다.
+
+**빈 레인의 조건 (모두 만족):**
+1. runtime `enabled_builders`, host `enabled_builders`, 레인 자격 기록이 모두 켜져 있다.
+2. 그 레인에 활성 행이 없다. `one_active_per_lane` 고유 인덱스가 원자적으로 강제한다(§4.1).
+3. 전체 활성 수가 `max_active_sessions` 미만이다. D8에 따라 1에서 4로 올린다.
 4. 그 레인의 host preflight가 PASS다.
 
-**선택 규칙**
-- `select-lane --role builder|reviewer --exclude <lane>...`는 순서표에서 조건을 만족하는 첫 레인을 반환한다.
-- 없으면 `NONE`을 반환하고, 현장 소장은 다음 사건 때 다시 시도한다.
+**선택:** `select-lane --role builder|reviewer --exclude <lane>...`는 순서표에서 조건을 만족하는 첫 레인을 반환한다. 없으면 `NONE`을 반환한다.
 
 **경합**
-- 선택은 권고값이다. 실제 강제는 host `launch`가 레인별 상한을 원자적으로 검사할 때 일어난다.
-- 두 발송이 같은 레인을 고르면, 나중 요청은 FAILED_PRESTART(`lane busy`)가 되고 자리를 차지하지 않는다.
-- 이 경우 현장 소장은 `TASK_REVISION`을 올리고 새 레인으로 지시서를 고친 뒤, 새 본문 해시로 발송한다.
+- 선택은 권고값이고, 강제는 host 입장 제어가 한다.
+- 같은 레인을 동시에 고르면 나중 요청은 FAILED_PRESTART(`lane busy`)가 되어 자리를 잡지 않는다.
+- 첫 시도(아직 CONFIRMED 없음)라면 현장 소장은 `TASK_REVISION`을 올리고 새 레인으로 지시서를 고친 뒤 다시 보낸다.
+- 재개는 owner lane을 기다린다.
 
-**불변**
-- 한 작업은 CONFIRMED 이후 레인을 바꾸지 않는다. 이는 `BUILDER_LANES.md`의 "다른 레인이 진행 중인 티켓을 가져가지 않는다"를 유지하는 것이다.
-- 재배정은 기존 재시도·fencing 절차만 쓴다.
+### 3.3 교착 방지 스케줄링 (F1)
+
+**레인 우선순위.** 레인이 비면 그 레인에 다음 순서로 일을 준다.
+1. 그 레인이 소유한 작업의 재개
+2. 그 레인이 맡을 수 있는 대기 중 리뷰
+3. 새 빌드
+
+**WIP 상한.** 프로그램 전체에서 "리뷰 대기 + 수정 대기" 작업 수가 `max_active_sessions` 이상이면 새 빌드를 시작하지 않는다. 먼저 비우고 나서 채운다.
+
+**교착이 생기지 않는 이유**
+- 모든 활성 슬롯은 스스로 끝나는 세션의 것이다(3.1). 따라서 병합을 기다리며 영구히 잡혀 있는 슬롯은 없다.
+- 리뷰와 재개는 새 빌드보다 먼저 슬롯을 받는다.
+- 제한은 하나 남는다. 세션이 RUNNING인 채로 끝나지 않으면 그 레인만 막힌다.
+  - Lane Board에 경고로 표시한다. 기준 시간은 기본 6시간이다.
+  - 운영자가 처리한다. 자동으로 끄지 않는다.
 
 ## 4. 리뷰 발송
 
-**새 workflow `operation=review`**
-- packet 종류는 REVIEW다. PR URL, 리뷰 대상 HEAD SHA, 작업 지시서 포인터, 리뷰 깊이를 담는다.
-- `review_request_id`를 키로 같은 host 입장 제어를 거친다. 절차는 `DISPATCH.md` §13의 NOT_STARTED→SUBMITTING→CONFIRMED/UNKNOWN을 코드로 구현한다.
-- 결과는 GitHub PR 리뷰로 남는다. 판정은 PASS, PASS_WITH_NOTES, FAIL, DECISION_REQUIRED 중 하나다. 리뷰어 레인, 세션, 대상 HEAD SHA를 함께 기록한다.
+### 4.1 host 예약 구조: ledger v2 (F2)
+
+기존 ledger는 `(repository, task)`마다 활성 행을 하나만 허용한다(`one_active_task`). 그래서 같은 작업의 리뷰 세션이 거부된다. v2는 역할별 예약으로 바꾼다.
+
+**새 열:**
+- `role`: `WRITER` 또는 `REVIEWER`
+- `lane`: builder_id
+- `review_key`: 리뷰어만 쓴다. `review_request_id`를 넣는다.
+
+기존 행은 `role=WRITER`, `lane=packet.builder_id`로 채운다.
+
+**고유 인덱스 (활성 상태 = SUBMITTING, CONFIRMED, UNKNOWN):**
+- `one_active_writer ON (repository, task) WHERE role='WRITER' AND active`: 작업당 작성자 1명을 유지한다.
+- `one_active_review ON (repository, task, review_key) WHERE role='REVIEWER' AND active`: 리뷰 요청당 1개다.
+- `one_active_per_lane ON (lane) WHERE active`: 레인당 세션 1개다(§3.2).
+
+**REVIEWER 입장 조건 (한 트랜잭션 안에서 검사):**
+- 같은 작업에 활성 WRITER 행이 없다. HEAD가 움직이는 중에는 리뷰하지 않는다.
+- `lane`이 작업의 `owner_lane`과 다르다. A2 이상에서 두 번째 리뷰어는 첫 리뷰어의 레인과도 다르다.
+- packet에 리뷰 대상 `head_sha`가 고정돼 있다.
+
+**WRITER 입장 조건 추가:**
+- 같은 작업에 활성 REVIEWER 행이 없다. 리뷰 중에 수정을 시작하지 않는다.
+
+**이전(migration)**
+- 운영자 전용 `migrate --to 2`로 한다.
+- 먼저 백업하고, 한 트랜잭션 안에서 열 추가, 기존 행 채우기, 인덱스 교체, `user_version=2` 설정을 한다.
+- 실패하면 원래대로 되돌린다. 빈 DB를 새로 만드는 방식은 금지다.
+
+### 4.2 review operation
+
+- 새 workflow `operation=review`의 packet 종류는 REVIEW다. PR URL, `head_sha`, 작업 지시서 포인터, 리뷰 깊이, `owner_lane`을 담는다.
+- 기록은 작업 이슈의 control record 안 `reviews[]`에 둔다. 각 항목은 `review_request_id`, `review_attempt_id`, lane, head_sha, 상태다. 상태는 `DISPATCH.md` §13의 NOT_STARTED→SUBMITTING→CONFIRMED/UNKNOWN을 따른다.
+- 결과는 GitHub PR 리뷰로 남긴다. 판정은 PASS, PASS_WITH_NOTES, FAIL, DECISION_REQUIRED 중 하나다. 레인, 세션, `head_sha`를 함께 적는다.
+- 리뷰어도 판정을 남기면 세션을 끝낸다. 슬롯은 §6으로 반환한다.
 
 **리뷰 깊이**
 - A1: 리뷰어 1명.
-- A2 이상: 2명. 두 번째는 빌더와 첫 리뷰어를 모두 제외한 첫 빈 레인이다.
-- A3: 여기에 Astra 게이트를 더한다.
+- A2 이상: 2명(4.1의 레인 조건).
+- A3와 명시 게이트(MILESTONE, RELEASE): Astra 게이트를 더한다.
 
 **남는 위험 (단일 토큰)**
-- 리뷰어가 읽기 전용이라는 점은 지시로만 보장되고, 권한으로 강제되지 않는다.
-- 보완책: 리뷰 도중 PR HEAD가 바뀌면 그 리뷰는 무효로 처리한다.
+- 리뷰어가 읽기 전용이라는 점은 지시로만 보장된다.
+- 보완책은 세 가지다.
+  - 리뷰 시작 시점과 판정 시점의 PR HEAD가 다르면 그 리뷰는 무효다.
+  - 판정은 `head_sha`에 묶인다.
+  - 리뷰 세션 동안 같은 작업의 WRITER 입장은 막힌다.
 
 ## 5. 질문 경로와 작은 설계 예외
 
@@ -148,16 +226,26 @@ flowchart TD
 **host `reap --launch-request-id <id> --evidence <URL>`**
 - runner가 sudo로 호출할 수 있는 새 명령이다. 인수 형식은 status와 같이 제한한다.
 - 아래가 모두 참일 때만 `RECONCILED`로 바꾼다. resolution은 `SESSION_TERMINAL_VERIFIED`다.
-  - 해당 행이 CONFIRMED다.
+  - 해당 행이 CONFIRMED다. WRITER와 REVIEWER 모두 해당한다.
   - 기록된 session id로 wrapper에 물었을 때 `TERMINAL`이다.
 - `RUNNING`이나 `UNKNOWN`이면 거부한다. 세션을 끄지는 않는다.
 - UNKNOWN 행이나 세션이 없는 경우는 지금처럼 운영자 전용 `reconcile`로 처리한다.
 
-**언제 호출하나**
-- 현장 소장은 다음 경우 `operation=reap`을 호출한다.
-  - 작업 PR이 병합되거나 닫혔을 때
-  - NON_CODE_EVIDENCE 작업이 합격했을 때
-- evidence는 합격 기록 URL이다.
+**언제 호출하나 (F1: 병합과 분리)**
+- 현장 소장은 세션이 산출물을 남긴 직후 `operation=reap`을 호출한다. PR 병합이나 종료를 기다리지 않는다. 산출물은 다음 중 하나다.
+  - `ASTRA_DELIVERY_V1`
+  - 리뷰 판정
+  - `DECISION_REQUIRED`
+  - `BLOCKED` 또는 `STALLED`
+  - NON_CODE_EVIDENCE 증거
+- evidence는 그 산출물의 URL이다.
+- 산출물이 있는데 wrapper가 `RUNNING`이라고 답하면, 다음 실행에서 다시 확인한다.
+- reap은 작업 소유권을 바꾸지 않는다. owner lane은 control record에 그대로 남는다.
+- **control record에 결과를 반영한다.**
+  - reap이 성공하면 해당 시도의 `launch_state`를 새 상태 `RELEASED`로 바꾼다. 리뷰 항목이면 `reviews[].state`를 바꾼다.
+  - 지금 코드는 CONFIRMED 기록에서 재시도를 거부한다. 재개(§3.1)는 **host가 `RECONCILED/SESSION_TERMINAL_VERIFIED`이고 기록이 `RELEASED`인 경우에만** 허용한다.
+  - 재개할 때 BUILDER_ID는 owner lane과 같아야 한다.
+  - CONFIRMED 상태의 재시도 거부는 그대로 유지한다.
 
 **규칙 변경**
 - 대상은 `CONTROL_PLANE_RUNTIME.md`의 "운영자만 reconcile" 규칙이다.
@@ -194,14 +282,58 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 | R3 coordinator-heartbeat | 매시간 | Sonnet 5.5 | 이슈 댓글·리뷰 판정·놓친 사건 수거 (GitHub 트리거가 이슈 댓글과 check run을 다루지 않음) |
 | R4 opus-consult | API 트리거 (현장 소장이 호출) | Opus | §5 질문 응답 |
 
-- **실행 규칙:** 각 실행은 `COORDINATOR_PLAYBOOK.md`(구현 PR에서 추가)의 결정표만 따른다.
-  1. 해당 제품의 Program Board와 사건을 읽는다.
-  2. 짧은 조치를 한 묶음만 한다.
-  3. 현황을 갱신한다.
-  4. 끝낸다.
-- **겹침 처리:** 두 실행이 겹쳐도 안전하다.
-  - 발송, 리뷰, 정리는 ai-ops workflow의 concurrency group과 control record로 멱등하다.
-  - Program Board 갱신에는 버전 표식을 두고 낙관적으로 처리한다.
+### 8.1 실행 규칙 (F5: 상태 기반)
+
+각 실행은 `COORDINATOR_PLAYBOOK.md`(구현 PR에서 추가)의 결정표만 따른다.
+
+**상태 기반(level-triggered)으로 동작한다.** 사건은 실행을 깨우는 신호일 뿐이다.
+1. 매 실행은 어떤 사건으로 깨어났든 다음을 GitHub 진실에서 **다시 계산**한다.
+   - 해당 프로그램의 계획
+   - control record
+   - PR과 리뷰 상태
+   - Lane Board
+2. 그 계산에서 나온 짧은 조치 한 묶음만 한다.
+3. 현황을 갱신한다.
+4. 끝낸다.
+
+**사건이 사라져도 상태가 어긋나지 않는다.** 사건 유실, 실행 거절, 실행 한도 초과는 진행을 늦출 뿐이다. 다음 실행이 같은 상태에서 이어받는다.
+
+**지연 보장은 없다.** v0의 "최대 1시간 지연" 문구는 철회한다.
+- Routines는 실행 한도에 따라 사건을 버리거나 실행을 거절할 수 있다.
+- heartbeat(R3)는 "결국 한 번은 실행된다"를 위한 장치다. 시간을 보장하지 않는다.
+
+**멈춤 감지**
+- 모든 실행은 Lane Board에 `last_coordinator_run`(시각, routine, 결과)을 남긴다.
+- 3시간 넘게 갱신이 없으면 Lane Board와 Slack 메시지에 `STALE`을 표시한다.
+- 한도 때문에 실행이 막혀 있으면 진행도 멈춘다. 이는 안전한 정지다. 반쪽짜리 상태 변경은 남지 않는다(8.2, 8.3).
+- 선택 사항으로 hosted 감시 workflow를 둘 수 있다. 시간당 1분, 월 약 $4.3이다. 별도 결정한다.
+
+### 8.2 작업 생성의 원자성 (F4)
+
+현장 소장은 작업 이슈를 **직접 만들지 않는다.**
+
+**새 workflow `operation=materialize`가 계획 노드를 작업으로 만든다.** 이 workflow는 기계 코드다.
+- 입력은 `program`, `plan_version`, `node_id`다.
+- `concurrency: materialize-<program>`로 한 프로그램 안의 생성을 직렬화한다.
+- **결정적 작업 키**
+  - `TASK_ID = <PROGRAM>-<NODE_ID>`다.
+  - 이슈 본문에 `ASTRA_TASK_KEY_V1 program=<p> plan=<v> node=<n>` 표식을 넣는다.
+  - 표식이 있는 이슈에는 라벨 `aiops-task`를 붙인다.
+- **생성 전 선점과 조회**
+  1. 대상 저장소에서 라벨 `aiops-task`의 이슈를 열린 것과 닫힌 것 모두 REST 목록으로 끝까지 읽는다. 검색 API는 반영이 늦을 수 있어 쓰지 않는다.
+  2. 같은 `(program, node)` 표식이 있으면 그 이슈를 돌려준다.
+  3. 없을 때만 만든다.
+- **응답이 유실되면** 다음 실행에서 조회 단계가 방금 만든 이슈를 찾는다. 같은 작업으로 복구된다.
+- **중복이 발견되면** 발송하지 않는다. 같은 키의 열린 이슈가 둘 이상이면 `DUPLICATE_TASK`로 멈추고 운영자에게 알린다. 낮은 번호를 정본으로 하자는 제안을 함께 남긴다.
+- **계획 버전 변경:** 노드 내용이 바뀌면 같은 이슈의 `TASK_REVISION`을 올린다. 새 이슈를 만들지 않는다. 표식의 `plan`만 갱신한다.
+
+**한 작업이 두 번 발송되지 않는다.** 설령 이슈가 둘 생겨도 막힌다.
+- host `one_active_writer`는 `(repository, task)` 단위다.
+- TASK_ID가 같으면 동시에 두 작성자가 생길 수 없다.
+
+### 8.3 기타
+
+- **겹침:** 발송, 리뷰, 정리, 병합, 생성은 모두 ai-ops workflow의 concurrency group과 control record·ledger로 멱등하다. Program Board는 표시일 뿐이고 원천이 아니다.
 - **규칙 변경:** AGENTS 머리말의 "NO STANDING ROUTINES / NO POLLING"을 D5·D8 범위에서 완화한다. 사건 기반 실행을 기본으로 하고, 매시간 heartbeat만 예외로 둔다.
 - **API 토큰:** Routine API 트리거는 실험 단계다(beta header). 토큰은 GitHub secret `ASTRA_COORDINATOR_ROUTINE_TOKEN`에 둔다.
 
@@ -231,8 +363,15 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 - `BUILDER_LANES.md`
   - `max_active_sessions=1`을 레인별 1개, 전체 4개로 바꾼다.
   - "진행 중 티켓을 다른 레인이 가져가지 않는다"는 유지한다.
-- `DISPATCH.md`: review operation과 reap 절차를 추가한다.
-- `CONTROL_PLANE_RUNTIME.md`: reap, per-lane 상한, `status --lanes`를 추가한다.
+- `DISPATCH.md`
+  - 추가한다: review operation, reap 절차, materialize 절차, owner lane과 재개 절차, 교착 방지 스케줄링.
+  - §18 `READY_FOR_MERGE`는 **바꾸지 않는다.** M1은 실행 주체만 바꾼다.
+- `CONTROL_PLANE_RUNTIME.md`: 추가한다.
+  - reap
+  - ledger v2와 `migrate --to 2`
+  - 레인 고유 인덱스
+  - `status --lanes`
+  - REVIEWER·WRITER 입장 조건
 - `TASK_GRAPH.md`: 기존 graph는 꺼 둔 채 유지하고, Program Board와의 관계를 적는다.
 
 `AGENTS.md`, `DISPATCH.md`, `CONTROL_PLANE_RUNTIME.md`는 `RUNTIME_PATHS`에 들어 있다. 그래서 구현 PR이 병합되면 새 감사와 활성화 재결합(rebind)이 끝날 때까지 발송이 멈춘다. D8(전부 만든 뒤 한 번에 실행)과 맞는 순서다.
@@ -242,7 +381,7 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 | 단계 | 내용 | 담당 | 게이트 |
 |---|---|---|---|
 | P1 | 이 설계 | Opus 초안 | Astra A3 설계 감사, User 승인 |
-| P2 | runtime/host 코드: select-lane, per-lane 상한, `status --lanes`, review, reap, wrapper v3, kix-commerce profile, §10 규칙 | Claude | 비작성자 리뷰, Astra A3, User 병합, activation rebind |
+| P2 | runtime/host 코드: ledger v2와 migrate, 레인·역할 입장 조건, select-lane, `status --lanes`, materialize, review, reap, merge(READY_FOR_MERGE 계산), wrapper v3, kix-commerce profile, §10 규칙. F1~F4 재현 테스트 포함 | Claude | 비작성자 리뷰, Astra A3, User 병합, activation rebind |
 | P3 | GROK_BUILD, GLM, CURSOR 설치·자격 검증(`qualify_lane` 7개 검사). GROK_BUILD·GLM wrapper 소스는 저장소에 없으므로 P2에서 작성하거나 호스트 기존본을 소스로 가져온다 | 그록봇(호스트), Claude(소스) | lane별 증거, User 승인 |
 | P4 | COORDINATOR_PLAYBOOK, Routines R1~R4, Slack·Program Board·Lane Board | Claude | 비작성자 리뷰 |
 | P5 | 제품별 Program Board 계획 | 현장 소장 초안, Opus 승인 | 문서 밖 항목은 §5 |
@@ -250,8 +389,8 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 
 ## 12. User가 직접 해야 하는 것
 
-- claude.ai Connectors에서 Slack을 연결한다. Routines가 Slack에 게시하는 데 필요하다.
-- 호스트 빌더 계정을 준비한다. Grok Build, GLM, Cursor 구독과 로그인이 필요하다.
+- ~~claude.ai Connectors에서 Slack 연결~~ 완료 (2026-09-29 보고).
+- ~~Grok Build, GLM, Cursor 구독과 로그인~~ 완료 (2026-09-29 보고). 호스트의 빌더 Unix 계정에 로그인됐는지는 P3에서 확인한다.
 - ChatGPT Astra가 Slack 결정 채널을 보고 GitHub에 답하도록 설정한다.
 - Routine API 토큰을 GitHub secret에 등록한다.
 - M1(병합 위임)을 결정한다.
@@ -260,6 +399,27 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 
 - **단일 토큰:** 역할 간 신원이 분리되지 않는다. 리뷰어의 읽기 전용도 강제되지 않는다(§4).
 - **동시성 상향:** 동시 세션이 1개에서 4개로 늘어, 실패도 동시에 여러 건 날 수 있다. ledger, boundary, 제품별 직렬화는 그대로 유지한다.
-- **Routine API:** 실험 기능이다. heartbeat가 최소 1시간이라 댓글 기반 단계는 최대 1시간 늦어질 수 있다.
+- **Routine API와 실행 한도:** API는 실험 기능이다. 사건 유실이나 실행 거절이 생길 수 있어 지연을 보장하지 않는다(§8.1). 상태 기반 실행과 STALE 표시로 안전하게 멈추게 한다.
+- **스스로 끝나지 않는 세션:** 그 레인만 막힌다(§3.3). 운영자가 처리한다.
+- **ledger v2 이전:** 운영자가 백업한 뒤 한 트랜잭션으로 수행한다. 실패하면 되돌린다.
 - **boundary 재고정:** ai-ops main 커밋마다 필요하다. 제품 저장소의 병합에는 필요 없다. 자동화는 별도 결정으로 한다.
 - **CONFIRMED 복구:** host는 CONFIRMED인데 GitHub finalize가 사라진 경우, 자동 복구가 없다(기존 Astra 노트). 현장 소장은 이 경우 멈추고 운영자에게 알린다.
+
+## 14. v0 A3 감사(FAIL) 대응
+
+v0 감사 대상 HEAD는 `892b189e39b961f9c82ffb129219d1a361c5a9ec`이다.
+
+| # | 지적 | 대응 | 위치 |
+|---|---|---|---|
+| F1 (P1) | 빌더 CONFIRMED 슬롯이 병합까지 남아, 네 레인이 모두 차면 리뷰 단계에서 교착된다 | 작업 소유권(owner lane)과 세션 점유(slot)를 분리했다. 산출물을 남긴 세션은 스스로 끝나고, 확인되면 병합 전에 reap한다. 재개는 같은 owner lane의 명시적 재시도로 한다. 재개와 리뷰를 새 빌드보다 먼저 하고, WIP 상한을 둔다 | §3.1, §3.3, §6 |
+| F2 (P1) | `(repository, task)` 단일 활성 행 때문에 같은 작업의 리뷰가 거부된다 | ledger v2를 도입했다(`role`, `lane`, `review_key`). 작성자 고유성, 리뷰 요청 고유성, 레인 고유성을 각각 인덱스로 둔다. REVIEWER 입장은 활성 WRITER가 없고 owner lane이 아닐 때만 허용하고, 그 반대도 막는다. 이전은 운영자가 백업 후 한 트랜잭션으로 한다 | §4.1 |
+| F3 (P1) | M1 병합 조건이 필수 승인을 빠뜨린다 | M1은 실행 주체만 위임한다. `DISPATCH.md` §18 `READY_FOR_MERGE` 전체를 기계적으로 계산한다. 여기에는 마일스톤·출시 게이트와 제품별 병합 전제조건이 포함된다. 병합은 `expectedHeadSha`로 고정한다. 계산할 수 없는 조건은 준비 안 됨으로 본다 | §0 M1 |
+| F4 (P2) | 겹친 현장 소장 실행이 같은 노드로 작업 이슈를 중복 생성한다 | 현장 소장은 이슈를 직접 만들지 않는다. `operation=materialize`가 프로그램 단위로 직렬화한다. 결정적 TASK_ID와 `ASTRA_TASK_KEY_V1` 표식을 쓰고, REST 목록 조회로 선점을 확인한 뒤 만든다. 응답이 유실되면 같은 이슈로 복구한다. 중복이 보이면 `DUPLICATE_TASK`로 멈춘다 | §8.2 |
+| F5 (노트) | "최대 1시간 지연"은 보장할 수 없고 사건이 유실될 수 있다 | 문구를 철회했다. 상태 기반 실행으로 유실을 무해하게 만들고, `last_coordinator_run`과 STALE 표시로 멈춤을 감지한다 | §8.1 |
+
+유지한 방향(감사에서 타당하다고 본 것):
+- 레인 선택은 기계적으로 계산한다.
+- Opus의 작은 예외 권한은 제한한다.
+- UNKNOWN은 운영자에게 남긴다.
+
+v1도 문서뿐이다. F1~F4의 재현 테스트는 P2 구현 PR에 포함하고, 그 PR에서 검증한다.
