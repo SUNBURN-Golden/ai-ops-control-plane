@@ -297,11 +297,14 @@ class Ledger:
         return {"status": "FOUND" if row else "NOT_FOUND", "launch_request_id": request,
                 "state": row["state"] if row else None}
 
-    def reconcile(self, request, session, evidence, *, no_session=False, sender_fenced=False):
+    def reconcile(self, request, session, evidence, *, no_session=False, sender_fenced=False,
+                  never_admitted=False):
         with self.inflight_lock(exclusive=True):
-            return self._reconcile(request, session, evidence, no_session=no_session, sender_fenced=sender_fenced)
+            return self._reconcile(request, session, evidence, no_session=no_session,
+                                   sender_fenced=sender_fenced, never_admitted=never_admitted)
 
-    def _reconcile(self, request, session, evidence, *, no_session=False, sender_fenced=False):
+    def _reconcile(self, request, session, evidence, *, no_session=False, sender_fenced=False,
+                   never_admitted=False):
         if not evidence_url(evidence):
             raise HostError("operator-verified terminal session and durable evidence URL required")
         if no_session:
@@ -309,10 +312,31 @@ class Ledger:
                 raise HostError("no-session reconciliation requires explicit sender fencing and no session ID")
         elif not isinstance(session, str) or not session.strip():
             raise HostError("terminal session ID is required")
+        if never_admitted and not no_session:
+            raise HostError("never-admitted reconciliation requires --no-session --sender-fenced")
+        if not isinstance(request, str) or not request.strip() or len(request) > 4096 or "\0" in request:
+            raise HostError("invalid launch_request_id")
         db = self.connect()
         try:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM launches WHERE request=?", (request,)).fetchone()
+            if never_admitted:
+                # The request never reached this ledger (e.g. the SUBMITTING write
+                # succeeded but launch never ran). Record a terminal tombstone so a
+                # late send of this request is refused (packet mismatch) and a
+                # retry can prove the prior attempt is fenced.
+                if row is not None:
+                    raise HostError("request is in the ledger; never-admitted reconciliation does not apply")
+                at = self.clock()
+                db.execute("INSERT INTO launches VALUES (?,?,?,?,?,?,?,?,?)",
+                           (request, "", "", "", "RECONCILED",
+                            canonical({"launch_request_id": request, "outcome": "UNKNOWN", "session_id": None,
+                                       "reason": "never admitted; operator-recorded fence"}),
+                            0, at, canonical({"resolution": "NEVER_ADMITTED", "session_id": None,
+                                              "sender_fenced": True, "terminal_evidence": evidence, "at": at})))
+                db.commit()
+                return {"status": "RECONCILED", "resolution": "NEVER_ADMITTED", "launch_request_id": request,
+                        "session_id": None, "evidence": evidence}
             if row is None or row["state"] not in ACTIVE:
                 raise HostError("no active reservation to reconcile")
             known = parse_json(row["result"]).get("session_id")
@@ -417,6 +441,8 @@ def main(argv=None):
     outcome.add_argument("--session-id")
     outcome.add_argument("--no-session", action="store_true")
     reconcile_parser.add_argument("--sender-fenced", action="store_true")
+    reconcile_parser.add_argument("--never-admitted", action="store_true",
+                                  help="record a request that never reached this ledger as fenced")
     args, packet = parser.parse_args(argv), None
     os.umask(0o077)
     try:
@@ -438,7 +464,8 @@ def main(argv=None):
             result = ledger.status(args.launch_request_id)
         else:
             result = ledger.reconcile(args.launch_request_id, args.session_id, args.evidence,
-                                      no_session=args.no_session, sender_fenced=args.sender_fenced)
+                                      no_session=args.no_session, sender_fenced=args.sender_fenced,
+                                      never_admitted=args.never_admitted)
         print(canonical(result))
         return 0
     except (HostError, OSError, sqlite3.Error, ValueError, TypeError, subprocess.SubprocessError) as exc:

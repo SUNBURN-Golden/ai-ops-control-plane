@@ -47,6 +47,7 @@ ALLOWED_LAUNCH_STATES = (
     "UNKNOWN",
 )
 HOST_COMMAND = ("/usr/bin/sudo", "-n", "-u", "astra-control", "/opt/astra/bin/astra-host-control")
+STATUS_PROBE_REQUEST = "0" * 24  # never produced by stable_id's sha256 prefix in practice
 LAUNCH_IDENTITY = ("repository", "task_id", "task_revision", "builder_id", "launch_request_id", "attempt_id")
 RUNTIME_PATHS = (
     "scripts/control_plane_graph_slack.py", "scripts/test_control_plane_graph_slack.py",
@@ -523,6 +524,14 @@ def host_preflight(builder_id: Optional[str]) -> None:
             continue
         reports.append(report)
 
+    # The explicit-retry fence depends on the read-only status command (and its
+    # sudoers entry); prove it answers before any dispatch relies on it.
+    try:
+        if host_request_state(STATUS_PROBE_REQUEST) is not None:
+            failures.append("status: probe request unexpectedly present in the host ledger")
+    except ControlPlaneError as exc:
+        failures.append(f"status: read-only host status command unavailable ({exc})")
+
     if failures:
         raise ControlPlaneError("host preflight failed: " + " | ".join(failures))
 
@@ -570,35 +579,49 @@ def host_request_state(launch_request_id: str) -> Optional[str]:
     return state
 
 
-def require_fenced_attempt(record: Dict[str, Any]) -> None:
-    # A new attempt is safe only when the prior one provably has no live sender:
-    # NOT_STARTED never consumed send authority, FAILED_PRESTART is a definite
-    # no-session outcome, and SUBMITTING/UNKNOWN need the host ledger to show an
-    # operator reconciliation or a definite prestart failure for that request.
+def require_fenced_attempt(record: Dict[str, Any]) -> str:
+    # A new attempt is safe only when the prior one provably has no live sender.
+    # The GitHub record is a projection; the host ledger decides: a definite
+    # prestart failure, an operator reconciliation, or (for a record that never
+    # consumed send authority) no reservation at all.
     state = record["launch_state"]
-    if state in {"NOT_STARTED", "FAILED_PRESTART"}:
-        return
     if state == "CONFIRMED":
         raise ControlPlaneError("retry refused: a CONFIRMED owner exists; reassignment is a separate fenced action")
     request = record.get("launch_request_id")
     if not isinstance(request, str) or not request:
         raise ControlPlaneError("control record has invalid launch_request_id")
     host_state = host_request_state(request)
-    if host_state not in {"RECONCILED", "FAILED_PRESTART"}:
+    if host_state in {"FAILED_PRESTART", "RECONCILED"}:
+        return host_state
+    if host_state is None and state == "NOT_STARTED":
+        return "NOT_FOUND"
+    if host_state == "CONFIRMED":
         raise ControlPlaneError(
-            f"retry refused: {state} attempt is not fenced (host state {host_state or 'NOT_FOUND'}); "
-            "reconcile it on the host first")
+            f"retry refused: the host ledger shows a CONFIRMED session for this request while the record says "
+            f"{state}; the owner is live, so do not retry or reconcile it")
+    if host_state is None:
+        raise ControlPlaneError(
+            f"retry refused: the {state} attempt never reached the host ledger; once no sender can still send it, "
+            "record it on the host with `reconcile --no-session --sender-fenced --never-admitted`")
+    raise ControlPlaneError(
+        f"retry refused: {state} attempt is not fenced (host state {host_state}); reconcile it on the host first")
+
+
+MAX_HISTORY_ERROR = 300
 
 
 def new_attempt_record(previous: Dict[str, Any], envelope: Dict[str, str], cfg: Dict[str, Any],
-                       attempt: int) -> Dict[str, Any]:
+                       attempt: int, fenced_by: str) -> Dict[str, Any]:
     record = new_control_record(envelope, cfg, attempt)
     history = previous.get("previous_attempts") or []
     if not isinstance(history, list):
         raise ControlPlaneError("control record previous_attempts must be a list")
     summary = {key: previous.get(key) for key in (
-        "attempt_id", "launch_request_id", "task_revision", "builder_id",
-        "launch_state", "owner_session_id", "last_error")}
+        "attempt_id", "claim_id", "launch_request_id", "task_revision", "builder_id",
+        "launch_state", "owner_session_id")}
+    # Bounded so repeated retries keep the record well inside GitHub's comment limit.
+    summary["last_error"] = str(previous.get("last_error"))[:MAX_HISTORY_ERROR] if previous.get("last_error") else None
+    summary["fenced_by_host_state"] = fenced_by
     record["previous_attempts"] = [*history, summary]
     return record
 
@@ -644,8 +667,8 @@ def prepare_dispatch(issue_number: int, packet_path: Path) -> None:
             # Explicit retry event: the dispatcher pinned the next attempt number,
             # so a repeated retry dispatch resolves to the new attempt instead of
             # creating another. Revision/builder come from the pinned envelope.
-            require_fenced_attempt(record)
-            record = new_attempt_record(record, envelope, cfg, requested_attempt)
+            fenced_by = require_fenced_attempt(record)
+            record = new_attempt_record(record, envelope, cfg, requested_attempt, fenced_by)
             api.update_comment(comment["id"], render_control_record(record))
         else:
             if requested_attempt is not None and requested_attempt != current_attempt:

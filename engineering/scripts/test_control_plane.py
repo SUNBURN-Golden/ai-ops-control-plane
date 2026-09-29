@@ -534,8 +534,9 @@ class PrepareDispatchReplayTests(unittest.TestCase):
         self.assertIn("expected_attempt_id=2", str(result["error"]))
 
     def test_explicit_retry_after_failed_prestart_starts_next_attempt(self):
-        failed = {**self.record, "launch_state": "FAILED_PRESTART", "last_error": "host max_active_sessions reached"}
-        result = self.run_prepare([self.comment(failed)], attempt=2)
+        failed = {**self.record, "launch_state": "FAILED_PRESTART", "last_error": "host max_active_sessions reached",
+                  "claim_id": "claim-1"}
+        result = self.run_prepare([self.comment(failed)], attempt=2, host_state="FAILED_PRESTART")
         self.assertIsNone(result["error"])
         fresh, submitting = self.written_records(result)
         self.assertEqual((fresh["attempt_id"], fresh["launch_state"]), (2, "NOT_STARTED"))
@@ -545,13 +546,13 @@ class PrepareDispatchReplayTests(unittest.TestCase):
         self.assertNotEqual(request, self.record["launch_request_id"])
         self.assertEqual(submitting["claim_id"], cp.stable_id("claim", "owner/repo", "T1", "1", 2))
         self.assertEqual(submitting["previous_attempts"], [{
-            "attempt_id": 1, "launch_request_id": "request-1", "task_revision": "1", "builder_id": "DEVIN",
-            "launch_state": "FAILED_PRESTART", "owner_session_id": None,
-            "last_error": "host max_active_sessions reached"}])
+            "attempt_id": 1, "claim_id": "claim-1", "launch_request_id": "request-1", "task_revision": "1",
+            "builder_id": "DEVIN", "launch_state": "FAILED_PRESTART", "owner_session_id": None,
+            "last_error": "host max_active_sessions reached", "fenced_by_host_state": "FAILED_PRESTART"}])
         packet = json.loads(result["packet"])
         self.assertEqual((packet["attempt_id"], packet["launch_request_id"]), (2, request))
         result["preflight"].assert_called_once_with("DEVIN")
-        result["host"].assert_not_called()
+        result["host"].assert_called_once_with(["status", "--launch-request-id", "request-1"])
 
     def test_repeated_retry_dispatch_resolves_to_the_same_attempt(self):
         second = {**self.record, "attempt_id": 2, "launch_request_id": "request-2",
@@ -580,11 +581,12 @@ class PrepareDispatchReplayTests(unittest.TestCase):
 
     def test_retry_of_unresolved_attempt_requires_host_fencing(self):
         for state in ("SUBMITTING", "UNKNOWN"):
-            for host_state in (None, "SUBMITTING", "UNKNOWN", "CONFIRMED"):
+            for host_state, message in ((None, "never reached the host ledger"), ("SUBMITTING", "not fenced"),
+                                        ("UNKNOWN", "not fenced"), ("CONFIRMED", "owner is live")):
                 with self.subTest(state=state, host_state=host_state):
                     result = self.run_prepare([self.comment({**self.record, "launch_state": state})],
                                               attempt=2, host_state=host_state)
-                    self.assertIn("not fenced", str(result["error"]))
+                    self.assertIn(message, str(result["error"]))
                     result["host"].assert_called_once_with(["status", "--launch-request-id", "request-1"])
                     result["api"].update_comment.assert_not_called()
                     result["preflight"].assert_not_called()
@@ -597,6 +599,33 @@ class PrepareDispatchReplayTests(unittest.TestCase):
                     self.assertEqual(json.loads(result["packet"])["attempt_id"], 2)
                     self.assertEqual(self.written_records(result)[-1]["previous_attempts"][0]["launch_state"], state)
 
+    def test_record_claims_are_checked_against_the_host_ledger(self):
+        # A record saying nothing was sent is only a projection; the host decides.
+        allowed = (("NOT_STARTED", None), ("NOT_STARTED", "RECONCILED"), ("FAILED_PRESTART", "FAILED_PRESTART"),
+                   ("FAILED_PRESTART", "RECONCILED"))
+        refused = (("NOT_STARTED", "SUBMITTING", "not fenced"), ("NOT_STARTED", "CONFIRMED", "owner is live"),
+                   ("FAILED_PRESTART", None, "never reached"), ("FAILED_PRESTART", "UNKNOWN", "not fenced"))
+        for state, host_state in allowed:
+            with self.subTest(state=state, host_state=host_state):
+                result = self.run_prepare([self.comment({**self.record, "launch_state": state})],
+                                          attempt=2, host_state=host_state)
+                self.assertIsNone(result["error"])
+                self.assertEqual(self.written_records(result)[-1]["previous_attempts"][0]["fenced_by_host_state"],
+                                 host_state or "NOT_FOUND")
+        for state, host_state, message in refused:
+            with self.subTest(state=state, host_state=host_state):
+                result = self.run_prepare([self.comment({**self.record, "launch_state": state})],
+                                          attempt=2, host_state=host_state)
+                self.assertIn(message, str(result["error"]))
+                result["api"].update_comment.assert_not_called()
+                result["preflight"].assert_not_called()
+
+    def test_retry_history_error_text_is_bounded(self):
+        failed = {**self.record, "launch_state": "FAILED_PRESTART", "last_error": "x" * 5000}
+        result = self.run_prepare([self.comment(failed)], attempt=2, host_state="FAILED_PRESTART")
+        summary = self.written_records(result)[-1]["previous_attempts"][0]
+        self.assertEqual(len(summary["last_error"]), cp.MAX_HISTORY_ERROR)
+
     def test_host_status_for_another_request_is_rejected(self):
         with patch.object(cp, "host_call", return_value={"launch_request_id": "other", "state": "RECONCILED"}):
             with self.assertRaisesRegex(cp.ControlPlaneError, "identity mismatch"):
@@ -608,7 +637,7 @@ class PrepareDispatchReplayTests(unittest.TestCase):
     def test_retry_rebinds_pinned_revision_and_builder_but_not_task(self):
         failed = {**self.record, "launch_state": "FAILED_PRESTART"}
         self.envelope.update(TASK_REVISION="2", BUILDER_ID="GLM")
-        result = self.run_prepare([self.comment(failed)], attempt=2)
+        result = self.run_prepare([self.comment(failed)], attempt=2, host_state="FAILED_PRESTART")
         self.assertIsNone(result["error"])
         packet = json.loads(result["packet"])
         self.assertEqual((packet["task_revision"], packet["builder_id"], packet["attempt_id"]), ("2", "GLM", 2))
@@ -823,15 +852,30 @@ class HostPreflightTests(unittest.TestCase):
             "worktree_root": "/work/devin",
         }
 
-    def run_preflight(self, reports, cfg=None, builder="DEVIN"):
+    def run_preflight(self, reports, cfg=None, builder="DEVIN", status=None):
+        queue = list(reports) if isinstance(reports, list) else [reports]
+        status = status if status is not None else {"launch_request_id": cp.STATUS_PROBE_REQUEST, "state": None}
+        def host(args):
+            item = status if args[0] == "status" else queue.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
         with patch.object(cp, "load_config", return_value=cfg or self.cfg), \
-             patch.object(cp, "host_call",
-                          side_effect=reports if isinstance(reports, list) else [reports]), \
+             patch.object(cp, "host_call", side_effect=host) as call, \
              contextlib.redirect_stdout(io.StringIO()):
             cp.host_preflight(builder)
+        return call
 
     def test_valid_report_passes(self):
-        self.run_preflight(self.report)
+        call = self.run_preflight(self.report)
+        call.assert_any_call(["status", "--launch-request-id", cp.STATUS_PROBE_REQUEST])
+
+    def test_unavailable_or_inconsistent_status_command_fails_preflight(self):
+        for status in (cp.ControlPlaneError("host control exited 1"),
+                       {"launch_request_id": "other", "state": None},
+                       {"launch_request_id": cp.STATUS_PROBE_REQUEST, "state": "RECONCILED"}):
+            with self.subTest(status=status), self.assertRaisesRegex(cp.ControlPlaneError, "status"):
+                self.run_preflight(self.report, status=status)
 
     def test_metadata_faults_fail(self):
         faults = (

@@ -140,8 +140,13 @@ class CursorQualificationTests(unittest.TestCase):
                                 helper_sha256=hashlib.sha256(Path(host.__file__).read_bytes()).hexdigest(),
                                 allowed_repositories=["owner/repo"])
                 cfg = {"enabled_builders": ["CURSOR"], "repository": "owner/repo"}
+                def host_reply(args, returned=returned):
+                    # The central preflight also probes the read-only status command.
+                    if args[0] == "status":
+                        return {"launch_request_id": args[2], "state": None}
+                    return returned
                 with patch.object(cp, "load_config", return_value=cfg), \
-                     patch.object(cp, "host_call", return_value=returned):
+                     patch.object(cp, "host_call", side_effect=host_reply):
                     if report != good:
                         with self.assertRaisesRegex(cp.ControlPlaneError, "provenance"):
                             cp.host_preflight("CURSOR")

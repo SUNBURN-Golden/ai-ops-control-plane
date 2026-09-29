@@ -152,7 +152,8 @@ Under TASK_KEY serialization:
 
 Before any external launch, atomically consume that action and persist
 LAUNCH_STATE=SUBMITTING. Only the executor holding that permission may send.
-NOT_STARTED therefore proves no send was authorized; resume only the same request.
+NOT_STARTED therefore proves no send was authorized; resume the same request, or
+start a new attempt only through the explicit retry event below.
 SUBMITTING after a crash is potentially sent: reconcile or mark UNKNOWN; never
 automatically launch again. Timeout/claim expiry alone does not authorize takeover.
 
@@ -162,9 +163,11 @@ Provider proof of no session permits FAILED_PRESTART; a configured retry event
 may reauthorize that same task only after the prior executor is fenced.
 The runtime retry event is a dispatch whose `expected_attempt_id` equals the
 record's ATTEMPT_ID + 1. It creates a new CLAIM_ID/LAUNCH_REQUEST_ID, keeps the
-prior attempt in `previous_attempts`, and is admitted only from NOT_STARTED,
-FAILED_PRESTART, or SUBMITTING/UNKNOWN that the host ledger reports as
-RECONCILED or FAILED_PRESTART. A CONFIRMED owner is never displaced.
+prior attempt in `previous_attempts`, and is admitted only when the host
+ledger reports the prior request as FAILED_PRESTART or RECONCILED (or, for a
+NOT_STARTED record, not present). A CONFIRMED owner is never displaced; a
+request that never reached the host is fenced first with the operator's
+never-admitted reconciliation.
 Ambiguous outcome records UNKNOWN and blocks relaunch until provider evidence
 or explicit User resolution proves the safe next step. Slack response loss
 never undoes a confirmed GitHub owner record.

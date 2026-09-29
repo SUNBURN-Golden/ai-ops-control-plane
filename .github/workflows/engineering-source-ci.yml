@@ -52,6 +52,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for target in $(python3 -c 'import json; print(" ".join(json.load(open("engineering/.github/control-plane/projects.json"))))'); do
+          # Assign first so a failing loader stops the step (set -e ignores $(...) inside for).
+          targets=$(python3 -c 'import json; print(" ".join(json.load(open("engineering/.github/control-plane/projects.json"))))')
+          [[ -n "$targets" ]]
+          for target in $targets; do
             ASTRA_TARGET_REPOSITORY="$target" python3 engineering/scripts/control_plane.py validate-repo
           done

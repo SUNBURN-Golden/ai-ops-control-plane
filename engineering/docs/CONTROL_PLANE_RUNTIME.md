@@ -45,7 +45,7 @@ runner의 sudo 허용은 고정 helper의 `launch`, 정확한 세 builder별
 `preflight --builder-id ...` command, 읽기 전용
 `status --launch-request-id <24자리 hex>` command만으로 제한한다. `status`는 sudoers에서
 그 인수 형식만 허용하고(가능하면 정규식), ledger를 바꾸지 않는다. 이 항목이 없으면
-UNKNOWN/SUBMITTING 재시도만 fail-closed로 거부된다. shell, 임의 Python, 임의 인수,
+host-preflight와 모든 재시도가 fail-closed로 거부된다. shell, 임의 Python, 임의 인수,
 `init`, `reconcile`, root 실행을 허용하지 않는다. builder에는 이 sudo 권한이 없다.
 관리자만 DB를 최초 `init`한다. 손실된 DB를 빈 DB로 재생성해 복구하지 않는다.
 원 ledger와 외부 session을 대사하기 전 dispatch를 재개하지 않는다.
@@ -90,12 +90,22 @@ UNKNOWN에는 추정 session을 넣지 않는다. 살아 있는 launch helper와
 NOT_STARTED → SUBMITTING 순서를 그대로 밟는다. 같은 재시도 dispatch를 다시 보내면
 번호가 이미 현재 시도이므로 세 번째 시도가 생기지 않는다.
 
-| 이전 시도 상태 | 재시도 허용 조건 |
+GitHub record는 projection이므로 재시도마다 host `status`로 이전 request를 확인한다.
+
+| 이전 시도 상태 (record) | 재시도 허용 조건 (host ledger) |
 |---|---|
-| NOT_STARTED | 항상 (송신 권한을 쓰지 않았음) |
-| FAILED_PRESTART | 항상 (session 없음이 확정됨) |
-| SUBMITTING / UNKNOWN | host `status`가 그 request를 RECONCILED 또는 FAILED_PRESTART로 보고할 때만 |
+| NOT_STARTED | request 없음, FAILED_PRESTART 또는 RECONCILED |
+| FAILED_PRESTART | FAILED_PRESTART 또는 RECONCILED |
+| SUBMITTING / UNKNOWN | RECONCILED 또는 FAILED_PRESTART |
 | CONFIRMED | 거부 — 살아 있는 owner를 밀어내지 않는다 |
+
+host가 CONFIRMED를 보고하면 record가 finalize 결과를 잃은 것이다. owner가 살아 있으므로
+재시도·reconcile하지 않는다. SUBMITTING/UNKNOWN인데 host에 request가 없으면
+(SUBMITTING 기록 후 launch 전 중단, sudo 거부 등) 그 request는 host에 도달하지 않았다.
+어떤 sender도 더 보낼 수 없음을 operator가 확인한 뒤
+`reconcile --launch-request-id <id> --no-session --sender-fenced --never-admitted --evidence <URL>`로
+tombstone을 남긴다. 이후 그 request의 늦은 송신은 host가 거부하고, 재시도는 RECONCILED를 본다.
+`host-preflight`는 읽기 전용 `status`가 응답하는지(sudoers 포함)도 확인한다.
 
 재시도 envelope의 TASK_REVISION·BUILDER_ID는 dispatch 입력으로 고정된 현재 값이다.
 TASK_ID는 바꿀 수 없다. host ledger는 여전히 task당 활성 reservation 하나만 허용한다.
@@ -130,11 +140,12 @@ python3 -I engineering/scripts/control_plane_local.py dispatch --target Beautifu
 - workflow concurrency group 대신 task별 `flock`이 한 번에 한 발송만 허용한다.
   launch가 예외로 끝나도 finalize는 항상 실행해 정확한 결과(또는 UNKNOWN)를 기록한다.
 - host helper는 runner UID만 launch/preflight/status를 허용하므로 runner와 같은 계정으로 실행한다.
-  builder UID는 토큰 파일을 읽을 수 없어야 한다.
+  builder UID는 토큰 파일을 읽을 수 없어야 한다. 같은 runner 계정으로 도는 다른 job은 읽을 수 있으므로
+  그 계정에는 control-plane job만 둔다.
 - 발송 경로는 한 번에 하나만 쓴다. 로컬 경로를 켜면 self-hosted runner의 runtime workflow는
-  쓰지 않는다. 두 경로가 겹쳐도 같은 task·revision·attempt는 같은 `launch_request_id`이고 host
-  ledger가 request당 한 번·task당 활성 reservation 하나만 허용하므로 두 번 보내지는 않는다.
-  다만 중복 control record가 남아 reconciliation 전까지 그 task가 막힌다.
+  쓰지 않는다. 두 경로가 겹쳐도 host ledger가 request당 한 번·task당 활성 reservation 하나만
+  허용하므로 두 번 보내지는 않는다. 그러나 comment 갱신은 덮어쓰기라서 한 경로가 다른 경로의
+  CONFIRMED owner 기록을 지울 수 있다. 그러면 host ledger를 기준으로 record를 수동 복구해야 한다.
 
 ## Wrapper contract
 
