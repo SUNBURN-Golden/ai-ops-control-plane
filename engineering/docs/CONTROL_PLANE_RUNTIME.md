@@ -42,7 +42,10 @@ GitHub 제어 토큰, 다른 builder의 credentials에 접근할 수 없어야 �
 control 계정의 HOME/secret store도 builder에 열지 않는다.
 
 runner의 sudo 허용은 고정 helper의 `launch`, 정확한 세 builder별
-`preflight --builder-id ...` command만으로 제한한다. shell, 임의 Python, 임의 인수,
+`preflight --builder-id ...` command, 읽기 전용
+`status --launch-request-id <24자리 hex>` command만으로 제한한다. `status`는 sudoers에서
+그 인수 형식만 허용하고(가능하면 정규식), ledger를 바꾸지 않는다. 이 항목이 없으면
+host-preflight와 모든 재시도가 fail-closed로 거부된다. shell, 임의 Python, 임의 인수,
 `init`, `reconcile`, root 실행을 허용하지 않는다. builder에는 이 sudo 권한이 없다.
 관리자만 DB를 최초 `init`한다. 손실된 DB를 빈 DB로 재생성해 복구하지 않는다.
 원 ledger와 외부 session을 대사하기 전 dispatch를 재개하지 않는다.
@@ -77,13 +80,49 @@ User가 승인한 operator만 원 request의 terminal session/취소·fencing �
 `reconcile --launch-request-id ... --session-id ... --evidence <GitHub URL>`을 실행한다.
 UNKNOWN에는 추정 session을 넣지 않는다. 살아 있는 launch helper와 해제는 경쟁하지
 못하도록 잠근다. 복구 가능한 기존 ticket은 owner를 유지한다. 해제는 재실행 허가가
-아니며, 재시도/재배정은 기존 governance의 별도 승인·fencing을 따른다.
+아니며, 재시도/재배정은 아래 명시적 재시도 절차를 따른다.
+
+## 명시적 재시도
+
+재시도는 dispatch 입력 `expected_attempt_id`에 control record의 `attempt_id + 1`을
+적는 경우에만 일어난다. 빈 값은 첫 시도(1) 또는 현재 시도의 재개다. 새 시도는 새
+`claim_id`/`launch_request_id`를 만들고, 이전 시도 요약을 `previous_attempts`에 남긴 뒤
+NOT_STARTED → SUBMITTING 순서를 그대로 밟는다. 같은 재시도 dispatch를 다시 보내면
+번호가 이미 현재 시도이므로 세 번째 시도가 생기지 않는다.
+
+GitHub record는 projection이므로 재시도마다 host `status`로 이전 request를 확인한다.
+
+| 이전 시도 상태 (record) | 재시도 허용 조건 (host ledger) |
+|---|---|
+| NOT_STARTED | request 없음, FAILED_PRESTART 또는 RECONCILED |
+| FAILED_PRESTART | FAILED_PRESTART 또는 RECONCILED |
+| SUBMITTING / UNKNOWN | RECONCILED 또는 FAILED_PRESTART |
+| CONFIRMED | 거부 — 살아 있는 owner를 밀어내지 않는다 |
+
+host가 CONFIRMED를 보고하면 record가 finalize 결과를 잃은 것이다. owner가 살아 있으므로
+재시도·reconcile하지 않는다. SUBMITTING/UNKNOWN인데 host에 request가 없으면
+(SUBMITTING 기록 후 launch 전 중단, sudo 거부 등) 그 request는 host에 도달하지 않았다.
+어떤 sender도 더 보낼 수 없음을 operator가 확인한 뒤
+`reconcile --launch-request-id <id> --no-session --sender-fenced --never-admitted --evidence <URL>`로
+tombstone을 남긴다. 이후 그 request의 늦은 송신은 host가 거부하고, 재시도는 RECONCILED를 본다.
+`host-preflight`는 읽기 전용 `status`가 응답하는지(sudoers 포함)도 확인한다.
+
+재시도 envelope의 TASK_REVISION·BUILDER_ID는 dispatch 입력으로 고정된 현재 값이다.
+TASK_ID는 바꿀 수 없다. host ledger는 여전히 task당 활성 reservation 하나만 허용한다.
 session 생성 전 crash였으며 원 request의 미생성과 모든 sender의 fencing을
 operator가 입증한 경우에만 `--session-id` 대신 `--no-session --sender-fenced`를 쓴다.
 같은 exclusive lock과 durable evidence를 요구하며 알려진 session에는 사용할 수 없다.
 최초 결과·request dedupe·신규 호출 계수는 그대로 보존한다. 단순 조회 실패나
 timeout은 미생성 증거가 아니다. 해당 옵션은 operator의 증거 확인을 자동 대체하지 않는다.
 GitHub task에는 reconciliation evidence와 control projection을 남긴다.
+
+## GitHub credential과 발송 경로
+
+User 결정(2026-09-28): GitHub credential은 User 개인 토큰 하나(`ASTRA_CONTROL_GITHUB_TOKEN`)이며
+control record 작성자는 그 토큰의 login이다. 이 결정은 `AGENTS.md` §11의 전용 identity 권고보다 우선한다.
+발송 경로는 self-hosted runner의 `control-plane-runtime.yml` 하나다. Actions 없는 발송 경로는
+실행 소스를 승인된 GitHub commit에 결속하고 이 workflow와 같은 serialization/route fence를
+공유하기 전에는 추가하지 않는다(PR #34 A3 review F2/F3).
 
 ## Wrapper contract
 

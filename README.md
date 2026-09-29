@@ -41,6 +41,7 @@ Also: [`ONEDRIVE_READ_ONLY_POLICY.md`](./ONEDRIVE_READ_ONLY_POLICY.md)
 | [`knowledge/playbooks/KNOWLEDGE_PROMOTION.md`](./knowledge/playbooks/KNOWLEDGE_PROMOTION.md) | Observation → Promotion pipeline |
 | [`docs/SMOKE_TESTS.md`](./docs/SMOKE_TESTS.md) | Routing-only smoke A/B/C (wait for JunTae OK) |
 | [`audits/`](./audits/) | Cross-audit snapshots |
+| [`engineering/`](./engineering/README.md) | Engineering control plane for product repos: builder dispatch, host admission, review gates ([`AGENTS.md`](./engineering/AGENTS.md), target profiles in `engineering/.github/control-plane/projects.json`) |
 
 ---
 
@@ -79,6 +80,8 @@ routines/              # scheduled jobs registry
 docs/                  # smoke tests, inventories
 audits/                # dated cross-audits
 skills/                # domain skill stubs
+engineering/           # engineering control plane (dispatch, host admission, gates)
+tests/                 # offline checks for tools/ and the registries
 ```
 
 ---

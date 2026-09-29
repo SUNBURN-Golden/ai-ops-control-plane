@@ -30,6 +30,10 @@ on:
         description: "Pinned dispatch authorization; mandatory for dispatch"
         required: false
         type: string
+      expected_attempt_id:
+        description: "Explicit retry: next attempt number from the control record; empty for the first attempt"
+        required: false
+        type: string
       builder_id:
         description: "Builder for preflight"
         required: false
@@ -44,7 +48,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   group: astra-control-${{ github.repository }}-${{ inputs.issue_number || 'preflight' }}
@@ -61,6 +64,7 @@ jobs:
       EXPECTED_TASK_REVISION: ${{ inputs.expected_task_revision }}
       EXPECTED_BUILDER_ID: ${{ inputs.expected_builder_id }}
       EXPECTED_ISSUE_BODY_SHA256: ${{ inputs.expected_issue_body_sha256 }}
+      EXPECTED_ATTEMPT_ID: ${{ inputs.expected_attempt_id }}
       PREFLIGHT_BUILDER: ${{ inputs.builder_id }}
     steps:
       - uses: actions/checkout@v4
@@ -89,6 +93,10 @@ jobs:
           set -euo pipefail
           if ! [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
             echo "issue_number must be a positive integer" >&2
+            exit 2
+          fi
+          if [[ -n "$EXPECTED_ATTEMPT_ID" && ! "$EXPECTED_ATTEMPT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "expected_attempt_id must be empty or a positive integer" >&2
             exit 2
           fi
 

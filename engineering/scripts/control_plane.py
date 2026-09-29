@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -46,6 +47,7 @@ ALLOWED_LAUNCH_STATES = (
     "UNKNOWN",
 )
 HOST_COMMAND = ("/usr/bin/sudo", "-n", "-u", "astra-control", "/opt/astra/bin/astra-host-control")
+STATUS_PROBE_REQUEST = "0" * 24  # never produced by stable_id's sha256 prefix in practice
 LAUNCH_IDENTITY = ("repository", "task_id", "task_revision", "builder_id", "launch_request_id", "attempt_id")
 RUNTIME_PATHS = (
     "scripts/control_plane_graph_slack.py", "scripts/test_control_plane_graph_slack.py",
@@ -104,6 +106,10 @@ def load_config() -> Dict[str, Any]:
         cfg = dict(profiles[target])
         if cfg.get("repository") != target or cfg.get("control_repository") != control:
             raise ControlPlaneError("control/target identity mismatch")
+    return validate_profile(cfg)
+
+
+def validate_profile(cfg: Dict[str, Any]) -> Dict[str, Any]:
     required = {
         "schema_version",
         "project",
@@ -156,6 +162,28 @@ def load_config() -> Dict[str, Any]:
     return cfg
 
 
+def validate_central_profiles() -> None:
+    # Every central target is written through the one ASTRA_CONTROL_GITHUB_TOKEN,
+    # so every profile must expect that token's login as the record author.
+    # Otherwise prepare writes a record that finalize later rejects as foreign.
+    base = load_json(CONFIG_PATH)
+    if "control_repository" not in base:
+        return
+    profiles = load_json(CONFIG_PATH.with_name("projects.json"))
+    if not profiles:
+        raise ControlPlaneError("projects.json must register at least one target")
+    actors = set()
+    for target, profile in profiles.items():
+        if not isinstance(profile, dict):
+            raise ControlPlaneError(f"projects.json profile for {target} must be an object")
+        if profile.get("repository") != target or profile.get("control_repository") != base["control_repository"]:
+            raise ControlPlaneError(f"control/target identity mismatch for {target}")
+        actors.add(validate_profile(dict(profile))["control_record_actor"])
+    if len(actors) != 1:
+        raise ControlPlaneError("central profiles share one control credential; control_record_actor must match: "
+                                + ", ".join(sorted(actors)))
+
+
 def load_activation() -> Dict[str, Any]:
     value = load_json(ACTIVATION_PATH)
     required = {
@@ -202,6 +230,7 @@ def require_text(path: str, substrings: Iterable[str]) -> None:
 
 def validate_repo() -> None:
     cfg = load_config()
+    validate_central_profiles()
     activation = load_activation()
     if cfg.get("control_repository", cfg["repository"]) != os.environ.get("GITHUB_REPOSITORY", cfg.get("control_repository", cfg["repository"])):
         raise ControlPlaneError("config repository does not match GITHUB_REPOSITORY")
@@ -270,8 +299,7 @@ def stable_id(kind: str, repository: str, task_id: str, task_revision: str, atte
     return hashlib.sha256(material).hexdigest()[:24]
 
 
-def new_control_record(envelope: Dict[str, str], cfg: Dict[str, Any]) -> Dict[str, Any]:
-    attempt = 1
+def new_control_record(envelope: Dict[str, str], cfg: Dict[str, Any], attempt: int = 1) -> Dict[str, Any]:
     return {
         "schema_version": 1,
         "task_id": envelope["TASK_ID"],
@@ -332,7 +360,14 @@ class GithubApi:
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode(errors="replace")
             raise ControlPlaneError(f"GitHub API {method} {path} failed: {exc.code} {raw}") from exc
-        return json.loads(raw) if raw else None
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
+            # The request may or may not have reached GitHub; callers keep the
+            # last durable state and never treat this as a definite outcome.
+            raise ControlPlaneError(f"GitHub API {method} {path} unavailable: {exc}") from exc
+        try:
+            return json.loads(raw) if raw else None
+        except json.JSONDecodeError as exc:
+            raise ControlPlaneError(f"GitHub API {method} {path} returned invalid JSON") from exc
 
     def issue(self, number: int) -> Dict[str, Any]:
         return self._request("GET", f"/issues/{number}")
@@ -354,6 +389,9 @@ class GithubApi:
     def update_comment(self, comment_id: int, body: str) -> Dict[str, Any]:
         return self._request("PATCH", f"/issues/comments/{comment_id}", {"body": body})
 
+    def delete_comment(self, comment_id: int) -> None:
+        self._request("DELETE", f"/issues/comments/{comment_id}")
+
 
 def find_control_comment(comments: list, expected_actor: str) -> Optional[Dict[str, Any]]:
     marker_comments = [c for c in comments if CONTROL_MARKER in (c.get("body") or "")]
@@ -366,6 +404,24 @@ def find_control_comment(comments: list, expected_actor: str) -> Optional[Dict[s
     if len(marker_comments) > 1:
         raise ControlPlaneError("multiple canonical control-record comments found")
     return marker_comments[0] if marker_comments else None
+
+
+def require_record_author(api: "GithubApi", comment: Dict[str, Any], expected_actor: str) -> None:
+    # A record written under another login would be rejected as foreign by
+    # every later prepare/finalize and strand the task. It is still NOT_STARTED
+    # (no send authority consumed), so remove it and stop before any launch.
+    author = ((comment.get("user") or {}).get("login") or "")
+    if author == expected_actor:
+        return
+    try:
+        api.delete_comment(comment["id"])
+    except ControlPlaneError as exc:
+        raise ControlPlaneError(
+            f"control record author {author!r} != control_record_actor {expected_actor!r}; "
+            f"delete NOT_STARTED comment {comment.get('id')} manually before redispatch") from exc
+    raise ControlPlaneError(
+        f"control record author {author!r} != control_record_actor {expected_actor!r}; "
+        "fix the profile or control credential before redispatch")
 
 
 def write_github_output(key: str, value: str) -> None:
@@ -466,6 +522,14 @@ def host_preflight(builder_id: Optional[str]) -> None:
             continue
         reports.append(report)
 
+    # The explicit-retry fence depends on the read-only status command (and its
+    # sudoers entry); prove it answers before any dispatch relies on it.
+    try:
+        if host_request_state(STATUS_PROBE_REQUEST) is not None:
+            failures.append("status: probe request unexpectedly present in the host ledger")
+    except ControlPlaneError as exc:
+        failures.append(f"status: read-only host status command unavailable ({exc})")
+
     if failures:
         raise ControlPlaneError("host preflight failed: " + " | ".join(failures))
 
@@ -485,6 +549,79 @@ def verify_dispatch_binding(body: str, envelope: dict) -> None:
     digest = os.environ.get("EXPECTED_ISSUE_BODY_SHA256", "")
     if not re.fullmatch(r"[0-9a-f]{64}", digest) or hashlib.sha256(body.encode()).hexdigest() != digest:
         raise ControlPlaneError("dispatch authorization mismatch: issue body")
+
+
+def expected_attempt_id() -> Optional[int]:
+    raw = os.environ.get("EXPECTED_ATTEMPT_ID", "")
+    if not raw:
+        return None
+    if not re.fullmatch(r"[1-9][0-9]{0,8}", raw):
+        raise ControlPlaneError("expected_attempt_id must be a positive integer")
+    return int(raw)
+
+
+def record_attempt_id(record: Dict[str, Any]) -> int:
+    attempt = record.get("attempt_id")
+    if type(attempt) is not int or attempt < 1:
+        raise ControlPlaneError("control record has invalid attempt_id")
+    return attempt
+
+
+def host_request_state(launch_request_id: str) -> Optional[str]:
+    report = host_call(["status", "--launch-request-id", launch_request_id])
+    if report.get("launch_request_id") != launch_request_id:
+        raise ControlPlaneError("host status identity mismatch")
+    state = report.get("state")
+    if state is not None and not isinstance(state, str):
+        raise ControlPlaneError("host status returned an invalid state")
+    return state
+
+
+def require_fenced_attempt(record: Dict[str, Any]) -> str:
+    # A new attempt is safe only when the prior one provably has no live sender.
+    # The GitHub record is a projection; the host ledger decides: a definite
+    # prestart failure, an operator reconciliation, or (for a record that never
+    # consumed send authority) no reservation at all.
+    state = record["launch_state"]
+    if state == "CONFIRMED":
+        raise ControlPlaneError("retry refused: a CONFIRMED owner exists; reassignment is a separate fenced action")
+    request = record.get("launch_request_id")
+    if not isinstance(request, str) or not request:
+        raise ControlPlaneError("control record has invalid launch_request_id")
+    host_state = host_request_state(request)
+    if host_state in {"FAILED_PRESTART", "RECONCILED"}:
+        return host_state
+    if host_state is None and state == "NOT_STARTED":
+        return "NOT_FOUND"
+    if host_state == "CONFIRMED":
+        raise ControlPlaneError(
+            f"retry refused: the host ledger shows a CONFIRMED session for this request while the record says "
+            f"{state}; the owner is live, so do not retry or reconcile it")
+    if host_state is None:
+        raise ControlPlaneError(
+            f"retry refused: the {state} attempt never reached the host ledger; once no sender can still send it, "
+            "record it on the host with `reconcile --no-session --sender-fenced --never-admitted`")
+    raise ControlPlaneError(
+        f"retry refused: {state} attempt is not fenced (host state {host_state}); reconcile it on the host first")
+
+
+MAX_HISTORY_ERROR = 300
+
+
+def new_attempt_record(previous: Dict[str, Any], envelope: Dict[str, str], cfg: Dict[str, Any],
+                       attempt: int, fenced_by: str) -> Dict[str, Any]:
+    record = new_control_record(envelope, cfg, attempt)
+    history = previous.get("previous_attempts") or []
+    if not isinstance(history, list):
+        raise ControlPlaneError("control record previous_attempts must be a list")
+    summary = {key: previous.get(key) for key in (
+        "attempt_id", "claim_id", "launch_request_id", "task_revision", "builder_id",
+        "launch_state", "owner_session_id")}
+    # Bounded so repeated retries keep the record well inside GitHub's comment limit.
+    summary["last_error"] = str(previous.get("last_error"))[:MAX_HISTORY_ERROR] if previous.get("last_error") else None
+    summary["fenced_by_host_state"] = fenced_by
+    record["previous_attempts"] = [*history, summary]
+    return record
 
 
 def prepare_dispatch(issue_number: int, packet_path: Path) -> None:
@@ -517,26 +654,47 @@ def prepare_dispatch(issue_number: int, packet_path: Path) -> None:
     if envelope["CONTROL_RECORD_POINTER"] != issue_url:
         raise ControlPlaneError("CONTROL_RECORD_POINTER must equal the canonical issue URL for runtime v1")
 
+    requested_attempt = expected_attempt_id()
     comment = find_control_comment(api.comments(issue_number), cfg["control_record_actor"])
     if comment:
         record = parse_control_record(comment.get("body") or "")
-        if record.get("task_id") != envelope["TASK_ID"] or record.get("task_revision") != envelope["TASK_REVISION"]:
+        current_attempt = record_attempt_id(record)
+        if record.get("task_id") != envelope["TASK_ID"]:
             raise ControlPlaneError("existing control record identity does not match current task")
-        if record.get("builder_id") != envelope["BUILDER_ID"]:
-            raise ControlPlaneError("builder reassignment requires an explicit fenced control action")
-        state = record["launch_state"]
-        if state in {"SUBMITTING", "UNKNOWN"}:
-            raise ControlPlaneError(f"unresolved {state} launch blocks redispatch")
-        if state == "CONFIRMED":
-            print("existing confirmed owner; no second launch")
-            write_github_output("launch_required", "false")
-            return
-        if state == "FAILED_PRESTART":
-            raise ControlPlaneError("FAILED_PRESTART requires explicit retry authorization/fencing")
+        if requested_attempt == current_attempt + 1:
+            # Explicit retry event: the dispatcher pinned the next attempt number,
+            # so a repeated retry dispatch resolves to the new attempt instead of
+            # creating another. Revision/builder come from the pinned envelope.
+            fenced_by = require_fenced_attempt(record)
+            record = new_attempt_record(record, envelope, cfg, requested_attempt, fenced_by)
+            api.update_comment(comment["id"], render_control_record(record))
+        else:
+            if requested_attempt is not None and requested_attempt != current_attempt:
+                raise ControlPlaneError(
+                    f"expected_attempt_id {requested_attempt} does not match control record attempt "
+                    f"{current_attempt}; a retry names attempt {current_attempt + 1}")
+            if record.get("task_revision") != envelope["TASK_REVISION"]:
+                raise ControlPlaneError("existing control record identity does not match current task")
+            if record.get("builder_id") != envelope["BUILDER_ID"]:
+                raise ControlPlaneError("builder reassignment requires an explicit fenced control action")
+            state = record["launch_state"]
+            if state in {"SUBMITTING", "UNKNOWN"}:
+                raise ControlPlaneError(f"unresolved {state} launch blocks redispatch")
+            if state == "CONFIRMED":
+                print("existing confirmed owner; no second launch")
+                write_github_output("launch_required", "false")
+                return
+            if state == "FAILED_PRESTART":
+                raise ControlPlaneError(
+                    "FAILED_PRESTART requires explicit retry authorization: dispatch with "
+                    f"expected_attempt_id={current_attempt + 1}")
     else:
+        if requested_attempt not in (None, 1):
+            raise ControlPlaneError("no control record exists; the first attempt is expected_attempt_id=1")
         record = new_control_record(envelope, cfg)
         # Persist the pending launch as NOT_STARTED before consuming send authority.
         comment = api.create_comment(issue_number, render_control_record(record))
+        require_record_author(api, comment, cfg["control_record_actor"])
 
     # Duplicates return before provider preflight or any model invocation.
     host_preflight(envelope["BUILDER_ID"])

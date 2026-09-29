@@ -1,5 +1,6 @@
 """Local fault/concurrency tests; no installed policy, provider or root access needed."""
 import concurrent.futures
+import io
 import json
 import os
 from pathlib import Path
@@ -305,6 +306,83 @@ class AdmissionTests(unittest.TestCase):
                 host.authorize_identity(self.policy, "reconcile")
         with patch.object(host.os, "getuid", return_value=1020), self.assertRaises(host.HostError):
             host.authorize_identity(self.policy, "launch")
+
+    def test_status_reports_fencing_state_without_mutating_the_ledger(self):
+        self.policy["max_active_sessions"] = 1
+        host.launch(packet(), self.policy, self.ledger, self.invoke)
+        rejected = host.launch(packet(1), self.policy, self.ledger, self.invoke)
+        self.assertEqual(rejected["outcome"], "FAILED_PRESTART")
+        self.assertEqual(self.ledger.status("request-1"),
+                         {"status": "FOUND", "launch_request_id": "request-1", "state": "FAILED_PRESTART"})
+        self.assertEqual(self.ledger.status("request-0")["state"], "CONFIRMED")
+        self.assertEqual(self.ledger.status("never-sent"),
+                         {"status": "NOT_FOUND", "launch_request_id": "never-sent", "state": None})
+        self.ledger.reconcile("request-0", "session-request-0", "https://github.com/owner/ops/issues/13")
+        self.assertEqual(self.ledger.status("request-0")["state"], "RECONCILED")
+        before = self.path.read_bytes()
+        for request in ("request-0", "request-1", "never-sent"):
+            self.ledger.status(request)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.calls, ["request-0"])
+        for bad in ("", " ", "x\0y", "x" * 4097, None, 7):
+            with self.subTest(bad=bad), self.assertRaises(host.HostError):
+                self.ledger.status(bad)
+
+    def test_never_admitted_request_is_fenced_by_a_tombstone(self):
+        evidence = "https://github.com/owner/ops/issues/14"
+        for options in ({}, {"no_session": True}, {"no_session": True, "sender_fenced": False}):
+            with self.subTest(options=options), self.assertRaises(host.HostError):
+                self.ledger.reconcile("lost-request", None, evidence, never_admitted=True, **options)
+        self.assertIsNone(self.ledger.status("lost-request")["state"])
+        with self.ledger.inflight_lock():
+            with self.assertRaisesRegex(host.HostError, "still in flight"):
+                self.ledger.reconcile("lost-request", None, evidence, no_session=True,
+                                      sender_fenced=True, never_admitted=True)
+        result = self.ledger.reconcile("lost-request", None, evidence, no_session=True,
+                                       sender_fenced=True, never_admitted=True)
+        self.assertEqual(result["resolution"], "NEVER_ADMITTED")
+        self.assertEqual(self.ledger.status("lost-request")["state"], "RECONCILED")
+        # A late send of the fenced request is refused before any adapter call.
+        with self.assertRaises(host.HostError):
+            host.launch(packet(launch_request_id="lost-request"), self.policy, self.ledger, self.invoke)
+        self.assertEqual(self.calls, [])
+        # The tombstone neither blocks the task's new attempt nor counts as an admitted launch.
+        self.assertEqual(host.launch(packet(), self.policy, self.ledger, self.invoke)["outcome"], "CONFIRMED")
+        db = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(db.execute("SELECT sum(admitted) FROM launches").fetchone()[0], 1)
+        finally:
+            db.close()
+        with self.assertRaisesRegex(host.HostError, "in the ledger"):
+            self.ledger.reconcile("request-0", None, evidence, no_session=True,
+                                  sender_fenced=True, never_admitted=True)
+        self.assertEqual(self.state(), "CONFIRMED")
+
+    def test_never_admitted_cli_requires_operator_flags(self):
+        base = ["reconcile", "--launch-request-id", "lost-request", "--evidence",
+                "https://github.com/owner/ops/issues/14", "--no-session"]
+        with patch.object(host, "load_host_policy", return_value=self.policy), \
+             patch("sys.stdout", new_callable=io.StringIO) as stdout, \
+             patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(host.main(base + ["--never-admitted"]), 2)
+            self.assertEqual(host.main(base + ["--sender-fenced", "--never-admitted"]), 0)
+        self.assertEqual(json.loads(stdout.getvalue().splitlines()[-1])["resolution"], "NEVER_ADMITTED")
+
+    def test_status_is_open_to_the_runner_but_not_to_builders(self):
+        with patch.object(host.os, "getuid", return_value=1010), patch.object(host.os, "geteuid", return_value=1010):
+            with patch.dict(os.environ, {"SUDO_UID": "1020"}):
+                host.authorize_identity(self.policy, "status")
+            for caller in ("1030", "1040", "1050", "1010"):
+                with self.subTest(caller=caller), patch.dict(os.environ, {"SUDO_UID": caller}), \
+                     self.assertRaises(host.HostError):
+                    host.authorize_identity(self.policy, "status")
+
+    def test_status_command_prints_one_canonical_object(self):
+        with patch.object(host, "load_host_policy", return_value=self.policy), \
+             patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(host.main(["status", "--launch-request-id", "never-sent"]), 0)
+        self.assertEqual(json.loads(stdout.getvalue()),
+                         {"status": "NOT_FOUND", "launch_request_id": "never-sent", "state": None})
 
     def test_unsafe_files_and_duplicate_json_keys_are_rejected(self):
         path = Path(self.temp.name) / "protected"

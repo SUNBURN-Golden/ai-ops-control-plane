@@ -55,8 +55,11 @@ The technical gate sequence below still applies and is not waived:
    Verify host paths, shell/Python digests, runner audience, Slack signatures and routing allowlists.
    - DONE (pending review): `.github/workflows/control-plane-runtime.yml` is the root
      production workflow; `engineering/.github/workflows/control-plane-runtime.yml` remains
-     non-executing audited source. `engineering/scripts/control_plane_install.py` pins the host
-     to an exact central SHA and updates host pin fields; `apply` always installs disabled.
+     non-executing audited source. `engineering/scripts/control_plane_install.py` records the
+     exact central SHA on the host (`RUNTIME_SOURCE_SHA.txt` and the host policy pin fields);
+     `apply` always installs disabled. No runtime component reads those pin fields yet, so they
+     are an install record, not an enforced gate. The enforced checks are the host preflight
+     `helper_sha256` digest and `activated_runtime_sha` against `RUNTIME_PATHS`.
 6. Install disabled; run exact-install verification with fresh non-author evidence. KIX evidence does not transfer.
    - `control_plane_install.py verify` is the non-mutating check; `apply` refuses unless the
      in-repo activation record is runtime_enabled=false / NOT_APPROVED / PENDING.

@@ -152,7 +152,8 @@ Under TASK_KEY serialization:
 
 Before any external launch, atomically consume that action and persist
 LAUNCH_STATE=SUBMITTING. Only the executor holding that permission may send.
-NOT_STARTED therefore proves no send was authorized; resume only the same request.
+NOT_STARTED therefore proves no send was authorized; resume the same request, or
+start a new attempt only through the explicit retry event below.
 SUBMITTING after a crash is potentially sent: reconcile or mark UNKNOWN; never
 automatically launch again. Timeout/claim expiry alone does not authorize takeover.
 
@@ -160,6 +161,13 @@ Use LAUNCH_REQUEST_ID as the provider idempotency key when supported.
 Confirmed receipt records CONFIRMED + OWNER_SESSION_ID + worker/attempt.
 Provider proof of no session permits FAILED_PRESTART; a configured retry event
 may reauthorize that same task only after the prior executor is fenced.
+The runtime retry event is a dispatch whose `expected_attempt_id` equals the
+record's ATTEMPT_ID + 1. It creates a new CLAIM_ID/LAUNCH_REQUEST_ID, keeps the
+prior attempt in `previous_attempts`, and is admitted only when the host
+ledger reports the prior request as FAILED_PRESTART or RECONCILED (or, for a
+NOT_STARTED record, not present). A CONFIRMED owner is never displaced; a
+request that never reached the host is fenced first with the operator's
+never-admitted reconciliation.
 Ambiguous outcome records UNKNOWN and blocks relaunch until provider evidence
 or explicit User resolution proves the safe next step. Slack response loss
 never undoes a confirmed GitHub owner record.
@@ -190,6 +198,11 @@ a manual claim/send is unresolved.
 
 In automated mode manual dispatch requires a serialized MANUAL_CLAIM_ALLOWED
 action and the same launch protocol. Outage does not bypass ownership.
+
+Runtime dispatch has exactly one route: the self-hosted `control-plane-runtime.yml`
+workflow. An Actions outage or quota block does not authorize another route to
+launch or relaunch; a second route needs source pinning and shared
+serialization with this one first (docs/CONTROL_PLANE_RUNTIME.md).
 
 Grok outage is not a workflow outage: the same fixed mechanical command may be
 invoked by another authenticated caller. Provider outage for the assigned

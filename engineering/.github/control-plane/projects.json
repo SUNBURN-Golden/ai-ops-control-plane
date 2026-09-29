@@ -54,7 +54,7 @@
       "CURSOR": "/opt/astra/bin/astra-builder-cursor"
     },
     "control_record_marker": "<!-- ASTRA_CONTROL_RECORD_V1 -->",
-    "control_record_actor": "github-actions[bot]",
+    "control_record_actor": "BeautifulMind-JT",
     "allowed_task_actors": [
       "BeautifulMind-JT"
     ],
@@ -88,7 +88,7 @@
       "CURSOR": "/opt/astra/bin/astra-builder-cursor"
     },
     "control_record_marker": "<!-- ASTRA_CONTROL_RECORD_V1 -->",
-    "control_record_actor": "github-actions[bot]",
+    "control_record_actor": "BeautifulMind-JT",
     "allowed_task_actors": [
       "BeautifulMind-JT"
     ],
@@ -122,7 +122,7 @@
       "CURSOR": "/opt/astra/bin/astra-builder-cursor"
     },
     "control_record_marker": "<!-- ASTRA_CONTROL_RECORD_V1 -->",
-    "control_record_actor": "github-actions[bot]",
+    "control_record_actor": "BeautifulMind-JT",
     "allowed_task_actors": [
       "BeautifulMind-JT"
     ],
