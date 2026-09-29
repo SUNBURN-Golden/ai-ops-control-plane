@@ -199,11 +199,38 @@ class AdmissionTests(unittest.TestCase):
         def fail(value, policy):
             self.calls.append(value["launch_request_id"])
             return subprocess.CompletedProcess([], 0, json.dumps(host.result_for(value, "FAILED_PRESTART", "credentials unavailable; no create request sent")))
-        result = host.launch(packet(), self.policy, self.ledger, fail)
+        result = host.launch(packet(), self.policy, self.ledger, fail, quiescence=lambda lane, policy: [])
         self.assertEqual(result["outcome"], "FAILED_PRESTART")
         result = host.launch(packet(1), self.policy, self.ledger, self.invoke)
         self.assertEqual(result["outcome"], "CONFIRMED")
         self.assertEqual(self.calls, ["request-0", "request-1"])
+
+    def test_a_prestart_failure_from_a_busy_lane_keeps_the_slot(self):
+        # Astra A3 finding 1: the builder UID can write the adapter's result, so a live
+        # builder could report FAILED_PRESTART and keep running.
+        self.policy.update(max_active_sessions=1, max_launches_per_24h=None)
+        def fake_failure(value, policy):
+            return subprocess.CompletedProcess([], 0, json.dumps(host.result_for(value, "FAILED_PRESTART", "forged")))
+        censuses = (lambda lane, policy: [4242], lambda lane, policy: (_ for _ in ()).throw(host.HostError("x")))
+        with patch.object(host, "QUIESCENCE_GRACE", 0):
+            for index, census in enumerate(censuses):
+                with self.subTest(index=index):
+                    result = host.launch(packet(2 * index), self.policy, self.ledger, fake_failure, quiescence=census)
+                    self.assertEqual(result["outcome"], "UNKNOWN")
+                    self.assertIn("not quiescent", result["reason"])
+                    self.assertEqual(host.launch(packet(2 * index + 1), self.policy, self.ledger, self.invoke)["outcome"],
+                                     "FAILED_PRESTART")  # the slot is still held
+                    self.ledger.reconcile(f"request-{2 * index}", None, "https://github.com/owner/ops/issues/13",
+                                          no_session=True, sender_fenced=True)
+
+    def test_lane_empty_waits_briefly_for_an_exiting_supervisor(self):
+        answers = iter([[77], [77], []])
+        times = iter([0.0, 1.0, 2.0, 3.0])
+        self.assertTrue(host.lane_empty("DEVIN", self.policy, lambda lane, policy: next(answers),
+                                        clock=lambda: next(times), sleep=lambda _: None))
+        times = iter([0.0, 5.0, 11.0])
+        self.assertFalse(host.lane_empty("DEVIN", self.policy, lambda lane, policy: [77],
+                                         clock=lambda: next(times), sleep=lambda _: None))
 
     def test_unlimited_daily_launch_policy_accepts_null_and_rejects_zero(self):
         self.policy["max_launches_per_24h"] = None
@@ -337,7 +364,7 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(self.ledger.status("request-1"),
                          {"status": "FOUND", "launch_request_id": "request-1", "state": "FAILED_PRESTART",
                           "role": "WRITER", "lane": "DEVIN", "repository": "owner/repo1", "task": "T-1",
-                          "attempt_id": 1, "owner_lane": None, "reserved_ts": self.ledger.clock(),
+                          "attempt_id": 1, "task_revision": "r1", "owner_lane": None, "reserved_ts": self.ledger.clock(),
                           "reserved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(self.ledger.clock())))})
         self.assertEqual(self.ledger.status("request-0")["state"], "CONFIRMED")
         self.assertEqual(self.ledger.status("never-sent"),
@@ -647,12 +674,12 @@ class ProgramModeHostTests(unittest.TestCase):
 
     # ------------------------------------------------------------ signed, write-once pins
 
-    def signed_review(self, value, verdict="PASS", depth="A1", change="NO", nonce=None, **fields):
+    def signed_review(self, value, verdict="PASS", depth="A1", change="NO", nonce=None, required="A1", **fields):
         fields = {"review": value["review_request_id"], "head": value["head_sha"], **fields}
         mac = host.pin_mac(nonce or value["review_nonce"],
-                           ("ASTRA_REVIEW_V1", fields["review"], fields["head"], verdict, depth, change))
+                           ("ASTRA_REVIEW_V1", fields["review"], fields["head"], verdict, depth, required, change))
         return (f"ASTRA_REVIEW_V1 review={fields['review']} head={fields['head']} verdict={verdict} "
-                f"depth={depth} contract_change={change} mac={mac}")
+                f"depth={depth} required={required} contract_change={change} mac={mac}")
 
     def signed_delivery(self, value, pr=7, head=HEAD, nonce=None):
         mac = host.pin_mac(nonce or value["delivery_nonce"], ("ASTRA_DELIVERY_V1", value["launch_request_id"],
@@ -831,6 +858,27 @@ class ProgramModeHostTests(unittest.TestCase):
              patch.object(host, "own_pid_namespace_is_procs", return_value=False), \
              self.assertRaisesRegex(host.HostError, "PID namespace"):
             host.lane_quiescence("DEVIN", self.policy)
+
+    def test_lane_quiescence_combines_the_outside_scan_and_the_frozen_census(self):
+        with patch.object(host, "proc_hides_processes", return_value=False), \
+             patch.object(host, "own_pid_namespace_is_procs", return_value=True), \
+             patch.object(host, "has_subordinate_ids", return_value=False), \
+             patch.object(host, "live_processes", return_value=[]):
+            self.assertEqual(host.lane_quiescence("DEVIN", self.policy, census=lambda lane: [91]), [91])
+            self.assertEqual(host.lane_quiescence("DEVIN", self.policy, census=lambda lane: []), [])
+
+    def test_lane_census_runs_through_the_wrapper_and_fails_closed(self):
+        cases = [(0, {"status": "OK", "live": [5]}, [5]), (0, {"status": "OK", "live": []}, [])]
+        for code, report, expected in cases:
+            with patch.object(host.subprocess, "run", return_value=subprocess.CompletedProcess([], code, json.dumps(report))) as run:
+                self.assertEqual(host.lane_census("GLM"), expected)
+                self.assertEqual(run.call_args.args[0], [host.WRAPPERS["GLM"], "--quiescence"])
+        for code, report in ((2, {"status": "OK", "live": []}), (0, {"status": "FAIL"}), (0, {"status": "OK", "live": ["x"]}),
+                             (0, {"status": "OK"})):
+            with self.subTest(report=report), \
+                 patch.object(host.subprocess, "run", return_value=subprocess.CompletedProcess([], code, json.dumps(report))), \
+                 self.assertRaises(host.HostError):
+                host.lane_census("GLM")
 
     def test_status_lanes_command(self):
         self.launch(writer())

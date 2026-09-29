@@ -51,7 +51,7 @@ TASK_KEY_RE = re.compile(r"<!-- ASTRA_TASK_KEY_V1 program=(\S+) node=(\S+) reque
 DELIVERY_RE = re.compile(r"ASTRA_DELIVERY_V1 pr=[1-9][0-9]{0,9} head=[0-9a-f]{40} mac=[0-9a-f]{64}")
 REVIEW_RE = re.compile(r"ASTRA_REVIEW_V1 review=([0-9a-f]{24}) head=[0-9a-f]{40} "
                        r"verdict=(?:PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED) depth=A[0-3] "
-                       r"contract_change=(?:NO|YES) mac=[0-9a-f]{64}")
+                       r"required=A[1-3] contract_change=(?:NO|YES) mac=[0-9a-f]{64}")
 BLOCKED_RE = re.compile(r"ASTRA_BLOCKED_V1 kind=(DECISION_REQUIRED|BLOCKED|STALLED) launch=([0-9a-f]{24}) "
                         r"mac=[0-9a-f]{64}")
 MAX_REVIEW_SESSIONS = 3  # per review slot and delivered head; beyond this an operator looks
@@ -195,6 +195,10 @@ def validate_plan(plan: Any, cfg: Dict[str, Any]) -> Dict[str, Any]:
             raise ProgramError(f"node {node['id']} has an invalid gate field")
         if node["deliverable_mode"] not in DELIVERABLE_MODES:
             raise ProgramError(f"node {node['id']}: program mode supports deliverable_mode PR only")
+        if node["audit_floor"] == "A0":
+            # Program mode has no A0 qualification path (DISPATCH section 16: authorization pointer,
+            # path contract, attestation), so A0 is promoted to A1 and gets its independent review.
+            node["audit_floor"] = "A1"
         if node["audit_floor"] == "A3":
             node["astra_gate"] = "ARCHITECTURE"  # AGENTS section 8: A3 implies the architecture gate
     # Reject dependency cycles.
@@ -428,6 +432,36 @@ def review_rows(rows: List[Dict[str, Any]], review_id: str) -> List[Dict[str, An
     return [row for row in rows if row.get("role") == "REVIEWER" and row.get("review_request_id") == review_id]
 
 
+def expected_revision(mstatus: Dict[str, Any], writer: Dict[str, Any]) -> str:
+    """The task revision the current envelope names; host rows of any other revision are stale."""
+    return task_revision_for(mstatus["plan_commit"], writer["lane"])
+
+
+def current_verdicts(cfg: Dict[str, Any], task_id: str, rows: List[Dict[str, Any]], writer: Dict[str, Any],
+                     head: str) -> List[tuple]:
+    """(row, verdict) for every host-pinned verdict of this delivery's review ids at this head."""
+    found = []
+    for slot in (1, 2):
+        review_id = review_request_id(cfg["repository"], task_id, writer["launch_request_id"], head, slot)
+        for row in review_rows(rows, review_id):
+            verdict = pin_of(row, "REVIEW")
+            if verdict is not None and verdict["head"] == head:
+                found.append((row, verdict))
+    return found
+
+
+def effective_floor(plan_floor: str, verdicts: List[tuple]) -> str:
+    """DISPATCH section 13: max(configured AUDIT_FLOOR, every VERIFIED_REQUIRED_DEPTH), A0 < A1 < A2 < A3."""
+    return max([plan_floor] + [verdict["required"] for _, verdict in verdicts], key=AUDIT_FLOORS.index)
+
+
+def merged_delivery(api: cp.GithubApi, pin: Optional[Dict[str, Any]]) -> bool:
+    if pin is None:
+        return False
+    pr = api._request("GET", f"/pulls/{pin['pr']}")
+    return pr.get("merged") is True and (pr.get("head") or {}).get("sha") == pin["head"]
+
+
 def task_context(api: cp.GithubApi, cfg: Dict[str, Any], issue_number: int):
     """The canonical issue, the plan at the host-recorded plan commit, its node and the host record."""
     issue = api.issue(issue_number)
@@ -467,11 +501,8 @@ def dependency_done(api: cp.GithubApi, cfg: Dict[str, Any], plan: Dict[str, Any]
     status = host(["materialize-status", "--program", plan["program"], "--node", node_id])
     if status.get("status") != "CREATED" or status.get("repository") != cfg["repository"]:
         return False
-    pin = pin_of(current_writer(task_rows(cfg, task_id_for(plan["program"], node_id))), "DELIVERY")
-    if pin is None:
-        return False
-    pr = api._request("GET", f"/pulls/{pin['pr']}")
-    return pr.get("merged") is True and (pr.get("head") or {}).get("sha") == pin["head"]
+    return merged_delivery(api, pin_of(current_writer(task_rows(cfg, task_id_for(plan["program"], node_id))),
+                                       "DELIVERY"))
 
 
 def pending_dependencies(api: cp.GithubApi, cfg: Dict[str, Any], plan: Dict[str, Any],
@@ -501,13 +532,17 @@ def start(issue_number: int, program: str, node_id: str, plan_commit: str, packe
     if issue.get("state") != "open" or issue_key(issue) != (program, node_id, status["request"]):
         raise ProgramError("canonical issue is closed or its task key does not match the host record")
     require_single_canonical(api, cfg, program, node_id, issue_number)
+    tid = task_id_for(program, node_id)
+    if merged_delivery(api, pin_of(current_writer(task_rows(cfg, tid)), "DELIVERY")):
+        # The pinned delivery is merged at its delivered head: the node is DONE, never redispatched.
+        cp.write_github_output("launch_required", "false")
+        return {"status": "DONE", "issue": issue_number}
     pending = pending_dependencies(api, cfg, plan, node)
     if pending:
         cp.write_github_output("launch_required", "false")
         return {"status": "WAITING_ON_DEPENDENCIES", "issue": issue_number, "pending": pending}
     _, record = control_record(api, cfg, issue_number)
     board = host_lanes()
-    tid = task_id_for(program, node_id)
     if active_rows_for_task(board, cfg["repository"], tid):
         cp.write_github_output("launch_required", "false")
         return {"status": "TASK_ACTIVE", "issue": issue_number}
@@ -617,15 +652,19 @@ def prepare_review(issue_number: int, slot: int, packet_path: Path,
     delivery = pin_of(writer, "DELIVERY")
     if delivery is None:
         raise ProgramError("review waits for a host-pinned ASTRA_DELIVERY_V1 of the released current writer attempt")
+    if writer.get("task_revision") != expected_revision(mstatus, writer):
+        raise ProgramError("the delivered writer attempt is for an older task revision; start delivers the "
+                           "current revision first")
     body = rendered_body(issue, plan, node, mstatus, writer["lane"])
     if (issue.get("body") or "") != body:
         # The envelope is fully determined by the host record and the plan: restore it, never trust it.
         # This runs before the floor check, so an A0 task (no review slot) is repaired too.
         api._request("PATCH", f"/issues/{issue_number}", {"body": body})
         issue = {**issue, "body": body}
-    floor = node["audit_floor"]
+    # A reviewer's verified required depth can raise the floor, and with it the second slot.
+    floor = effective_floor(node["audit_floor"], current_verdicts(cfg, tid, rows, writer, delivery["head"]))
     if REQUIRED_REVIEWS[floor] < slot:
-        raise ProgramError(f"audit floor {floor} does not require review slot {slot}")
+        raise ProgramError(f"effective audit floor {floor} does not require review slot {slot}")
     comment, record = control_record(api, cfg, issue_number)
     if record is None:
         raise ProgramError("task has no control record")
@@ -866,12 +905,14 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
         return {"ready": False, "head": head, "pr": pr_number, "issue": issue_number, "reasons": reasons + [str(exc)]}
     if (pr.get("head") or {}).get("ref") != branch_for(task_id_for(plan["program"], node["id"])):
         reasons.append(f"PR must come from the task branch {branch_for(task_id_for(plan['program'], node['id']))}")
-    floor, gate = node["audit_floor"], node["astra_gate"]
-    rows = task_rows(cfg, task_id_for(plan["program"], node["id"]))
+    tid = task_id_for(plan["program"], node["id"])
+    rows = task_rows(cfg, tid)
     writer = current_writer(rows)
     delivery = pin_of(writer, "DELIVERY")
     if delivery is None or (delivery["pr"], delivery["head"]) != (pr_number, head):
         reasons.append("the host-pinned delivery of the current writer attempt does not name this PR head")
+    elif writer.get("task_revision") != expected_revision(mstatus, writer):
+        reasons.append("the pinned delivery is for an older task revision; the current revision is not delivered")
     elif (issue.get("body") or "") != rendered_body(issue, plan, node, mstatus, writer["lane"]):
         reasons.append("task issue body differs from the envelope rendered from the host-recorded plan "
                        "(operation=review restores it)")
@@ -879,35 +920,41 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     if labels & BLOCKING_LABELS:
         reasons.append(f"unresolved blocker labels: {sorted(labels & BLOCKING_LABELS)}")
     runs = all_check_runs(api, head) if head else []
-    if not runs or any(r.get("status") != "completed" or
-                       r.get("conclusion") not in ("success", "neutral", "skipped") for r in runs):
-        reasons.append("verification gate: check runs are not all green on the head")
+    if any(r.get("status") != "completed" or r.get("conclusion") not in ("success", "neutral", "skipped")
+           for r in runs):
+        reasons.append("verification gate: a check run is incomplete or failing on the head")
+    required_checks = cfg.get("program_required_checks")
+    if not isinstance(required_checks, list) or not required_checks \
+            or not all(isinstance(name, str) and name.strip() for name in required_checks):
+        reasons.append("verification gate: the product's required checks are not declared (program_required_checks)")
+    else:
+        for name in required_checks:
+            named = [r for r in runs if r.get("name") == name]
+            if not named or not all(r.get("status") == "completed" and r.get("conclusion") == "success"
+                                    for r in named):
+                reasons.append(f"verification gate: required check {name!r} has not succeeded on the head")
     combined = api._request("GET", f"/commits/{head}/status") if head else {}
     if (combined or {}).get("statuses") and (combined or {}).get("state") != "success":
         reasons.append(f"verification gate: commit statuses are {combined.get('state')}")
     if any(row.get("role") == "REVIEWER" and row.get("state") in ("SUBMITTING", "CONFIRMED", "UNKNOWN")
            for row in rows):
         reasons.append("a review session of this task is still active or unresolved")
+    verdicts = current_verdicts(cfg, tid, rows, writer, head) if delivery is not None and head else []
+    floor = effective_floor(node["audit_floor"], verdicts)
+    gate = "ARCHITECTURE" if floor == "A3" else node["astra_gate"]  # DISPATCH section 13 promotion
     needed_depth = min(AUDIT_FLOORS.index(floor), 2)
     owners = writer_lanes(rows)
     passing_lanes, contract_change = set(), False
-    if delivery is not None:
-        for slot in (1, 2):
-            review_id = review_request_id(cfg["repository"], task_id_for(plan["program"], node["id"]),
-                                          writer["launch_request_id"], delivery["head"], slot)
-            for row in review_rows(rows, review_id):
-                verdict = pin_of(row, "REVIEW")
-                if verdict is None or verdict["head"] != head:
-                    continue
-                if verdict["contract_change"] == "YES":
-                    contract_change = True
-                if verdict["verdict"] in ("FAIL", "DECISION_REQUIRED"):
-                    reasons.append(f"review {review_id} returned {verdict['verdict']}")
-                elif AUDIT_FLOORS.index(verdict["depth"]) >= needed_depth and row.get("lane") not in owners:
-                    passing_lanes.add(row.get("lane"))
+    for row, verdict in verdicts:
+        if verdict["contract_change"] == "YES":
+            contract_change = True
+        if verdict["verdict"] in ("FAIL", "DECISION_REQUIRED"):
+            reasons.append(f"review {verdict['review']} returned {verdict['verdict']}")
+        elif AUDIT_FLOORS.index(verdict["depth"]) >= needed_depth and row.get("lane") not in owners:
+            passing_lanes.add(row.get("lane"))
     if len(passing_lanes) < REQUIRED_REVIEWS[floor]:
-        reasons.append(f"{len(passing_lanes)} of {REQUIRED_REVIEWS[floor]} required independent reviews "
-                       "(host-pinned verdicts from distinct non-writer lanes) PASS at this head")
+        reasons.append(f"{len(passing_lanes)} of {REQUIRED_REVIEWS[floor]} required independent reviews at effective "
+                       f"floor {floor} (host-pinned verdicts from distinct non-writer lanes) PASS at this head")
     if contract_change:
         reasons.append("a current-head review reports a contract change; Astra/User decision required")
     if gate != "NONE" or floor == "A3":

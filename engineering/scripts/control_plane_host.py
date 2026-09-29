@@ -42,9 +42,10 @@ NONCE_RE = re.compile(r"[0-9a-f]{32}")
 REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 # Session-signed marker lines (docs/PROGRAM_MODE.md section 4.2). The MAC key is the
 # packet's secret nonce, readable only by the session's own lane UID and this ledger.
+# depth = VERIFIED_REVIEW_DEPTH, required = VERIFIED_REQUIRED_DEPTH (DISPATCH section 13).
 REVIEW_PIN_RE = re.compile(r"ASTRA_REVIEW_V1 review=([0-9a-f]{24}) head=([0-9a-f]{40}) "
                            r"verdict=(PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED) depth=(A[0-3]) "
-                           r"contract_change=(NO|YES) mac=([0-9a-f]{64})")
+                           r"required=(A[1-3]) contract_change=(NO|YES) mac=([0-9a-f]{64})")
 DELIVERY_PIN_RE = re.compile(r"ASTRA_DELIVERY_V1 pr=([1-9][0-9]{0,9}) head=([0-9a-f]{40}) mac=([0-9a-f]{64})")
 BLOCKER_PIN_RE = re.compile(r"ASTRA_BLOCKED_V1 kind=(DECISION_REQUIRED|BLOCKED|STALLED) launch=([0-9a-f]{24}) "
                             r"mac=([0-9a-f]{64})")
@@ -247,12 +248,12 @@ def verify_pin(row, line):
         match, nonce = REVIEW_PIN_RE.fullmatch(line), packet.get("review_nonce")
         if not match:
             raise HostError("a reviewer pin must be exactly one ASTRA_REVIEW_V1 or ASTRA_BLOCKED_V1 line")
-        review, head, verdict, depth, change, mac = match.groups()
+        review, head, verdict, depth, required, change, mac = match.groups()
         if review != packet.get("review_request_id") or head != packet.get("head_sha"):
             raise HostError("review pin does not name this session's review request and head")
-        fields = ("ASTRA_REVIEW_V1", review, head, verdict, depth, change)
+        fields = ("ASTRA_REVIEW_V1", review, head, verdict, depth, required, change)
         pin = {"kind": "REVIEW", "review": review, "head": head, "verdict": verdict, "depth": depth,
-               "contract_change": change}
+               "required": required, "contract_change": change}
     else:
         match, nonce = DELIVERY_PIN_RE.fullmatch(line), packet.get("delivery_nonce")
         if not match:
@@ -277,6 +278,7 @@ def row_view(row):
     packet = parse_json(row["packet"]) if row["packet"] else {}
     view = {"launch_request_id": row["request"], "state": row["state"], "role": row["role"], "lane": row["lane"],
             "repository": row["repository"], "task": row["task"], "attempt_id": packet.get("attempt_id"),
+            "task_revision": packet.get("task_revision"),
             "owner_lane": packet.get("owner_lane"), "reserved_at": iso(row["created"]), "reserved_ts": row["created"]}
     if row["role"] == "REVIEWER":
         view.update(review_request_id=row["review_key"], head_sha=packet.get("head_sha"),
@@ -408,7 +410,29 @@ def live_processes(uid, proc="/proc"):
     return found
 
 
-def lane_quiescence(lane, policy):
+QUIESCENCE_GRACE = 10.0  # seconds a lane may take to exit after reporting a prestart failure
+
+
+def lane_census(lane):
+    """Race-free census of the lane UID, taken from inside the lane through its wrapper.
+
+    The lane identity sends SIGSTOP to every process of its UID with kill(-1). That cannot
+    race a fork: the kernel aborts (and later restarts) any fork that sees the pending stop,
+    and kill(-1) iterates the task list under the lock that attaching a child needs. So the
+    stopped set can only shrink until SIGCONT; the census lists it and thaws it. A single
+    /proc scan from outside has no such guarantee (a parent can fork and exit between reads).
+    """
+    completed = subprocess.run([WRAPPERS[lane], "--quiescence"], capture_output=True, text=True,
+                               timeout=60, cwd="/", env=CLEAN_ENV)
+    report = parse_json(completed.stdout)
+    live = report.get("live")
+    if (completed.returncode != 0 or report.get("status") != "OK" or not isinstance(live, list)
+            or not all(type(pid) is int and pid > 0 for pid in live)):
+        raise HostError("lane census failed; lane quiescence unverifiable")
+    return live
+
+
+def lane_quiescence(lane, policy, *, census=None):
     if proc_hides_processes():
         raise HostError("/proc hides processes (hidepid); lane quiescence cannot be verified")
     if not own_pid_namespace_is_procs():
@@ -418,7 +442,22 @@ def lane_quiescence(lane, policy):
         raise HostError("lane has no registered builder UID")
     if has_subordinate_ids(uid):
         raise HostError("lane UID has subordinate uid/gid ranges; its user-namespace processes would be invisible")
-    return live_processes(uid)
+    # The outside scan is kept as a second witness; the frozen census is the race-free one.
+    return sorted(set(live_processes(uid)) | set((census or lane_census)(lane)))
+
+
+def lane_empty(lane, policy, quiescence, grace=None, clock=time.monotonic, sleep=time.sleep):
+    """True once the host itself sees no process of the lane UID (within grace); never on doubt."""
+    deadline = clock() + (QUIESCENCE_GRACE if grace is None else grace)
+    while True:
+        try:
+            if not quiescence(lane, policy):
+                return True
+        except HostError:
+            return False
+        if clock() >= deadline:
+            return False
+        sleep(0.5)
 
 
 class Ledger:
@@ -876,12 +915,12 @@ def adapter_launch(packet, policy, lock_fd):
                               env={**CLEAN_ENV, "ASTRA_HOST_INFLIGHT_FD": str(lock_fd)})
 
 
-def launch(packet, policy, ledger, invoke=None):
+def launch(packet, policy, ledger, invoke=None, *, quiescence=None):
     with ledger.inflight_lock() as lock_fd:
-        return launch_held(packet, policy, ledger, invoke, lock_fd)
+        return launch_held(packet, policy, ledger, invoke, lock_fd, quiescence)
 
 
-def launch_held(packet, policy, ledger, invoke, lock_fd):
+def launch_held(packet, policy, ledger, invoke, lock_fd, quiescence=None):
     admitted, previous = ledger.reserve(packet, policy)
     if not admitted:
         return previous
@@ -903,7 +942,13 @@ def launch_held(packet, policy, ledger, invoke, lock_fd):
             raise HostError("adapter confirmation lacks actual session_id")
         if outcome == "FAILED_PRESTART" and (session is not None or not isinstance(result.get("reason"), str) or not result["reason"].strip()):
             raise HostError("adapter FAILED_PRESTART lacks definite prestart reason or claims a session")
-        result = result_for(packet, outcome, result.get("reason"), session)
+        reason = result.get("reason")
+        if outcome == "FAILED_PRESTART" and not lane_empty(packet["builder_id"], policy,
+                                                            quiescence or lane_quiescence):
+            # The builder UID can write the adapter's result files. A prestart failure frees the
+            # slot only when the host itself sees the lane empty; otherwise the slot is kept.
+            outcome, reason = "UNKNOWN", f"prestart failure reported but the lane is not quiescent ({reason})"
+        result = result_for(packet, outcome, reason, session)
     except Exception as exc:
         result = result_for(packet, "UNKNOWN", f"adapter outcome unresolved: {type(exc).__name__}: {exc}")
     ledger.finalize(packet, result)

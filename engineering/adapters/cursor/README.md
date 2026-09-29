@@ -38,3 +38,9 @@ The preflight report carries `harness: CURSOR_CLI` and the exact `model`, which 
 - Run one diagnostic canary. It must show that the Cursor CLI leaves no process behind under the lane UID after the session ends (otherwise `reap` never passes), and that the clone plus `create-chat` finish inside the adapter's 100 s wait.
 
 `SHA256SUMS` holds the digests of these reviewed sources.
+
+**Quiescence probe (`--quiescence`).** Every wrapper routes `--quiescence` to its adapter, which runs as the lane identity:
+- The adapter sends `kill(-1, SIGSTOP)` to every process of the lane UID. This cannot race a fork: the kernel aborts a fork that sees the pending stop.
+- It lists what remains from `/proc`, then sends `SIGCONT`.
+- It prints `{"status": "OK", "live": [...]}` and refuses to run as root.
+- The host combines this census with its own outside scan. It uses both before a reap, and before accepting an adapter's `FAILED_PRESTART`, because the builder UID can write the adapter's result files.

@@ -205,7 +205,9 @@ flowchart TD
   - 발송할 때마다 비밀 키(32 hex)를 새로 만든다. 작성자 packet에는 `delivery_nonce`, 리뷰어 packet에는 `review_nonce`로 들어간다.
   - packet은 mode 0600이다. 키는 그 세션의 레인 UID와 host ledger만 읽는다.
   - adapter는 세션 디렉터리(0700) 안에 서명 도구 `signer.py`(0600)를 둔다. 모델은 이 도구를 실행해 나온 한 줄을 그대로 올린다.
-  - 판정 줄: `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...> depth=<A1|A2> contract_change=<NO|YES> mac=<HMAC-SHA256>`
+  - 판정 줄: `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...> depth=<A1|A2> required=<A1|A2|A3> contract_change=<NO|YES> mac=<HMAC-SHA256>`
+    - `depth`는 `VERIFIED_REVIEW_DEPTH`(실제로 리뷰한 깊이)다. `required`는 `VERIFIED_REQUIRED_DEPTH`(실제 diff가 요구하는 최소 깊이, `DISPATCH.md` §13)다.
+    - merge-check과 리뷰 발송은 `EFFECTIVE_AUDIT_FLOOR = max(plan의 AUDIT_FLOOR, 고정된 모든 required)`를 쓴다. 이 값이 필요한 리뷰 수, 요구 깊이, 두 번째 슬롯 여부를 정한다. A3이면 Astra `ARCHITECTURE` 게이트가 붙는다.
   - 전달 줄: `ASTRA_DELIVERY_V1 pr=<n> head=<sha> mac=<HMAC-SHA256>`
   - 차단 줄(작성자와 리뷰어 모두): `ASTRA_BLOCKED_V1 kind=<DECISION_REQUIRED|BLOCKED|STALLED> launch=<launch id> mac=<HMAC-SHA256>`
   - **서명되지 않은 글은 어떤 세션도 해제하지 못한다.** host는 키가 있는 세션을 서명된 줄 없이 해제하지 않는다. 그래서 다른 레인이 `BLOCKED` 글을 올리거나 진짜 판정 줄을 고쳐도, 판정을 버리고 리뷰를 다시 뽑게 만들 수 없다.
@@ -261,6 +263,15 @@ flowchart TD
 v2의 wrapper `--session-status` 안은 **폐기했다.** P3 조사 결과, 세 adapter 모두 세션 상태(`.sessions/<request>/status.json`)를 빌더 UID로 **빌더가 쓸 수 있는 작업 트리 안에** 기록한다. 그래서 빌더가 위조할 수 있다(Astra v2 노트 "빌더가 위조할 수 없는 종료 증거" 불충족).
 
 대신 host helper가 **해당 레인 builder UID의 live process가 0개**인지를 직접 확인한다.
+- **경합 없는 점검 (구현 A3 1차 지적 2 반영).** 바깥에서 `/proc`를 한 번 훑는 것만으로는 부족하다. 부모가 자식을 만들고 끝나는 사이에 둘 다 놓칠 수 있다. 그래서 레인 wrapper의 `--quiescence` 모드로 레인 계정 안에서 점검한다.
+  1. 레인 계정이 `kill(-1, SIGSTOP)`으로 자기 UID의 모든 프로세스를 멈춘다.
+  2. 이 신호는 fork와 경합하지 않는다. kill(-1)은 자식을 붙일 때 필요한 task list 잠금 아래에서 순회하고, 멈춤 신호가 걸린 fork는 커널이 중단시킨다.
+  3. 그래서 SIGCONT 전까지 프로세스 집합은 줄어들기만 한다. 이때 목록을 만들고, 풀어 준다.
+  - 바깥 스캔도 보조 증인으로 함께 쓴다. 둘 중 하나라도 프로세스를 보면 해제하지 않는다. 점검이 실패해도 해제하지 않는다.
+  - root로는 이 점검을 실행하지 않는다.
+- **prestart 실패의 확인 (구현 A3 1차 지적 1 반영).** adapter의 결과 파일은 빌더 UID가 쓸 수 있다. 그래서 실행 중인 빌더가 `FAILED_PRESTART`를 적고 계속 돌 수 있다.
+  - host는 adapter가 `FAILED_PRESTART`를 보고해도, 레인이 비었음을 위 점검으로 직접 확인한 뒤에만(최대 10초 대기) 슬롯을 돌려준다.
+  - 확인하지 못하면 `UNKNOWN`으로 기록하고 슬롯을 유지한다.
 - 제어 identity가 `/proc`에서 real, effective, saved, fs UID를 검사한다. `/proc`에 hidepid가 있으면 거부한다.
 - 레인당 세션이 1개(§4.1)이므로 "UID에 프로세스 없음"이면 그 세션의 supervisor와 CLI가 모두 끝났다는 뜻이다.
 - 빌더가 몰래 띄운 백그라운드 프로세스도 프로세스로 보인다. 그래서 그 레인은 해제되지 않는다.
@@ -280,6 +291,14 @@ adapter의 `status.json`은 참고용이다.
 - 고정 뒤 PR head가 바뀌면 리뷰를 발송하지 않는다. 작성자가 다시 전달해야 한다.
 - 새 시도는 이전 시도의 전달과 리뷰를 이어받지 않는다.
 - 작업 소유 레인(owner lane)은 host 기록의 첫 작성자 세션 레인이다. control record의 값은 쓰지 않는다.
+- **revision 결속 (구현 A3 1차 지적 3 반영).** host 행은 packet의 `task_revision`을 보여 준다.
+  - 리뷰 발송과 merge-check은 현재 작성자 시도의 revision이 host 기록 `plan_commit`과 그 레인으로 만든 현재 revision과 같을 때만 전달과 리뷰를 인정한다.
+  - `start`가 plan을 올린 뒤 발송이 실패해도, 예전 전달과 리뷰로 새 요구사항이 준비됨이 되지 않는다.
+- **병합된 작업 (지적 7).** 고정된 전달 PR이 전달된 head 그대로 병합됐으면 `start`는 `DONE`을 돌려주고 다시 발송하지 않는다.
+- **A0 (지적 4).** program mode에는 A0 자격 확인 경로가 없다(`DISPATCH.md` §16). 그래서 plan의 A0는 A1로 올린다.
+- **필수 체크 (지적 5).** 제품 profile은 `program_merge_policy: STANDARD`와 함께 `program_required_checks`(필수 check run 이름 목록)를 선언한다.
+  - merge-check은 목록의 각 체크가 head에서 success인지 확인한다. 선언이 없으면 준비 안 됨이다.
+  - 관측된 체크가 진행 중이거나 실패여도 준비 안 됨이다.
 - reap이 어느 작업의 세션을 해제하는지는 이슈의 task key와 host materialization으로 정한다. control record의 `task_id`는 쓰지 않는다.
 - 이슈 본문은 host 기록과 plan으로 정해진다. 본문이 바뀌어 있으면 `operation=review`가 원래 envelope로 되돌린다. merge-check은 읽기만 하고, 본문이 다르면 준비 안 됨으로 보고한다. 메모는 본문이 아니라 댓글로 남긴다.
 - `start`는 plan commit을 envelope를 다시 쓰기 직전에만 올린다. 작업이 바쁘거나 빈 레인이 없어서 멈춘 `start`는 plan을 바꾸지 않는다.
@@ -527,7 +546,7 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 - **세션 키는 그 세션의 모델이 읽을 수 있다:** 서명 도구 파일은 그 레인 UID 소유(0600)다. 그래서 리뷰 대상 PR 안의 prompt injection이 리뷰어 모델에게 키를 출력하게 만들 수 있다. 키가 새면 그 세션의 판정을 위조할 수 있다.
   - 막는 방법: 키를 레인이 읽을 수 없는 별도 UID의 서명 helper에 두고, 레인은 실행만 하게 한다. wrapper가 packet에서 키를 떼어 그 helper에 넘긴다.
   - 이것은 M4(레인 신원)와 함께 호스트 작업으로 한다.
-- **레인 UID 정지 확인의 전제:** 이 확인은 세 가지를 전제한다.
+- **레인 UID 정지 확인의 전제:** 동결 점검(§6)은 fork 경합을 닫는다. 그래도 아래 세 가지를 전제한다.
   - helper의 PID namespace가 `/proc`의 namespace와 같다(`NSpid` 1단계).
   - 레인 UID에 subuid/subgid 범위가 없다.
   - 레인 프로세스는 helper의 launch에서 시작된다.

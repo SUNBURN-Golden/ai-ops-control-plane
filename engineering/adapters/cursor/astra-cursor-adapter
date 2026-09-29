@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -183,12 +184,12 @@ args = sys.argv[1:]
 if len(args) == 1 and args[0] in BLOCKERS:
     print(f"ASTRA_BLOCKED_V1 kind={{args[0]}} launch={{REQUEST}} mac={{mac(('ASTRA_BLOCKED_V1', REQUEST, args[0]))}}")
 elif KIND == "REVIEW":
-    if (len(args) != 3 or args[0] not in ("PASS", "PASS_WITH_NOTES", "FAIL", "DECISION_REQUIRED")
-            or args[1] not in ("A1", "A2") or args[2] not in ("NO", "YES")):
-        sys.exit("usage: PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED A1|A2 NO|YES")
+    if (len(args) != 4 or args[0] not in ("PASS", "PASS_WITH_NOTES", "FAIL", "DECISION_REQUIRED")
+            or args[1] not in ("A1", "A2") or args[2] not in ("A1", "A2", "A3") or args[3] not in ("NO", "YES")):
+        sys.exit("usage: PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED <depth A1|A2> <required A1|A2|A3> NO|YES")
     review, head = BOUND
     print(f"ASTRA_REVIEW_V1 review={{review}} head={{head}} verdict={{args[0]}} depth={{args[1]}} "
-          f"contract_change={{args[2]}} mac={{mac(('ASTRA_REVIEW_V1', review, head, *args))}}")
+          f"required={{args[2]}} contract_change={{args[3]}} mac={{mac(('ASTRA_REVIEW_V1', review, head, *args))}}")
 else:
     if len(args) != 2 or not re.fullmatch(r"[1-9][0-9]{{0,9}}", args[0]) or not re.fullmatch(r"[0-9a-f]{{40}}", args[1]):
         sys.exit("usage: <pr number> <40-hex head sha>")
@@ -247,8 +248,12 @@ def build_prompt(packet, signer=None):
             f"criteria, at depth {packet.get('audit_floor', 'A1')} (A2 adds concurrency, state,",
             "persistence, payment, security and protocol behavior).",
             "When the review is complete, choose the verdict and run exactly:",
-            f"  /usr/bin/python3 -I {signer} <PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED> <A1|A2> <NO|YES>",
-            "(the last argument says whether the change alters a contract).",
+            f"  /usr/bin/python3 -I {signer} <PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED> <A1|A2> <A1|A2|A3> <NO|YES>",
+            "The arguments are: the verdict; the depth you actually reviewed at; the",
+            "minimum depth the actual diff requires under the repository rules",
+            "(A3 for invariant, schema, public-contract, blockchain, financial or",
+            "authority-boundary changes), independent of the task's audit floor; and",
+            "whether the change alters a contract.",
             "Submit one GitHub pull request review whose body starts with the single",
             "line that command prints, followed by the findings. Do not edit that",
             "review afterwards and do not post the line anywhere else. The signer file",
@@ -412,6 +417,49 @@ def diag_env():
     return 0
 
 
+def census(kill=os.kill, proc="/proc"):
+    """Race-free census of this lane UID's processes (the host's quiescence probe).
+
+    kill(-1, SIGSTOP) stops every process of this UID and cannot race a fork: the kernel
+    aborts any fork that sees the pending stop, and kill(-1) walks the task list under the
+    lock that attaching a child needs. Until SIGCONT the stopped set can only shrink, so the
+    listing below is complete. Only the lane identity may run it (never root).
+    """
+    uid = os.getuid()
+    if uid == 0 or os.geteuid() != uid:
+        print(json.dumps({"status": "FAIL", "reason": "census must run as the lane identity"}))
+        return 1
+    me, live = os.getpid(), []
+    try:
+        try:
+            kill(-1, signal.SIGSTOP)
+        except ProcessLookupError:
+            pass
+        with os.scandir(proc) as entries:
+            for entry in entries:
+                if not entry.name.isdecimal() or int(entry.name) == me:
+                    continue
+                try:
+                    text = Path(entry.path, "status").read_text(encoding="utf-8", errors="replace")
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                ids = next((line.split()[1:5] for line in text.splitlines() if line.startswith("Uid:")), None)
+                if not ids or len(ids) != 4 or not all(value.isdecimal() for value in ids):
+                    raise OSError(f"unparseable {entry.path}/status")
+                if str(uid) in ids:
+                    live.append(int(entry.name))
+    except OSError as exc:
+        print(json.dumps({"status": "FAIL", "reason": f"census unverifiable: {exc}"}))
+        return 1
+    finally:
+        try:
+            kill(-1, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+    print(json.dumps({"status": "OK", "live": sorted(live)}))
+    return 0
+
+
 def main(argv):
     if argv == ["--preflight"]:
         return preflight()
@@ -419,7 +467,9 @@ def main(argv):
         return launch()
     if argv == ["--diag-env"]:
         return diag_env()
-    print("usage: astra-cursor-adapter --preflight | --launch | --diag-env",
+    if argv == ["--quiescence"]:
+        return census()
+    print("usage: astra-cursor-adapter --preflight | --launch | --diag-env | --quiescence",
           file=sys.stderr)
     return 2
 

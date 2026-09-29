@@ -760,7 +760,14 @@ Writer (`operation=start`):
 Session release (`operation=reap`):
 - runs after the session posts its deliverable (`ASTRA_DELIVERY_V1`, a review
   verdict, DECISION_REQUIRED, BLOCKED or STALLED);
-- the host retires the CONFIRMED row only when the lane UID has no live process;
+- the host retires the CONFIRMED row only when the lane UID has no live
+  process, by an outside `/proc` scan plus a race-free census taken inside the
+  lane (`--quiescence`: freeze every lane process with kill(-1, SIGSTOP),
+  list, thaw);
+- an adapter's FAILED_PRESTART frees the slot only after the host sees the
+  lane empty; otherwise the launch is UNKNOWN and the slot is kept;
+- `start` returns DONE, and never redispatches, once the pinned delivery PR is
+  merged at its delivered head;
 - the control record shows `RELEASED`; ownership is unchanged;
 - UNKNOWN or SUBMITTING stays operator-only (§9).
 
@@ -793,7 +800,8 @@ Session signatures and pins (`operation=reap`):
   ledger; the adapter gives the session a private signer that prints
   `ASTRA_DELIVERY_V1 pr=<n> head=<sha> mac=<hmac>` or
   `ASTRA_REVIEW_V1 review=<id> head=<sha> verdict=<...> depth=<A1|A2>
-  contract_change=<NO|YES> mac=<hmac>`;
+  required=<A1|A2|A3> contract_change=<NO|YES> mac=<hmac>`, where `depth` is
+  VERIFIED_REVIEW_DEPTH and `required` is VERIFIED_REQUIRED_DEPTH (§13);
 - a blocker is the session's own signed line
   `ASTRA_BLOCKED_V1 kind=<DECISION_REQUIRED|BLOCKED|STALLED> launch=<id> mac=<hmac>`;
   unsigned text never releases a session, and the host refuses to release a
@@ -812,9 +820,18 @@ Session signatures and pins (`operation=reap`):
 
 Merge readiness (`operation=merge-check`):
 - computes §18 for the exact head from host pins: the current writer's pinned
-  delivery must name this PR and head; verdicts count only when pinned for this
-  delivery's review ids, from distinct lanes that never wrote the task; any
-  active review blocks; dependencies must be DONE;
+  delivery must name this PR and head, for the current task revision (the host
+  row's revision must equal the one derived from the host-recorded plan
+  commit); verdicts count only when pinned for this delivery's review ids,
+  from distinct lanes that never wrote the task; any active review blocks;
+  dependencies must be DONE;
+- EFFECTIVE_AUDIT_FLOOR = max(plan AUDIT_FLOOR, every pinned
+  VERIFIED_REQUIRED_DEPTH) sets the review count, the required review depth
+  and the second review slot; A3 adds ASTRA_GATE=ARCHITECTURE; program mode
+  promotes a plan A0 to A1 (no §16 qualification path exists);
+- the verification gate requires every check named in the product's
+  `program_required_checks` to have succeeded on the head, and no observed run
+  to be incomplete or failing; an undeclared list is not ready;
 - anything not machine-computable makes it not ready: Astra gates,
   undeclared project merge prerequisites, labels `needs-user`, `blocked` and
   `decision-required`;

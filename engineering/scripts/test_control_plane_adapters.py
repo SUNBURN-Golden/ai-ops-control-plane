@@ -60,7 +60,7 @@ class AdapterPromptTests(unittest.TestCase):
                 prompt = adapter.build_prompt(REVIEWER, signer)
                 self.assertIn("read-only", prompt)
                 self.assertIn("Do not commit, push", prompt)
-                self.assertIn(f"/usr/bin/python3 -I {signer} <PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED>", prompt)
+                self.assertIn(f"/usr/bin/python3 -I {signer} <PASS|PASS_WITH_NOTES|FAIL|DECISION_REQUIRED> <A1|A2> <A1|A2|A3>", prompt)
                 self.assertIn(f"/usr/bin/python3 -I {signer} BLOCKED", prompt)
                 self.assertNotIn("d" * 32, prompt)  # the key stays in the signer file
                 self.assertNotIn("ASTRA_DELIVERY_V1", prompt)
@@ -86,11 +86,12 @@ class AdapterPromptTests(unittest.TestCase):
                 adapter = load(name)
                 review_signer = adapter.write_signer(self.session(name, "r"), REVIEWER)
                 self.assertEqual(review_signer.stat().st_mode & 0o777, 0o600)
-                line = run_signer(review_signer, "FAIL", "A2", "YES").stdout.strip()
+                line = run_signer(review_signer, "FAIL", "A2", "A3", "YES").stdout.strip()
                 self.assertEqual(host.verify_pin(host_row(REVIEWER), line),
                                  {"kind": "REVIEW", "review": "c" * 24, "head": "b" * 40, "verdict": "FAIL",
-                                  "depth": "A2", "contract_change": "YES"})
-                self.assertNotEqual(run_signer(review_signer, "MAYBE", "A1", "NO").returncode, 0)
+                                  "depth": "A2", "required": "A3", "contract_change": "YES"})
+                self.assertNotEqual(run_signer(review_signer, "MAYBE", "A1", "A1", "NO").returncode, 0)
+                self.assertNotEqual(run_signer(review_signer, "PASS", "A1", "NO").returncode, 0)  # required missing
                 delivery_signer = adapter.write_signer(self.session(name, "w"), WRITER)
                 line = run_signer(delivery_signer, "12", "f" * 40).stdout.strip()
                 self.assertEqual(host.verify_pin(host_row(WRITER), line), {"kind": "DELIVERY", "pr": 12, "head": "f" * 40})
@@ -149,11 +150,56 @@ class AdapterPromptTests(unittest.TestCase):
                     self.assertEqual(hashlib.sha256((directory / name).read_bytes()).hexdigest(), digest)
 
 
-    def test_all_program_lanes_share_one_signer_and_prompt_implementation(self):
+    def test_all_program_lanes_share_one_signer_and_census_implementation(self):
         def shared(name):
             text = (CURSOR if (CURSOR / name).exists() else ADAPTERS).joinpath(name).read_text()
-            return text[text.index('SIGNER_TEMPLATE = """'):text.index("def build_prompt(")]
+            return (text[text.index('SIGNER_TEMPLATE = """'):text.index("def build_prompt(")],
+                    text[text.index("def census("):text.index("def main(")])
         self.assertEqual(len({shared(name) for name in NAMES}), 1)
+
+    def test_every_wrapper_routes_the_quiescence_probe_to_its_own_lane(self):
+        for wrapper, user in (("astra-builder-devin", "astra-builder-devin"),
+                              ("astra-builder-grok-build", "astra-builder-grokbuild"),
+                              ("astra-builder-glm", "astra-builder-glm"), ("astra-builder-cursor", "astra-builder-cursor")):
+            text = ((CURSOR if (CURSOR / wrapper).exists() else ADAPTERS) / wrapper).read_text()
+            with self.subTest(wrapper=wrapper):
+                self.assertIn(f'exec /usr/bin/sudo -n -u {user} -- "$INNER" --quiescence', text)
+
+    def fake_proc(self, entries):
+        proc = Path(self.temp.name) / f"proc{len(list(Path(self.temp.name).iterdir()))}"
+        proc.mkdir()
+        for pid, uids in entries.items():
+            (proc / str(pid)).mkdir()
+            (proc / str(pid) / "status").write_text(f"Name:\tx\nUid:\t{uids}\n")
+        (proc / "self").mkdir()
+        return proc
+
+    def test_census_freezes_lists_and_thaws_the_lane(self):
+        me = os.getpid()
+        proc = self.fake_proc({me: "1030 1030 1030 1030", 51: "1030 1030 1030 1030", 52: "0 0 0 0",
+                               53: "1040 1030 1040 1040"})
+        for name in NAMES:
+            adapter = load(name)
+            signals = []
+            with self.subTest(adapter=name), patch.object(adapter.os, "getuid", return_value=1030), \
+                 patch.object(adapter.os, "geteuid", return_value=1030), \
+                 patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                self.assertEqual(adapter.census(kill=lambda pid, sig: signals.append((pid, sig)), proc=str(proc)), 0)
+                self.assertEqual(json.loads(stdout.getvalue()), {"status": "OK", "live": [51, 53]})
+                self.assertEqual(signals, [(-1, adapter.signal.SIGSTOP), (-1, adapter.signal.SIGCONT)])
+
+    def test_census_thaws_even_when_the_listing_fails_and_never_runs_as_root(self):
+        adapter = load("astra-grok-adapter")
+        proc = self.fake_proc({61: "garbage"})
+        signals = []
+        with patch.object(adapter.os, "getuid", return_value=1040), patch.object(adapter.os, "geteuid", return_value=1040), \
+             patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(adapter.census(kill=lambda pid, sig: signals.append(sig), proc=str(proc)), 1)
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "FAIL")
+        self.assertEqual(signals, [adapter.signal.SIGSTOP, adapter.signal.SIGCONT])
+        with patch.object(adapter.os, "getuid", return_value=0), patch.object(adapter.os, "geteuid", return_value=0), \
+             patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(adapter.census(kill=lambda pid, sig: self.fail("root must never signal -1")), 1)
 
 
 FAKE_CLI = r"""#!/usr/bin/python3 -I

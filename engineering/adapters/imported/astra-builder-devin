@@ -10,6 +10,10 @@ case "${1:-}" in
   --preflight)
     exec /usr/bin/sudo -n -u astra-builder-devin -- "$INNER" --preflight
     ;;
+  --quiescence)
+    # Host quiescence probe: a race-free census taken as the lane identity.
+    exec /usr/bin/sudo -n -u astra-builder-devin -- "$INNER" --quiescence
+    ;;
   *)
     packet="${1:?launch packet path required}"
     exec /usr/bin/sudo -n -u astra-builder-devin -- "$INNER" --launch < "$packet"

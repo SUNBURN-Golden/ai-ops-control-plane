@@ -156,6 +156,7 @@ control record 작성자는 그 토큰의 login이다. 이 결정은 `AGENTS.md`
     - 다른 작업이 이미 고정한 PR을 전달물로 가리키면 거부한다.
     - 검증된 결과를 해제 기록에 고정한다.
   - **write-once:** 같은 요청을 다시 부르면 저장된 결과를 돌려준다. 이때 evidence와 pin이 처음과 같아야 하고, 다르면 거부한다.
+  - 정지 확인은 바깥 `/proc` 스캔과, 레인 wrapper `--quiescence`(레인 계정이 자기 프로세스를 모두 SIGSTOP으로 멈추고 목록을 만든 뒤 SIGCONT로 푸는 경합 없는 점검)를 함께 쓴다. control identity가 wrapper를 실행하는 sudo 규칙에 `--quiescence`를 더한다.
   - 정지 확인은 fail-closed다. 아래 중 하나라도 해당하면 거부한다.
     - `/proc`에 hidepid가 있다.
     - helper의 PID namespace가 `/proc`의 namespace가 아니다(`NSpid`가 1단계가 아님).
@@ -163,6 +164,7 @@ control record 작성자는 그 토큰의 login이다. 이 결정은 `AGENTS.md`
     - `/proc/<pid>/status`를 읽거나 해석할 수 없다.
   - 세션을 끄지 않는다.
   - adapter의 `status.json`은 빌더가 쓸 수 있는 곳에 있어 위조가 가능하다. 그래서 증거로 쓰지 않는다.
+- `launch`는 adapter가 `FAILED_PRESTART`를 보고해도, 같은 정지 확인으로 레인이 비었음을 본 뒤에만(최대 10초) 슬롯을 돌려준다. 그렇지 않으면 `UNKNOWN`으로 기록한다.
 - `launch`는 이미 해제된(RECONCILED) 요청을 다시 받으면 저장된 결과를 재생하지 않는다. 대신 `FAILED_PRESTART`("already released")를 돌려준다. 재개는 언제나 새 시도다.
 - `materialize-begin --program <id> --node <id> --repository <owner/repo> --plan-commit <40 hex>`
 - `materialize-finish --program <id> --node <id> --request <24 hex> --outcome CREATED|UNKNOWN [--issue N]`

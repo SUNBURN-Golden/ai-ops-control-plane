@@ -53,11 +53,11 @@ def signed_blocker(packet, kind="BLOCKED", nonce=None):
     return f"ASTRA_BLOCKED_V1 kind={kind} launch={launch} mac={host.pin_mac(key, ('ASTRA_BLOCKED_V1', launch, kind))}"
 
 
-def signed_review(packet, verdict="PASS", depth="A1", change="NO", nonce=None):
-    fields = ("ASTRA_REVIEW_V1", packet["review_request_id"], packet["head_sha"], verdict, depth, change)
+def signed_review(packet, verdict="PASS", depth="A1", change="NO", nonce=None, required="A1"):
+    fields = ("ASTRA_REVIEW_V1", packet["review_request_id"], packet["head_sha"], verdict, depth, required, change)
     mac = host.pin_mac(nonce or packet["review_nonce"], fields)
     return (f"ASTRA_REVIEW_V1 review={packet['review_request_id']} head={packet['head_sha']} verdict={verdict} "
-            f"depth={depth} contract_change={change} mac={mac}")
+            f"depth={depth} required={required} contract_change={change} mac={mac}")
 
 
 class FakeGitHub:
@@ -254,7 +254,7 @@ class ProgramModeTests(unittest.TestCase):
             "schema_version": 1, "project": "ZARI", "repository": REPO,
             "allowed_builders": list(prog.LANE_ORDER), "enabled_builders": list(prog.LANE_ORDER),
             "control_record_actor": ACTOR, "allowed_task_actors": [ACTOR], "allowed_dispatch_actors": [ACTOR],
-            "program_merge_policy": "STANDARD",
+            "program_merge_policy": "STANDARD", "program_required_checks": ["offline"],
         }
         for target, value in ((cp, "load_config"), (cp, "require_runtime_enabled")):
             patcher = patch.object(target, value, return_value=self.cfg if value == "load_config" else None)
@@ -318,7 +318,8 @@ class ProgramModeTests(unittest.TestCase):
     def deliver(self, issue, writer, pr=7, head=HEAD, green=True, body=None, keep_pr=False, **comment):
         if not keep_pr:
             self.pr(pr, head, ref=prog.branch_for(writer["packet"]["task_id"]))
-        self.gh.checks[head] = [{"status": "completed", "conclusion": "success" if green else "failure"}]
+        self.gh.checks[head] = [{"name": "offline", "status": "completed",
+                                 "conclusion": "success" if green else "failure"}]
         text = body if body is not None else "Ready.\n\n" + signed_delivery(writer["packet"], pr, head)
         posted = self.gh.create_comment(issue, text, **comment)
         return f"https://github.com/{REPO}/issues/{issue}#issuecomment-{posted['id']}"
@@ -338,8 +339,9 @@ class ProgramModeTests(unittest.TestCase):
                          "CONFIRMED")
         return {**prepared, "launch_request_id": packet["launch_request_id"], "packet": packet}
 
-    def post_review(self, pr, review, verdict="PASS", depth="A1", change="NO", nonce=None, line=None, **kwargs):
-        body = (line or signed_review(review["packet"], verdict, depth, change, nonce)) + "\n\nfindings"
+    def post_review(self, pr, review, verdict="PASS", depth="A1", change="NO", nonce=None, line=None,
+                    required="A1", **kwargs):
+        body = (line or signed_review(review["packet"], verdict, depth, change, nonce, required)) + "\n\nfindings"
         return self.gh.add_review(pr, body, **kwargs)
 
     def released_writer(self, issue=None, node_id="n1", **deliver):
@@ -391,7 +393,8 @@ class ProgramModeTests(unittest.TestCase):
         self.reviewed(issue, verdict="FAIL")
         self.cfg["program_merge_policy"] = None
         reasons = self.reasons(issue)
-        for expected in ("check runs are not all green", "returned FAIL", "0 of 1 required", "program_merge_policy"):
+        for expected in ("incomplete or failing", "required check 'offline' has not succeeded", "returned FAIL",
+                         "0 of 1 required", "program_merge_policy"):
             self.assertIn(expected, reasons)
 
     def test_merge_check_requires_a_clean_same_repo_pr_against_the_default_branch(self):
@@ -421,7 +424,7 @@ class ProgramModeTests(unittest.TestCase):
         self.reviewed(issue)
         other = "b" * 40
         self.pr(sha=other)  # the writer pushed after delivering
-        self.gh.checks[other] = [{"status": "completed", "conclusion": "success"}]
+        self.gh.checks[other] = [{"name": "offline", "status": "completed", "conclusion": "success"}]
         reasons = self.reasons(issue)
         self.assertIn("host-pinned delivery", reasons)
         self.assertIn("0 of 1 required", reasons)  # the PASS was for the delivered head only
@@ -599,16 +602,75 @@ class ProgramModeTests(unittest.TestCase):
             prog.reap(issue, writer["launch_request_id"], self.comment_url(issue, both))
         self.assertEqual(self.record(issue)["launch_state"], "CONFIRMED")
 
-    def test_an_a0_task_body_is_repaired_too(self):
+    def test_a0_is_promoted_to_a1_in_program_mode(self):
+        # Astra A3 finding 4: no A0 qualification path exists, so A0 never skips review.
         self.gh.contents[PLAN1] = plan([node(floor="A0")])
         issue, _ = self.released_writer()
-        body = self.gh.issues[issue]["body"]
-        self.gh.issues[issue]["body"] = body + "\n\nA note someone added to the body."
-        with self.assertRaisesRegex(cp.ControlPlaneError, "does not require review slot 1"):
-            prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
-        self.assertEqual(self.gh.issues[issue]["body"], body)
+        self.assertIn("0 of 1 required", self.reasons(issue))
+        self.assertIn("AUDIT_FLOOR: A1", self.gh.issues[issue]["body"])
+        self.reviewed(issue)
         check = prog.merge_check(issue, 7)
-        self.assertTrue(check["ready"], check["reasons"])  # A0: no review, and the envelope is back
+        self.assertTrue(check["ready"], check["reasons"])
+
+    def test_required_checks_must_each_succeed_on_the_head(self):
+        # Astra A3 finding 5: only observed checks were examined.
+        issue, _ = self.released_writer()
+        self.reviewed(issue)
+        self.assertTrue(prog.merge_check(issue, 7)["ready"])
+        cases = [
+            ([{"name": "lint", "status": "completed", "conclusion": "skipped"}], "required check 'offline'"),
+            ([{"name": "offline", "status": "completed", "conclusion": "skipped"}], "required check 'offline'"),
+            ([{"name": "offline", "status": "in_progress", "conclusion": None}], "incomplete or failing"),
+            ([], "required check 'offline'"),
+        ]
+        for runs, expected in cases:
+            with self.subTest(runs=runs):
+                self.gh.checks[HEAD] = runs
+                self.assertIn(expected, self.reasons(issue))
+        self.gh.checks[HEAD] = [{"name": "offline", "status": "completed", "conclusion": "success"}]
+        self.cfg.pop("program_required_checks")
+        self.assertIn("required checks are not declared", self.reasons(issue))
+
+    def test_a_reviewers_verified_required_depth_raises_the_floor(self):
+        # Astra A3 finding 6: EFFECTIVE_AUDIT_FLOOR = max(plan floor, VERIFIED_REQUIRED_DEPTH).
+        issue, _ = self.released_writer()
+        self.reviewed(issue, depth="A2", required="A2")
+        self.assertIn("1 of 2 required independent reviews at effective floor A2", self.reasons(issue))
+        self.reviewed(issue, slot=2, depth="A2", required="A2")  # the second slot opens
+        check = prog.merge_check(issue, 7)
+        self.assertTrue(check["ready"], check["reasons"])
+
+    def test_a_verified_a3_requirement_adds_the_architecture_gate(self):
+        issue, _ = self.released_writer()
+        self.reviewed(issue, depth="A2", required="A3")
+        reasons = self.reasons(issue)
+        self.assertIn("Astra gate ARCHITECTURE", reasons)
+        self.assertIn("effective floor A3", reasons)
+
+    def test_a_revision_change_invalidates_the_old_delivery_and_reviews(self):
+        # Astra A3 finding 3: start advanced the plan and envelope, then provider preflight failed.
+        issue, _ = self.released_writer()
+        self.reviewed(issue)
+        self.assertTrue(prog.merge_check(issue, 7)["ready"])
+        self.gh.contents[PLAN2] = plan([node(floor="A1", spec="New requirement.")])
+        self.gh.compare[(PLAN1, PLAN2)] = "ahead"
+        with patch.object(cp, "host_preflight", side_effect=cp.ControlPlaneError("provider preflight failed")):
+            with self.assertRaisesRegex(cp.ControlPlaneError, "provider preflight failed"):
+                prog.start(issue, "zari", "n1", PLAN2, self.file("p.json"), preflight=lambda lane: True)
+        self.assertEqual(self.host.ledger.materialize_status("zari", "n1")["plan_commit"], PLAN2)
+        check = prog.merge_check(issue, 7)
+        self.assertFalse(check["ready"])
+        self.assertIn("older task revision", " | ".join(check["reasons"]))
+        with self.assertRaisesRegex(cp.ControlPlaneError, "older task revision"):
+            prog.prepare_review(issue, 1, self.file("r.json"), preflight=lambda lane: True)
+
+    def test_a_merged_task_is_never_redispatched(self):
+        # Astra A3 finding 7: the delivered PR merged while the issue stayed open.
+        issue, _ = self.released_writer()
+        self.gh.pulls[7].update(merged=True, state="closed")
+        done = prog.start(issue, "zari", "n1", PLAN1, self.file("p.json"), preflight=lambda lane: True)
+        self.assertEqual(done["status"], "DONE")
+        self.assertEqual(self.record(issue)["attempt_id"], 1)
 
     def test_d1_a_reviewer_escalation_is_a_verdict_never_a_retry(self):
         issue, _ = self.released_writer()
