@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "user_activation_approval": "NOT_APPROVED",
-  "user_activation_approval_pointer": "PENDING",
-  "implementation_audit": "PENDING",
-  "implementation_audit_pointer": "PENDING",
-  "runner_preflight": "PENDING",
-  "runner_preflight_pointer": "PENDING",
-  "runtime_enabled": false,
-  "activated_runtime_sha": "PENDING"
+  "user_activation_approval": "APPROVED",
+  "user_activation_approval_pointer": "https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/35",
+  "implementation_audit": "PASS",
+  "implementation_audit_pointer": "https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/34#pullrequestreview-5346437478",
+  "runner_preflight": "PASS",
+  "runner_preflight_pointer": "https://github.com/BeautifulMind-JT/ai-ops-control-plane/actions/runs/36531799734",
+  "runtime_enabled": true,
+  "activated_runtime_sha": "1dbe1075bf954493235ed7c06d05d6be9efcbd6d"
 }

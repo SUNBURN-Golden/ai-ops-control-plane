@@ -3,12 +3,29 @@ from pathlib import Path
 from unittest.mock import patch
 import control_plane as cp
 
+DISABLED_ACTIVATION = {
+    "schema_version": 1,
+    "user_activation_approval": "NOT_APPROVED",
+    "user_activation_approval_pointer": "PENDING",
+    "implementation_audit": "PENDING",
+    "implementation_audit_pointer": "PENDING",
+    "runner_preflight": "PENDING",
+    "runner_preflight_pointer": "PENDING",
+    "runtime_enabled": False,
+    "activated_runtime_sha": "PENDING",
+}
+
 class CentralIdentityTests(unittest.TestCase):
     def test_peer_eligibility_does_not_bypass_disabled_activation(self):
+        # Uses a disabled record rather than the live activation.json, so the
+        # guard is tested whether or not the runtime is currently enabled.
         for repo in ["kix-protocol", "ZARI", "film-unit-mv-studio", "maeum-gyeol"]:
             with self.subTest(repo=repo), tempfile.TemporaryDirectory() as directory, patch.dict(
                 os.environ, {"ASTRA_TARGET_REPOSITORY": "BeautifulMind-JT/" + repo}
-            ), patch.object(cp, "GithubApi") as api, patch.object(cp, "host_call") as host:
+            ), patch.object(cp, "ACTIVATION_PATH", Path(directory) / "activation.json"), patch.object(
+                cp, "GithubApi"
+            ) as api, patch.object(cp, "host_call") as host:
+                cp.ACTIVATION_PATH.write_text(json.dumps(DISABLED_ACTIVATION))
                 self.assertIs(cp.load_config()["deployment_enabled"], True)
                 root = Path(directory)
                 packet = root / "packet.json"
@@ -25,10 +42,9 @@ class CentralIdentityTests(unittest.TestCase):
                 host.assert_not_called()
 
     def test_flipping_only_global_boolean_cannot_restore_stale_pass(self):
-        # Exercise the actual candidate record: stale audit/preflight/approval
-        # evidence was cleared, so changing only runtime_enabled must fail.
-        activation = cp.load_activation()
-        activation["runtime_enabled"] = True
+        # A record whose approval/audit/preflight evidence is cleared must not
+        # become enabled by changing only runtime_enabled.
+        activation = dict(DISABLED_ACTIVATION, runtime_enabled=True)
         with patch.object(cp, "load_json", return_value=activation):
             with self.assertRaisesRegex(cp.ControlPlaneError, "without all activation gates"):
                 cp.load_activation()
