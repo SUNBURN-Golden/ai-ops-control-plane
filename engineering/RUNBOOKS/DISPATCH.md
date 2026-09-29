@@ -199,11 +199,10 @@ a manual claim/send is unresolved.
 In automated mode manual dispatch requires a serialized MANUAL_CLAIM_ALLOWED
 action and the same launch protocol. Outage does not bypass ownership.
 
-GitHub Actions is one transport, not the authority. `scripts/control_plane_local.py`
-runs the same prepare/launch/finalize protocol on the control host under a
-per-task lock (docs/CONTROL_PLANE_RUNTIME.md). Use exactly one dispatch route
-at a time; an Actions outage or quota block does not authorize a second route
-to relaunch an unresolved request.
+Runtime dispatch has exactly one route: the self-hosted `control-plane-runtime.yml`
+workflow. An Actions outage or quota block does not authorize another route to
+launch or relaunch; a second route needs source pinning and shared
+serialization with this one first (docs/CONTROL_PLANE_RUNTIME.md).
 
 Grok outage is not a workflow outage: the same fixed mechanical command may be
 invoked by another authenticated caller. Provider outage for the assigned
