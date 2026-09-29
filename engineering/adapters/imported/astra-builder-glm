@@ -1,0 +1,17 @@
+#!/bin/bash
+# ASTRA GLM builder wrapper (root-owned, invoked by astra-host-control as the
+# astra-control identity). Reads the launch packet as control identity, then
+# drops to the builder identity for all provider work. ASTRA_HOST_INFLIGHT_FD
+# stays open in this wrapper while the send is in flight; sudo strips it from
+# the builder process environment and descriptor table.
+set -euo pipefail
+INNER=/opt/astra/libexec/astra-glm-adapter
+case "${1:-}" in
+  --preflight)
+    exec /usr/bin/sudo -n -u astra-builder-glm -- "$INNER" --preflight
+    ;;
+  *)
+    packet="${1:?launch packet path required}"
+    exec /usr/bin/sudo -n -u astra-builder-glm -- "$INNER" --launch < "$packet"
+    ;;
+esac
