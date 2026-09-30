@@ -75,6 +75,13 @@ the host checklist are in `adapters/cursor/README.md`.
    Then update protected lane, runtime and flow policy through the existing approval gate.
    Run one diagnostic canary, close its session and reconcile its ledger before general intake.
 
+**User decision M6 (2026-09-30): CURSOR is enabled now for the four program-mode products**
+(kix-protocol, ZARI, film-unit-mv-studio, kix-commerce-apps), without steps 4–7 above.
+Steps 1–3 are done and the host preflight passed (`grok-4.7-xhigh`). The User accepts the
+residual risk of the missing isolation proofs, lane qualification, independent adapter
+review and diagnostic canary. The first program-mode CURSOR task serves as the canary.
+maeum-gyeol stays DEVIN-only. CURSOR remains last in the lane order.
+
 Legacy three-lane host configuration stays valid. Enabling an unregistered lane is
 rejected. Source enum membership never implies authentication or production readiness.
 FILM/MAEUM rollout and SOULBOUND remain outside this change.
