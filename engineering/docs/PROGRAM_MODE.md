@@ -1,17 +1,21 @@
 # Program mode — 설계 초안 v2
 
 2026-09-30 후속 구현 후보: [Program Astra automation](PROGRAM_ASTRA_AUTOMATION.md).
-현재 A3/마일스톤의 무조건 수동 병합과 Fable 수동 호출 공백을, 승인된 node의
-명시적 위임과 보호된 exact-HEAD scope receipt로 연결한다. 이 후보의 독립 A3
-감사·User 병합·host qualification/attestation 전에는 기존 운영이 적용된다.
-`user_merge=true` 노드·범위 밖 결정·화면/작품 승인·출시·추가 과금은 그대로
-User 권한이다. M1의 computed READY_FOR_MERGE 조건을 텍스트 PASS로 대체하지 않는다.
+승인된 ordinary node의 명시적 위임과 보호된 exact-HEAD scope receipt를
+연결하는 제한된 Option C 후보다. 채택 결정은 PENDING이며 M1/M5의 기승인
+확장으로 간주하지 않는다. 독립 A3 감사·별도 User 권한 결정·실제 host
+qualification/보호된 service authorization 전에는 기존 운영이 적용된다.
+현재 리뷰의 contract-change YES, 원래 RELEASE gate, `user_merge=true`,
+범위 밖 결정·화면/작품 승인·추가 과금은 receipt PASS와 무관하게 User
+권한이다. 보호된 Fable reconcile은 아직 구현·qualification되지 않아 전체
+자동 실행은 NOT_READY다. CI와 preflight 성공은 이 채택 조건을 대신하지 않는다.
 
 v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. v2는 v1(`52ad415`) 재검토에서 남은 F4(불명 생성 요청)와 구현 확인 항목 2개를 반영하고, 호스트 조사 결과(§15)를 더했다. 대응표는 §14에 있다.
 
-상태: **설계 초안**. 코드, 호스트, 활성화 기록은 바꾸지 않는다. 이 문서는
-`RUNTIME_PATHS`에 들어 있지 않다. 구현 전에 Astra A3 설계 감사와 User 승인이
-필요하다. 아래 §10의 규칙 변경은 구현 PR에서 반영하고, 그 PR도 별도로 감사한다.
+상태: **설계·구현 채택 후보**. 이 문서는 현재 `RUNTIME_PATHS`에 포함되어
+운영 정책 변경 시 새 감사와 활성화 재결합이 필요하다. 아래 기존 결정의
+역사를 보존하며 추가 bridge 후보를 승인된 결정으로 기록하지 않는다.
+이번 소스 변경은 호스트 설치나 실제 activation 변경을 수행하지 않는다.
 
 목표: User가 "청사진대로 개발 시작"이라고 한 번 지시하면, 등록된 모든 제품이
 승인된 계획의 끝까지 진행되게 한다. 설계 결정, 화면 승인, 출시처럼 User만 할
@@ -64,6 +68,24 @@ v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. v2는 v1(`52
 - 모델은 읽기 전용이다. 명령 실행, 파일 쓰기, 네트워크 도구가 없고, GitHub 토큰을 갖지 않는다. 결과 댓글은 도구가 운영자 토큰으로 올린다.
 - 이전 ChatGPT Astra에 보낸 요청은 무효다. 이전 결과는 그 결과가 감사한 HEAD에 대한 기록으로만 남는다.
 - 남는 위험은 §13에 적는다.
+
+**추가 후보 — Option C, 결정 PENDING (2026-09-30).** M1/M5만으로 아래
+새 권한이 이미 승인됐다고 해석하지 않는다. 새 exact-HEAD 감사와 실제 User
+결정·host qualification 후에만 효력이 생긴다.
+- coordinator의 고정 `astra-audit`/`astra-consult` 호출과 제한된 ordinary
+  scope의 `astra_auto_merge` 실행. 기존 모든 CI/리뷰/제품 조건은 유지한다.
+- runner의 정확한 `sudo aiops-fable program` 한 명령만 별도 root 예외
+  후보로 둔다. shell·임의 Python/인수·init/reconcile·builder root는 불허한다.
+- protected service authorization은 accepted runtime commit, 실제 User 결정,
+  독립 감사, host qualification과 설치 code/config/profile/policy fingerprint에
+  묶인다. PENDING/누락/hash 변경이면 workflow와 직접 stdin 진입 모두 거절한다.
+- contract-change YES, 원래 RELEASE, User-only/risk/release 권한은 위임에서
+  제외한다. A3 승격은 RELEASE 예약을 덮어쓰지 않는다.
+- ERROR/UNKNOWN을 새 계획이나 HEAD로 우회하지 않는다. 별도 protected Fable
+  reconcile 구현·실호스트 qualification 전에는 전체 rollout NOT_READY다.
+
+이 항목은 새 M 번호의 승인 기록이 아니며 기존 M1/M5와 원본 감사 결과를
+덮어쓰지 않는다. 자세한 source/adoption 후보는 PROGRAM_ASTRA_AUTOMATION에 있다.
 
 ## 1. 역할
 
@@ -264,7 +286,10 @@ flowchart TD
 4. Astra에게 넘기면 현장 소장이 이슈에 `consult-astra` 라벨을 붙이고, Slack 결정 채널에 한 줄을 남긴다.
    - 그 줄: `ASTRA_CONSULT_REQUEST repo=<저장소> issue=<번호> comment=<질문 댓글 id>`
    - 운영자(그록봇)가 그 값 그대로 `aiops-fable consult`를 실행한다(M5). 도구가 `ASTRA_CONSULT_V1 result=<ANSWERED|USER_REQUIRED> by=ASTRA_FABLE` 답을 이슈에 올린다.
-   - 운영자에게 이 줄을 전달하는 것은 지금은 User나 Slack이다. 현장 소장이 runtime으로 직접 부르는 방식은 program mode를 다시 켤 때 따로 정한다.
+   - 기존 경로에서 운영자에게 이 줄을 전달하는 것은 User나 Slack이다.
+     Option C 후보를 별도로 채택한 뒤에는 고정 `astra-consult` operation이
+     protected service authorization을 확인하고 호출한다. 현장 소장이
+     qualification을 판단하지 않으며 거절을 수동 명령으로 자동 우회하지 않는다.
    - `USER_REQUIRED`이면 현장 소장이 이슈에 `needs-user` 라벨을 붙이고 Slack으로 User에게 알린다.
 5. Opus는 그 작업의 코드를 쓰지 않는다(비작성자). 자기가 초안을 쓴 설계는 감사하지 않는다.
 
@@ -536,7 +561,10 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
   - "진행 중 티켓을 다른 레인이 가져가지 않는다"는 유지한다.
 - `DISPATCH.md`
   - 추가한다: review operation, reap 절차, materialize 절차, owner lane과 재개 절차, 교착 방지 스케줄링.
-  - §18 `READY_FOR_MERGE`는 **바꾸지 않는다.** M1은 실행 주체만 바꾼다.
+  - M1 당시 §18 `READY_FOR_MERGE`는 바꾸지 않았다. 추가 Option C는 별도
+    PENDING 채택 후보로 §14/§18/§21/§25에 protected receipt 검증을 명시한다.
+    contract-change/RELEASE/User-only hold와 기계적으로 계산되지 않는 제품
+    조건은 그대로 User 경로다. 이 추가 정책을 M1이 이미 승인했다고 쓰지 않는다.
 - `CONTROL_PLANE_RUNTIME.md`: 추가한다.
   - reap
   - ledger v2와 `migrate --to 2`
@@ -569,6 +597,23 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 - ~~M4(레인 토큰 권한)~~ 결정: **레인별 계정을 두지 않는다** (2026-09-29, "심플하게"). 단일 토큰의 남는 위험(§13)을 User가 감수한다. 별도 UID 서명 helper도 만들지 않는다.
 
 ## 13. 남는 위험
+
+**추가 bridge 후보의 잔여 위험 — User 수용 PENDING.** 아래는 기존 M4/M5의
+기승인 위험을 그대로 확대하는 기록이 아니다. 새 adoption에서 실제 선택과
+근거를 기록하기 전에는 받아들였다고 주장하지 않는다.
+- 명시적으로 delegated ordinary node에서 Fable scope PASS와 AI 리뷰가 자동
+  병합 직전의 의미 판정이 될 수 있다. PR 내용의 prompt injection이 여러
+  모델의 판단에 영향을 줄 수 있다. contract-change YES와 RELEASE는 여전히
+  User가 결정하지만 그것만으로 ordinary review의 오류가 없어지지는 않는다.
+- 단일 PAT의 workflow 호출자가 runner의 제한된 root bridge 경로를 호출할
+  수 있다. protected service record, code/config/profile/policy fingerprint,
+  stdin 제한과 canonical host pins가 경계다. 이것은 일반 root 권한이 아니며
+  예외 자체와 잔여 위험의 별도 User 채택이 필요하다.
+- 긴 감사가 runner/동시성 슬롯을 점유할 수 있고 workflow 취소가 root 실행
+  종료를 증명하지 않는다. protected admission과 operator 확인으로 막으며
+  단순히 새 이벤트나 새 HEAD로 재실행하지 않는다.
+- 보호된 Fable receipt reconcile이 아직 없다. 전체 자동 실행은 NOT_READY다.
+  미래 execution-evolution 설계의 존재나 로컬 fake 검사를 구현으로 세지 않는다.
 
 - **단일 토큰:** 역할 간 GitHub 신원이 분리되지 않는다. 리뷰어의 읽기 전용도 강제되지 않는다(§4).
   - gate 판단은 이 위험에서 분리했다(§4.2). 서명 키는 세션 레인 UID와 host만 읽는다. merge-check은 host 고정값, plan, 살아 있는 PR만 본다. 그래서 GitHub 글을 고쳐도 READY_FOR_MERGE는 바뀌지 않는다.

@@ -89,12 +89,17 @@ def fable_program(operation: str, issue_number: int, **fields) -> Dict[str, Any]
                                 timeout=14400 if operation in ("audit", "consult") else 120)
     except subprocess.TimeoutExpired:
         raise ProgramError("program Astra request timed out; reconcile it on the host; do not resubmit") from None
+    except OSError:
+        raise ProgramError("program Astra transport/cancellation failed; its root request may still be running; "
+                           "reconcile it on the host; do not resubmit") from None
     try:
         answer = json.loads(result.stdout)
     except (TypeError, ValueError):
         raise ProgramError("protected program Astra bridge returned no valid JSON; do not resubmit") from None
     if result.returncode or not isinstance(answer, dict) or answer.get("status") == "ERROR":
-        raise ProgramError("protected program Astra bridge failed; inspect its host receipt")
+        reason = cp.program_error_reason(answer.get("reason", "inspect its host receipt"), (token,)) \
+            if isinstance(answer, dict) else "inspect its host receipt"
+        raise ProgramError("protected program Astra bridge failed: " + reason)
     return answer
 
 
@@ -254,11 +259,14 @@ def validate_plan(plan: Any, cfg: Dict[str, Any]) -> Dict[str, Any]:
                 raise ProgramError(f"node {node['id']} has invalid {flag}")
         if node.get("user_merge") is True and node.get("astra_auto_merge") is True:
             raise ProgramError(f"node {node['id']}: User-only merge cannot also delegate its Astra merge")
+        # Check the declared gate before A3 normalizes it to ARCHITECTURE.
+        if node["astra_gate"] == "RELEASE" and node.get("astra_auto_merge") is True:
+            raise ProgramError(f"node {node['id']}: RELEASE merge cannot be delegated")
         if node["audit_floor"] == "A0":
             # Program mode has no A0 qualification path (DISPATCH section 16: authorization pointer,
             # path contract, attestation), so A0 is promoted to A1 and gets its independent review.
             node["audit_floor"] = "A1"
-        if node["audit_floor"] == "A3":
+        if node["audit_floor"] == "A3" and node["astra_gate"] != "RELEASE":
             node["astra_gate"] = "ARCHITECTURE"  # AGENTS section 8: A3 implies the architecture gate
     # Reject dependency cycles.
     graph = {node["id"]: set(node.get("depends_on", [])) for node in nodes}
@@ -1023,7 +1031,8 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
         reasons.append("a review session of this task is still active or unresolved")
     verdicts = current_verdicts(cfg, tid, rows, writer, head) if delivery is not None and head else []
     floor = effective_floor(node["audit_floor"], verdicts)
-    gate = "ARCHITECTURE" if floor == "A3" else node["astra_gate"]  # DISPATCH section 13 promotion
+    gate = node["astra_gate"] if node["astra_gate"] == "RELEASE" else \
+        "ARCHITECTURE" if floor == "A3" else node["astra_gate"]  # never conceal a release reservation
     needed_depth = min(AUDIT_FLOORS.index(floor), 2)
     owners = writer_lanes(rows)
     passing_lanes, contract_change = set(), False
@@ -1039,26 +1048,33 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
                        f"floor {floor} (host-pinned verdicts from distinct non-writer lanes) PASS at this head")
     if node.get("user_merge") is True:
         reasons.append("approved plan reserves this node's merge to the User")
-    delegated_astra = node.get("astra_auto_merge") is True and node.get("user_merge") is not True
+    astra_status, astra_result, scope_result, astra_receipt_hold = "NOT_REQUIRED", None, None, None
+    delegated_astra = node.get("astra_auto_merge") is True and node.get("user_merge") is not True \
+        and node.get("astra_gate") != "RELEASE"
     if gate != "NONE" or floor == "A3":
         if not delegated_astra:
+            astra_status = "USER_REQUIRED"
             reasons.append(f"Astra gate {gate} is not delegated by this approved plan; User merges")
         else:
             try:
                 receipt = fable_program("check", issue_number, pr=pr_number, head=head)
             except ProgramError as exc:
+                astra_status = "ERROR"
                 reasons.append(str(exc))
             else:
+                astra_status = receipt.get("status", "ERROR")
+                astra_result, scope_result = receipt.get("result"), receipt.get("scope_result")
                 expected = {"repository": cfg["repository"], "issue": issue_number,
                             "program": plan["program"], "node": node["id"], "plan_commit": mstatus["plan_commit"],
                             "task_revision": writer["task_revision"] if writer else None,
                             "writer_launch": writer["launch_request_id"] if writer else None,
                             "pr": pr_number, "head": head, "gate": gate, "depth": floor}
                 if not astra_receipt_matches(receipt, expected, gate, floor):
-                    reasons.append("required current-head protected Fable scope audit is missing or not passing")
+                    astra_receipt_hold = "required current-head protected Fable scope audit is missing or not passing"
+                    reasons.append(astra_receipt_hold)
     elif contract_change:
         reasons.append("a current-head review reports a contract change; Astra/User decision required")
-    if contract_change and (gate == "NONE" or not delegated_astra):
+    if contract_change:
         message = "a current-head review reports a contract change; Astra/User decision required"
         if message not in reasons:
             reasons.append(message)
@@ -1067,7 +1083,10 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
         reasons.append(f"dependencies are not DONE: {pending}")
     if cfg.get("program_merge_policy") != "STANDARD":
         reasons.append("project merge prerequisites are not declared machine-computable (program_merge_policy)")
-    return {"ready": not reasons, "head": head, "pr": pr_number, "issue": issue_number, "reasons": reasons}
+    return {"ready": not reasons, "head": head, "pr": pr_number, "issue": issue_number, "reasons": reasons,
+            "astra_status": astra_status, "astra_result": astra_result, "scope_result": scope_result,
+            "astra_audit_allowed": delegated_astra and astra_status in ("MISSING", "BUSY")
+                and not any(reason != astra_receipt_hold for reason in reasons)}
 
 
 def merge(issue_number: int, pr_number: int) -> Dict[str, Any]:

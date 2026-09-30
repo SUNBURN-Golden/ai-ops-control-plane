@@ -48,7 +48,12 @@ runner의 sudo 허용은 고정 helper의 `launch`, 정확한 세 builder별
 `materialize-*`를 더한다). `status`는 sudoers에서
 그 인수 형식만 허용하고(가능하면 정규식), ledger를 바꾸지 않는다. 이 항목이 없으면
 host-preflight와 모든 재시도가 fail-closed로 거부된다. shell, 임의 Python, 임의 인수,
-`init`, `reconcile`, root 실행을 허용하지 않는다. builder에는 이 sudo 권한이 없다.
+`init`, `reconcile`, 일반 root 실행을 허용하지 않는다. builder에는 이 sudo 권한이 없다.
+추가 `aiops-fable program` root 예외는 아래 후보 절에서 별도로 정의하며,
+실제 User security-boundary 채택과 독립 exact-HEAD A3/host qualification,
+protected service authorization 전에는 기존 금지가 적용된다. 후보 example을
+추가한 사실은 설치·허가가 아니다. 예외가 채택되어도 shell·임의 Python/인수,
+init/reconcile나 builder root를 허용하지 않는다.
 관리자만 DB를 최초 `init`한다. 손실된 DB를 빈 DB로 재생성해 복구하지 않는다.
 원 ledger와 외부 session을 대사하기 전 dispatch를 재개하지 않는다.
 최초 활성화 전에도 ledger에 없는 기존 writer/session이 없는지 확인한다.
@@ -344,8 +349,34 @@ python3 scripts/control_plane.py validate-repo
 # Program Astra bridge (implementation candidate)
 
 The protected `aiops-fable program` path, scoped audit receipts and automatic
-consult invocation are specified in [PROGRAM_ASTRA_AUTOMATION.md](PROGRAM_ASTRA_AUTOMATION.md).
-They require their own exact-HEAD A3 adoption and host qualification. This change
-leaves the committed activation pointer unchanged; the new RUNTIME_PATHS cannot
-be activated by the mere existence of this document.
+consult invocation are a restricted Option C candidate in
+[PROGRAM_ASTRA_AUTOMATION.md](PROGRAM_ASTRA_AUTOMATION.md). Its additional User
+governance/security-boundary decision is PENDING; existing M1/M5 do not already
+grant it. A declared RELEASE gate, current reviewer contract-change YES and
+User-only node always hold automatic merge regardless of a scope receipt.
 
+The proposed runner sudoers exception permits only the exact
+`/opt/aiops/bin/aiops-fable program` command. Bounded stdin is validated by the
+protected service, not a coordinator interpretation. Before GitHub/model work,
+the service requires root-protected `program-astra-authorization.json` beside
+its installed config. It binds accepted runtime commit, actual decision/audit/
+qualification evidence and installed Fable/support/config/profile/policy hashes.
+Missing/PENDING or changed fingerprints refuse direct calls as well as workflow
+calls. Filling example pointer fields cannot establish actual qualification.
+
+Install the same audited commit's seven policy documents (AGENTS, DISPATCH,
+PROGRAM_MODE, CONTROL_PLANE_RUNTIME, COORDINATOR_PLAYBOOK,
+PROGRAM_ASTRA_AUTOMATION and the adoption proposal) beneath the installed
+`/opt/aiops/lib` root, together with the protected support/config/profile files.
+Copied support is not assumed to be a git checkout. The privileged entry's
+service attestation is separate from the normal checkout activation check;
+both need actual qualification. Only an authorized operator installs sudoers,
+and the exact example/source comparison above must include this adopted
+exception rather than leave an undocumented extra root rule.
+
+The candidate leaves activation unchanged and has no qualified protected Fable
+receipt reconciler. Full automation remains NOT_READY until that separate
+implementation/audit/actual qualification. Builder-session reconcile cannot
+settle a Fable model request; no receipt deletion, new HEAD/plan/tool hash or
+workflow cancellation substitutes for terminal evidence. Future typed 429
+settlement/retry in the execution-evolution design remains unimplemented.

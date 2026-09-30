@@ -62,6 +62,7 @@ RUNTIME_PATHS = (
     "scripts/control_plane_program.py", "scripts/test_control_plane_program.py",
     "scripts/control_plane_fable.py", "scripts/test_control_plane_fable.py",
     "scripts/control_plane_program_astra.py", "scripts/test_control_plane_program_astra.py",
+    "scripts/test_control_plane_program_astra_policy.py",
     "docs/PROGRAM_MODE.md", "docs/COORDINATOR_PLAYBOOK.md",
     "adapters/imported/astra-devin-adapter", "adapters/imported/astra-grok-adapter",
     "adapters/imported/astra-glm-adapter", "adapters/imported/astra-builder-devin",
@@ -89,7 +90,19 @@ RUNTIME_PATHS = (
     ".github/workflows/control-plane-runtime.yml", ".github/workflows/control-plane-ci.yml",
     "../.github/workflows/control-plane-runtime.yml",
     "docs/CONTROL_PLANE_RUNTIME.md", "AGENTS.md", "RUNBOOKS/DISPATCH.md", "TASKS/TEMPLATE.md",
+    "docs/PROGRAM_ASTRA_AUTOMATION.md", "docs/PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md",
+    ".github/control-plane/program-astra-authorization.example.json",
 )
+
+
+def program_error_reason(value: Any, secrets: Iterable[str] = ()) -> str:
+    """Bounded diagnostic only; never echo credentials or raw process output."""
+    reason = str(value)
+    for secret in sorted((s for s in secrets if isinstance(s, str) and s), key=len, reverse=True):
+        reason = reason.replace(secret, "[redacted]")
+    reason = re.sub(r"sk-ant-[A-Za-z0-9_-]{8,}|gh[opsru]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}",
+                    "[redacted]", reason)
+    return re.sub(r"[\x00-\x1f\x7f]", " ", reason)[:500]
 
 
 class ControlPlaneError(RuntimeError):

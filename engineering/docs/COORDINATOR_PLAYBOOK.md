@@ -2,7 +2,18 @@
 
 This document is the only instruction set the COORDINATOR follows. The coordinator is a Claude Sonnet Routine session (`docs/PROGRAM_MODE.md` §8). Its authority limits are in `AGENTS.md` §2.
 
-It is a decision table, not a judgment aid. When a row does not match, or two rows match, do not improvise: post `COORDINATOR_BLOCKED <reason>` and stop.
+The Astra bridge rows below are an unadopted Option C candidate. Existing manual
+operator policy remains operative until separate User adoption, exact-HEAD A3
+review and protected service authorization. The coordinator never decides that a
+host is qualified: the fixed operation verifies the installed authorization
+record. Missing/PENDING authorization is a blocker, not a fallback permission.
+The protected receipt reconciler is not implemented/qualified here; end-to-end
+automation remains NOT_READY until that separate qualification is complete.
+
+It is a decision table, not a judgment aid. Rows have explicit top-to-bottom
+priority; every row includes the condition that no earlier row applies. When no
+row matches, an operation code is unknown or its fields contradict one another,
+post `COORDINATOR_BLOCKED <reason>` and stop. Never invent another action.
 
 ## 0. Invariants (never break these)
 
@@ -63,6 +74,9 @@ UNKNOWN/ERROR is fenced. See `PROGRAM_ASTRA_AUTOMATION.md`.
 ## 3. Derived state per plan node (first matching row wins)
 
 "Newest" always means newest *after* the current attempt's launch.
+The Astra/merge rows use only completed operation observations for the exact
+current binding. Required operation fields are computed, not extracted from
+review/comment prose. A cached observation expires on any binding change.
 
 | # | Condition | Action |
 |---|---|---|
@@ -80,11 +94,13 @@ UNKNOWN/ERROR is fenced. See `PROGRAM_ASTRA_AUTOMATION.md`.
 | 11 | A review entry is `CONFIRMED`, and a PR review carries its signed `ASTRA_REVIEW_V1 review=<its id> ... mac=...` line | `reap` for that review's `launch_request_id`, with that review's URL as evidence |
 | 11a | A review entry is `CONFIRMED`, and the newest task comment carries its signed `ASTRA_BLOCKED_V1 ... launch=<its launch> mac=...` line | `reap` with that comment's URL; the next `review` for the slot re-dispatches it (at most 3 sessions; `REVIEW_RETRIES_EXHAUSTED` goes to row 2) |
 | 12 | All required reviews for the head are released and any verdict is `FAIL` | Post `REVIEW_FEEDBACK` linking the reviews, then `start` (resume) |
-| 13 | A verdict is `DECISION_REQUIRED`, or `contract_change=YES` without a delegated Astra gate | Question path (§4) |
-| 13a | Required current-head reviews PASS; an Astra gate is required; the approved node sets `astra_auto_merge=true` and not `user_merge=true`; no protected result yet | `astra-audit` with exact delivered PR/head. Read the operation result; a projection comment is not authority. |
-| 13b | The protected audit is FAIL | Link its actual findings, then same-owner `start` for fixes. No automatic audit resubmission at the same binding. |
-| 13c | The protected audit is DECISION_REQUIRED, USER_REQUIRED, UNKNOWN or ERROR | User/operator path; do not merge or resume over the protected blocker. |
-| 14 | All required reviews PASS for the head | `merge` (M1 is delegated). It recomputes READY_FOR_MERGE and merges pinned to that head; `NOT_READY` returns the reasons, which you post once per head. A merged PR makes row 1 apply on the next run. |
+| 13 | A verdict is `DECISION_REQUIRED`, or any current-head review has `contract_change=YES` | Question path (§4); a passing delegated receipt does not waive the User decision/task revision. |
+| 13q | All required current-head reviews PASS, and there is no completed `merge-check` result for the current plan/task/writer/PR/head binding | `merge-check` only. Its returned `astra_status`, `astra_result`, `scope_result` and `ready` choose the following rows on the next wake. Never infer protected receipt state from a comment. |
+| 13a | Current computed `merge-check` has `astra_status=MISSING` or `BUSY` and `astra_audit_allowed=true` | `astra-audit` with exact delivered PR/head. The boolean requires every ordinary CI/review/dependency/body/authority condition; BUSY is unadmitted and may be retried on the next event/heartbeat. Do not repeatedly recheck in this session. |
+| 13b | Current computed result has `astra_status=POSTED` and `astra_result=FAIL` | Link its actual findings, then same-owner `start` for fixes. No automatic audit resubmission at the same binding. |
+| 13c | Current computed result has `astra_status=RUNNING`, `UNKNOWN` or `ERROR`, or `astra_result=DECISION_REQUIRED`, or `scope_result=USER_REQUIRED` | User/operator path; do not merge or resume over the protected blocker. A model that may be running is not cancelled or resubmitted. |
+| 13d | Current computed result has `ready=false` and is not covered by 13a–13c or the exact envelope-repair condition in 14a | Post the exact computed reasons once per binding and use the named User/operator path. Missing/PENDING service authorization, declared RELEASE, contract change and User-only holds cannot be bypassed. |
+| 14 | Current computed `merge-check` has `ready=true` and either `astra_status=NOT_REQUIRED`, or `astra_status=POSTED` with `astra_result=PASS`/`PASS_WITH_NOTES` and `scope_result=WITHIN_APPROVED_PLAN` | `merge` (M1 executor). It recomputes all gates and pins that head. `NOT_READY` returns reasons; a changed binding invalidates the cached observation. |
 | 14a | `merge-check` reports "task issue body differs" | `review` with slot 1 (it restores the envelope; an answered slot returns `REVIEW_EXISTS`, an A0 task reports that no slot is required), then `merge-check` again |
 
 ## 4. Question path (Opus → Astra → User)
@@ -94,13 +110,21 @@ UNKNOWN/ERROR is fenced. See `PROGRAM_ASTRA_AUTOMATION.md`.
    - `ANSWERED` or `APPROVED_SMALL_EXCEPTION`: row 8 applies on the next run.
 3. **Astra** (Claude Fable, User decision M5). On `ESCALATE_ASTRA`:
    - label the issue `consult-astra`;
-   - when the protected bridge is adopted/qualified, call `astra-consult` with the
-     canonical question comment id. A reviewer question must carry the verified
+   - call the candidate `astra-consult` with the canonical question comment id
+     only through its fixed operation. That operation checks protected service
+     authorization; the coordinator makes no qualification judgment. A reviewer question must carry the verified
      `ASTRA_REVIEW_QUESTION_V1` reference described in PROGRAM_ASTRA_AUTOMATION.md;
    - consume the actual protected operation result. The tool posts the human
      projection; never write an Astra answer marker yourself;
-   - until rollout is qualified, retain the existing host-operator fixed-tool path.
+   - missing/PENDING authorization or a protected error goes to the operator.
+     Existing manual fixed-tool consultation remains available only under its
+     existing explicit operator authorization; the coordinator cannot silently
+     substitute it for a rejected automated operation.
 4. **User.** If Astra answers `USER_REQUIRED`, label the issue `needs-user` and notify the User. Never answer for the User.
+
+Receipt ERROR/UNKNOWN has no qualified automatic reconcile operation in this
+candidate. Do not delete it, change HEAD/plan/tool hash to evade it, or claim that
+an operator's builder-session reconcile also reconciles a Fable request.
 
 ## 5. Visibility (every run)
 

@@ -103,8 +103,8 @@ class ContextTests(unittest.TestCase):
                 "binding": base_binding, "program_binding": base_binding, "gate": "ARCHITECTURE",
                 "verified_depth": "A3", "comment_url": "https://github.com/root-receipt", **extra}
 
-    def test_a3_contract_change_merges_only_with_exact_protected_scope_receipt(self):
-        issue, writer, binding = self.reviewed_delivery(change="YES")
+    def test_ordinary_a3_requires_exact_protected_scope_receipt(self):
+        issue, writer, binding = self.reviewed_delivery(change="NO")
         with patch.object(prog, "fable_program", return_value=self.receipt(binding)):
             self.assertTrue(prog.merge_check(issue, 7)["ready"])
         for changes in ({"scope_result": "USER_REQUIRED"}, {"result": "FAIL"}, {"status": "UNKNOWN"},
@@ -112,6 +112,14 @@ class ContextTests(unittest.TestCase):
                         {"program_binding": {**binding, "writer_launch": "3" * 24}}):
             with self.subTest(changes=changes), patch.object(prog, "fable_program", return_value=self.receipt(binding, **changes)):
                 self.assertFalse(prog.merge_check(issue, 7)["ready"])
+
+    def test_contract_change_never_uses_a_scope_receipt_as_user_decision(self):
+        issue, _, binding = self.reviewed_delivery(change="YES")
+        with patch.object(prog, "fable_program", return_value=self.receipt(binding)):
+            answer = prog.merge_check(issue, 7)
+        self.assertFalse(answer["ready"])
+        self.assertIn("contract change", " ".join(answer["reasons"]))
+        self.assertFalse(answer["astra_audit_allowed"])
 
     def test_user_reserved_node_never_uses_the_automatic_gate(self):
         self.r.gh.contents[runtime.PLAN1] = runtime.plan([runtime.node(floor="A3", user_merge=True)])
@@ -180,7 +188,9 @@ class ContextTests(unittest.TestCase):
             return {"status": "POSTED", "result": "USER_REQUIRED", "comment_url": "https://github.com/result",
                     "program_binding": kwargs["program_context"]["binding"]}
         fake = SimpleNamespace(REPOSITORY_RE=fable.REPOSITORY_RE, consult=consult)
-        with self.comment_api(), patch.object(bridge, "protected"):
+        with self.comment_api(), patch.object(bridge, "protected"), \
+                patch.object(bridge, "installed_fingerprint", return_value="a" * 64), \
+                patch.object(bridge, "require_service_authorization"):
             first = bridge.run(ctx, fake, payload)
             self.assertEqual(bridge.run(ctx, fake, payload), first)
             self.assertEqual(calls, [1])
@@ -194,7 +204,9 @@ class ContextTests(unittest.TestCase):
         ctx = SimpleNamespace(runs_dir=Path(self.r.temp.name), tool_sha256="a" * 64)
         payload = {"repository": runtime.REPO, "issue": issue, "operation": "consult",
                    "question": int(url.rsplit("-", 1)[-1]), "github_token": "token"}
-        with self.comment_api(), patch.object(bridge, "protected"):
+        with self.comment_api(), patch.object(bridge, "protected"), \
+                patch.object(bridge, "installed_fingerprint", return_value="a" * 64), \
+                patch.object(bridge, "require_service_authorization"):
             with self.assertRaisesRegex(bridge.BridgeError, "host-pinned"):
                 bridge.run(ctx, fable, payload)
 

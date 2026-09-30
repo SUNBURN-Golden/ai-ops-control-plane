@@ -379,6 +379,15 @@ PASS/PASS_WITH_NOTES with no consequential contract change:
 
 Astra is not the default routine A1/A2 reviewer.
 
+Restricted program bridge candidate (User adoption PENDING): after separate
+governance/security-boundary adoption, independent exact-HEAD A3 review and
+actual protected service qualification, the coordinator may request fixed
+`astra-audit`/`astra-consult` operations. The service verifies its installed
+authorization record and canonical host bindings; the coordinator neither
+constructs a verdict nor judges rollout readiness. Until adoption, the existing
+operator `aiops-fable audit/consult` path remains operative. RELEASE,
+contract-change YES and User-only decisions are excluded from automatic merge.
+
 This section applies only when at least one is true:
 
 - EFFECTIVE_AUDIT_FLOOR=A3;
@@ -582,9 +591,11 @@ For PR deliverables, READY_FOR_MERGE is true only when all are true:
 - VERIFIED_CONTRACT_CHANGE_REQUIRED from the accepted current-head review is NO,
   or the required Astra/User decision has been durably recorded and reflected
   in the current task revision;
-- when EFFECTIVE_AUDIT_FLOOR=A3, ASTRA_GATE is ARCHITECTURE and the accepted
+- when EFFECTIVE_AUDIT_FLOOR=A3, ordinary ASTRA_GATE is ARCHITECTURE and the accepted
   current Astra-gate PASS/PASS_WITH_NOTES matches the applicable
   revision/head/evidence and VERIFIED_AUDIT_DEPTH satisfies A3;
+- an original RELEASE gate retains its release reservation and applicable A3
+  depth; promotion cannot turn it into an ordinary auto-merge architecture node;
 - for any other explicit Astra gate, its accepted PASS/PASS_WITH_NOTES matches
   the applicable revision/head/evidence and required depth;
 - when no Astra gate is required and EFFECTIVE_AUDIT_FLOOR is below A3, absence
@@ -598,6 +609,20 @@ User still makes the merge decision. In program mode, User decision M1
 this predicate is computed true, pinned to the computed head, and anything not
 computable goes to User (`AGENTS.md` §13, `docs/PROGRAM_MODE.md` §0). The
 predicate itself is unchanged.
+
+The separate Option C candidate extends the machine-readable Astra condition
+only after actual User adoption and protected service authorization. A delegated
+ordinary approved node requires a root receipt bound to current plan/task/writer,
+PR/HEAD, gate/depth and installed authority, with PASS/PASS_WITH_NOTES and
+WITHIN_APPROVED_PLAN. All other §18 predicates remain mandatory. This candidate's
+automatic merge always refuses any current-head contract-change YES, original
+RELEASE or `user_merge=true`; the receipt never replaces their User decision.
+Without delegation/adoption, an Astra gate remains on the User merge path.
+
+Protected ERROR/UNKNOWN is fenced and has no qualified reconciliation operation
+in this candidate. Full automation is NOT_READY until the separately audited
+protected receipt reconcile implementation and host qualification. A builder
+session reconcile or new plan/HEAD/tool hash is not receipt reconciliation.
 
 ## 19. No-change / non-code completion
 
@@ -654,8 +679,8 @@ No configuration silently falls back to another AI on error.
 | DISPATCH_ALLOWED | launch designated owner using section 7; record receipt | MECHANICAL |
 | WRITER_FEEDBACK_REQUIRED | exact pointer to existing owner | MECHANICAL |
 | REVIEW_DISPATCH_ALLOWED | launch configured read-only reviewer | MECHANICAL |
-| AUDIT_REQUIRED | exact audit packet to #ai-audit | MECHANICAL |
-| DECISION_REQUIRED | exact decision packet to #ai-decisions | MECHANICAL |
+| AUDIT_REQUIRED | exact audit packet to #ai-audit; after separate candidate adoption/service authorization, fixed astra-audit for the canonical current delivery | MECHANICAL |
+| DECISION_REQUIRED | exact decision packet to #ai-decisions; Opus first, then the adopted/authorized fixed astra-consult for the canonical escalation | MECHANICAL |
 | BLOCKED_STATUS | durable blocker + short status/Human action | MECHANICAL |
 | READY_FOR_MERGE | project-thread notification only | MECHANICAL |
 | DONE / DONE_NO_CHANGE | project-thread final pointers | MECHANICAL |
@@ -840,14 +865,22 @@ Merge readiness (`operation=merge-check`):
   dependencies must be DONE;
 - EFFECTIVE_AUDIT_FLOOR = max(plan AUDIT_FLOOR, every pinned
   VERIFIED_REQUIRED_DEPTH) sets the review count, the required review depth
-  and the second review slot; A3 adds ASTRA_GATE=ARCHITECTURE; program mode
+  and the second review slot; A3 promotes ordinary gates to ARCHITECTURE while
+  preserving an original RELEASE reservation; program mode
   promotes a plan A0 to A1 (no §16 qualification path exists);
 - the verification gate requires every check named in the product's
   `program_required_checks` to have succeeded on the head, and no observed run
   to be incomplete or failing; an undeclared list is not ready;
-- anything not machine-computable makes it not ready: Astra gates,
-  undeclared project merge prerequisites, labels `needs-user`, `blocked` and
-  `decision-required`;
+- anything not machine-computable makes it not ready: undelegated Astra gates,
+  missing/PENDING protected service authorization, undeclared project merge
+  prerequisites, labels `needs-user`, `blocked` and `decision-required`;
+- after separate Option C adoption, delegated ordinary Astra gates are computed
+  from the current protected host receipt; original RELEASE, current review
+  contract-change YES and User-only nodes remain automatic-merge holds;
+- merge-check exposes protected `astra_status`, `astra_result`, `scope_result`
+  and `astra_audit_allowed`. The latter is true only for a missing/busy audit
+  with every ordinary CI/review/dependency/body/authority condition satisfied.
+  The coordinator uses these fields rather than infer receipt state from text;
 - User decision M1 (2026-09-29) delegates the merge executor: `operation=merge`
   recomputes this predicate and merges only when it is true, with the merge
   pinned to that exact head (`sha`), so a later push makes GitHub refuse it.

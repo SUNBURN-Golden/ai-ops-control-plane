@@ -1,10 +1,12 @@
 # Program Astra automation — scoped audit, consultation and merge receipts
 
-Status: implementation candidate; independent exact-HEAD A3 audit, User merge and
-host rollout are required. This document records the continuation of the User's
-2026-09-30 request to prepare the large plans so one Grok start command can carry
-their approved development through completion. No host install or activation is
-claimed by this change.
+Status: **Option C candidate; User adoption PENDING; end-to-end rollout NOT_READY**.
+The [exact-HEAD Fable review of #44](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/44#issuecomment-5910103843)
+was DECISION_REQUIRED. This continuation preserves that result and proposes
+restricted corrections; it invents no accepted User decision. M1/M5 and the
+existing manual operator path remain operative until the additional governance
+decision, independent exact-HEAD A3 audit and actual host qualification. No host
+install or activation is claimed.
 
 ## Problem and resulting behavior
 
@@ -12,9 +14,11 @@ The old `merge_check` unconditionally held every Astra-gated delivery, even afte
 a passing architecture or milestone audit. The coordinator also waited for an
 operator to invoke Fable consultations. This change adds fixed `astra-audit` and
 `astra-consult` operations and lets a specifically delegated plan node pass its
-Astra merge condition from a protected current-head receipt. Routine CI and
-review failures still return to the same writer. New consequential decisions
-still require the User.
+Astra merge condition from a protected current-head receipt after adoption.
+Routine CI and review failures still return to the same writer. This restricted
+Option C candidate always holds current-head reviewer contract-change YES,
+declared RELEASE gates, User-only nodes and consequential scope/permission/cost
+decisions for the User, regardless of any passing scope receipt.
 
 The manual bootstrap design/registration PRs are not fabricated program tasks.
 They keep their normal User merge authority. The new behavior applies only after
@@ -30,12 +34,13 @@ recorded by the existing host materialization protocol.
 | `user_merge: true` | The node is a User decision/release/risk gate. Automatic merge is forbidden at every depth. |
 
 Both true is invalid. The booleans do not create, waive or downgrade an audit.
-Reviewer-required depth can still promote the task to A3. A contract change is
-allowed through the delegated merge condition only when that A3/gated delivery
-has the passing protected scope audit. Missing approval, a new scope, a permission,
-paid resource, schema/invariant beyond the approved blueprint, release or risk
-acceptance must produce USER_REQUIRED/DECISION_REQUIRED. A non-gated contract
-change still stops for the existing decision path.
+Reviewer-required depth can still promote the task to A3. An original RELEASE
+gate is preserved and delegation is rejected before promotion; architecture
+normalization cannot erase the User release reservation. Any current-head
+contract-change YES blocks automatic merge and requires the durable Astra/User
+decision reflected in the revised task. Fable PASS alone cannot grant that
+decision. Missing approval, new scope/permission/cost and risk acceptance also
+retain the User path.
 
 An `approval_pointer` containing PENDING is valid as draft data for `validate_plan`
 but is refused by the operational plan loader. It cannot materialize or dispatch.
@@ -48,21 +53,31 @@ the existence of a design document or a GitHub PASS-looking comment.
 |---|---|---|
 | `astra-audit` | `pr_number`, exact `head` | Protected gate audit for the host-pinned current delivery. |
 | `astra-consult` | `question_comment_id` | Protected answer to a current host-pinned decision question. |
-| `merge-check` / `merge` | Existing arguments | Recompute ordinary gates plus protected current-head scope receipt for delegated nodes. |
+| `merge-check` | Existing arguments | Recompute gates; return `ready`, reasons, `astra_status`, `astra_result`, `scope_result`, `astra_audit_allowed`. |
+| `merge` | Existing arguments | Recompute the complete predicate and pin the accepted HEAD. |
 
 They run in the existing task workflow concurrency group. Fable invocations are
 additionally serialized across all tasks by one protected host model lock. BUSY
 means no model request was admitted; the coordinator can try that unadmitted
 operation on its next event/heartbeat. RUNNING, UNKNOWN or ERROR for an admitted
 request is fenced and requires host reconciliation; it is never automatically
-resubmitted. Changing a head or approved plan revision creates a distinct request.
+resubmitted. A different binding cannot reuse a passing receipt and is not
+reconciliation of an unresolved prior request. The next completed operation
+chooses the playbook row; a changed plan/task/writer/PR/HEAD invalidates the
+observation. Existing standalone operator audit/consult/preflight behavior is
+unchanged; the operator must serialize those calls with live program requests.
 
 The runtime waits long enough for the existing three-hour Fable model limit plus
 archive preparation/transport. It does not cancel an audit after the old 15-minute
 workflow timeout. Fable's extra-usage checks, fixed model, restricted tools,
 read-only account, secret filtering and no fallback remain in force. A missing
 `overageStatus` stays a failure. This change does not switch an account's billing
-settings or interpret the missing field as rejected.
+settings or interpret the missing field as rejected. One active job holds its
+task concurrency group and runner for the long invocation; queued GitHub runs
+are not model admissions. Workflow cancellation does not prove a root child
+stopped. Timeout, permission or transport errors remain fenced while the operator
+checks the protected journal. Failure receipts and caller reports retain bounded
+redacted reasons; they do not print raw stdout/stderr or credentials.
 
 ## Authority and binding
 
@@ -76,7 +91,32 @@ Its bounded JSON stdin carries the operation, target and GitHub token. The token
 does not appear in argv, saved receipt, model input or command output. There is no
 shell evaluation, environment preservation, arbitrary path, model choice or
 caller-supplied verdict. The sudoers rule admits only this exact command, for the
-runner identity; builder identities receive no new root command.
+runner identity; builder identities receive no new root command. This is a
+narrow proposed exception to the existing runner-root prohibition and requires
+its own explicit User security-boundary adoption. It grants no shell, arbitrary
+Python/arguments, init, reconcile, new model or token search permission.
+
+Before GitHub/model operations, the installed service requires protected
+`program-astra-authorization.json` beside its central config. Its schema-1
+ACTIVE/runtime-enabled record binds the accepted full runtime commit, actual
+User decision/independent audit/host qualification pointers, qualification
+digest and installed fingerprint. The fingerprint covers Fable, all support
+modules, central config/profiles/activation and the seven operative policy documents:
+AGENTS, DISPATCH, PROGRAM_MODE, CONTROL_PLANE_RUNTIME, COORDINATOR_PLAYBOOK,
+PROGRAM_ASTRA_AUTOMATION and the adoption proposal. Ownership and directory chains
+are protected. Missing/PENDING authorization or changed hashes reject direct
+stdin entry as well as workflow entry; repository examples and caller assertions
+are not grants. Filling pointer strings is not actual adoption/qualification.
+The service independently validates the installed activation's enabled state
+and requires `approved_commit` to equal its `activated_runtime_sha`. Deactivation
+or a different activation SHA invalidates direct entry even if a prior record
+was ACTIVE. The activation file is protected and included in the fingerprint.
+
+Installed `control_plane.ROOT` resolves to `/opt/aiops/lib`; the copied service
+files are not assumed to be a git checkout. A checkout-only activation check is
+insufficient for this privileged entry. The workflow independently retains its
+normal activation/attestation check. The coordinator consumes computed service
+authorization results and never judges rollout qualification itself.
 
 The root-owned bridge independently recalculates the canonical issue, program,
 node, host-recorded plan commit, task revision, current writer launch, released
@@ -124,14 +164,31 @@ The operation returns the actual protected ANSWERED/USER_REQUIRED result. ANSWER
 allows the existing same-owner resume path; USER_REQUIRED keeps the User path.
 For delegated nodes, `start` checks protected consultations and audits of the current writer
 attempt. USER_REQUIRED or an unresolved admitted request prevents resume
-even if somebody removes GitHub labels or rewrites a comment. A new approved plan
-revision is the durable way to settle the decision; deleting a receipt or editing
-the projection is not. This guard does not grant new authority to Opus.
+even if somebody removes GitHub labels or rewrites a comment. A legitimate User
+scope decision/task revision does not itself reconcile an unresolved execution.
+Deleting a receipt, changing HEAD/plan/tool hash or editing the projection is not
+terminal proof. This guard grants no new authority to Opus. Read-only
+decision-status may inspect an operator-reconciled terminal writer and derive
+its binding from the host despite an edited issue envelope; this relaxation
+creates no delivery/review pin. Audit/consult retain verified-release and exact
+envelope requirements.
+
+## Unimplemented reconciliation and readiness
+
+This candidate has no implemented or qualified protected Fable receipt
+reconciler. Builder-session reconcile does not settle an admitted Fable run.
+ERROR/UNKNOWN, ambiguous publication or lost archive remains fenced. Full
+automation is NOT_READY until the separate append-only terminal settlement and
+reconcile work is independently audited, installed and actually qualified. A
+happy-path fixture is insufficient and no current operation is represented as
+that future reconciler.
 
 ## Rollout on the host
 
-1. Audit this implementation's exact HEAD with ordinary ARCHITECTURE/A3, using
-   the existing fixed tool. Only a normal User merge can adopt this bootstrap.
+1. Record the actual User governance decision for restricted Option C and the
+   runner-root exception; keep its pointer PENDING until then. Audit the new
+   implementation's exact HEAD with ordinary ARCHITECTURE/A3 and obtain normal
+   User merge. #44's old DECISION_REQUIRED is not transferred to a new HEAD.
 2. Keep active/UNKNOWN task and model requests fenced during rollout. Install
    the audited `control_plane_fable.py` as `/opt/aiops/bin/aiops-fable` and install
    `control_plane_program_astra.py`, `control_plane_program.py`, `control_plane.py`
@@ -139,19 +196,31 @@ the projection is not. This guard does not grant new authority to Opus.
    not group/other writable. Protect every directory in the path chain.
 3. Copy the same commit's central config and project profiles to
    `/opt/aiops/lib/.github/control-plane/`, with a protected root-owned directory
-   chain. The support's `control_plane.ROOT` resolves to `/opt/aiops/lib`.
+   chain. Install the seven fingerprinted policy documents from the same
+   accepted commit at their paths beneath `/opt/aiops/lib`. The support's
+   `control_plane.ROOT` resolves to `/opt/aiops/lib`.
+   Copy the actual accepted activation through its normal operator process;
+   its enabled state and activated SHA must agree with the service record.
    Root bridge host calls use the existing installed helper and ledger. No builder
    adapter, actor identity, credential or existing host admission gate is replaced.
-4. Apply only the exact runner sudoers rule in the example and validate it with
-   `visudo -cf`. Keep installed hashes/commit and actual qualification evidence.
+4. Qualify rejection of missing/PENDING service authorization and stale code,
+   config/profile/policy hashes, including direct stdin entry. Only after actual
+   adoption and qualification may the operator apply the exact sudoers candidate
+   and validate it with `visudo -cf`; no general root command is added.
 5. Run existing Fable preflight. Require its actual extra-usage rejected evidence.
    If it returns OVERAGE_NOT_BLOCKED, retain the failure and fix/qualify the account
    through the already authorized host/operator process; do not weaken the check.
 6. Qualify a canonical no-cost fixture task: valid scope audit, duplicate request,
    stale head/revision, missing reviews, User-only node, USER_REQUIRED resume fence,
-   failing CI, root state/permissions, token argv/log absence and actual merge race.
+   failing CI, RELEASE/contract-change holds, root state/permissions, bounded
+   stdin/token argv/log absence, cancellation and actual merge race.
    Local fake tests in this PR are not host qualification evidence.
-7. Refresh the runtime attestation/activation pointer through the existing audited
+7. Finish and qualify the separate protected Fable reconciliation implementation
+   before full rollout. Until then keep service qualification/authorization and
+   full activation NOT_READY/PENDING. Record the actual accepted commit,
+   decision/audit/qualification pointers, qualification digest and installed
+   fingerprint in protected service authorization; never install the PENDING
+   source example as a completed grant. Refresh activation through the existing audited
    activation process. This PR changes RUNTIME_PATHS and leaves activation.json
    unchanged; merging alone cannot silently activate these new executable paths.
 8. Adopt the product plan revisions' explicit flags only after the central bridge

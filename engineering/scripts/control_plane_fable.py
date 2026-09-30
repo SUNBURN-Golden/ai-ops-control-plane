@@ -915,11 +915,12 @@ def main(argv=None):
     c.add_argument("--again", action="store_true")
     args = parser.parse_args(argv)
     os.umask(0o022)
+    ctx = None
     try:
         payload = None
         if args.command == "program":
             raw = sys.stdin.read(65537)
-            if len(raw) > 65536:
+            if len(raw) > 65536 or len(raw.encode("utf-8")) > 65536:
                 raise FableError("program input is too large")
             payload = json.loads(raw)
             if not isinstance(payload, dict) or not isinstance(payload.get("github_token"), str):
@@ -950,9 +951,11 @@ def main(argv=None):
     except (FableError, OSError, ValueError) as exc:
         reason = str(exc)
         for secret in ((payload or {}).get("github_token", "") if isinstance(payload, dict) else "",
-                       os.environ.get("GH_TOKEN", ""), os.environ.get("GITHUB_TOKEN", "")):
+                       os.environ.get("GH_TOKEN", ""), os.environ.get("GITHUB_TOKEN", ""),
+                       *getattr(ctx, "secret_values", ())):
             if secret:
                 reason = reason.replace(secret, "[redacted]")
+        reason = TOKEN_SHAPES.sub("[redacted]", reason)[:2000]
         print(json.dumps({"status": "ERROR", "reason": reason}, ensure_ascii=False))
         return 1
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
