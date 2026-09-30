@@ -343,6 +343,16 @@ launch when an owner exists or launch state is UNKNOWN.
 
 ## 13. Merge
 
+Program Astra automation, when adopted and qualified (`docs/PROGRAM_ASTRA_AUTOMATION.md`),
+adds fixed `astra-audit` and `astra-consult` operations. They invoke the protected
+Fable bridge, never a coordinator-authored verdict. A plan node must explicitly
+set `astra_auto_merge=true` to delegate the executor for its already approved
+scope. Its current-head protected Fable PASS/PASS_WITH_NOTES and
+WITHIN_APPROVED_PLAN result, all required independent reviews and computed
+verification/product gates remain mandatory. `user_merge=true` forbids this
+delegation at every depth. Unspecified flags preserve the User merge requirement
+for Astra-gated work. No User choice outside the approved scope is delegated.
+
 Grok never merges.
 A reviewer PASS or required Astra PASS is not a merge command.
 Only User authorizes merge. Program mode decision M1 (User, 2026-09-29) delegates

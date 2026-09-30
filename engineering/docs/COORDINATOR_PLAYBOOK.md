@@ -50,9 +50,15 @@ Every operation is a `workflow_dispatch` of `control-plane-runtime.yml` on `main
 | `reap` | `{"launch_request_id","evidence"}` + `issue_number` |
 | `merge-check` | `{"pr_number"}` + `issue_number` |
 | `merge` | `{"pr_number"}` + `issue_number` (M1: merges only a computed READY_FOR_MERGE, pinned to that head) |
+| `astra-audit` | `{"pr_number","head"}` + `issue_number`; protected current-head gate audit |
+| `astra-consult` | `{"question_comment_id"}` + `issue_number`; protected canonical decision question |
 | `lanes` | `{}` |
 
-Wait for the run to finish (a few seconds) and read its outcome before acting on the same task again in this session.
+Read the completed operation result before acting again on the same task. Astra
+model runs can take up to three hours plus preparation; end the coordinator
+session after issuing one. The workflow completion wake resumes the coordinator.
+Do not cancel, poll, or launch a second audit. BUSY is unadmitted; RUNNING,
+UNKNOWN/ERROR is fenced. See `PROGRAM_ASTRA_AUTOMATION.md`.
 
 ## 3. Derived state per plan node (first matching row wins)
 
@@ -74,7 +80,10 @@ Wait for the run to finish (a few seconds) and read its outcome before acting on
 | 11 | A review entry is `CONFIRMED`, and a PR review carries its signed `ASTRA_REVIEW_V1 review=<its id> ... mac=...` line | `reap` for that review's `launch_request_id`, with that review's URL as evidence |
 | 11a | A review entry is `CONFIRMED`, and the newest task comment carries its signed `ASTRA_BLOCKED_V1 ... launch=<its launch> mac=...` line | `reap` with that comment's URL; the next `review` for the slot re-dispatches it (at most 3 sessions; `REVIEW_RETRIES_EXHAUSTED` goes to row 2) |
 | 12 | All required reviews for the head are released and any verdict is `FAIL` | Post `REVIEW_FEEDBACK` linking the reviews, then `start` (resume) |
-| 13 | A verdict is `DECISION_REQUIRED` or `contract_change=YES` | Question path (§4) |
+| 13 | A verdict is `DECISION_REQUIRED`, or `contract_change=YES` without a delegated Astra gate | Question path (§4) |
+| 13a | Required current-head reviews PASS; an Astra gate is required; the approved node sets `astra_auto_merge=true` and not `user_merge=true`; no protected result yet | `astra-audit` with exact delivered PR/head. Read the operation result; a projection comment is not authority. |
+| 13b | The protected audit is FAIL | Link its actual findings, then same-owner `start` for fixes. No automatic audit resubmission at the same binding. |
+| 13c | The protected audit is DECISION_REQUIRED, USER_REQUIRED, UNKNOWN or ERROR | User/operator path; do not merge or resume over the protected blocker. |
 | 14 | All required reviews PASS for the head | `merge` (M1 is delegated). It recomputes READY_FOR_MERGE and merges pinned to that head; `NOT_READY` returns the reasons, which you post once per head. A merged PR makes row 1 apply on the next run. |
 | 14a | `merge-check` reports "task issue body differs" | `review` with slot 1 (it restores the envelope; an answered slot returns `REVIEW_EXISTS`, an A0 task reports that no slot is required), then `merge-check` again |
 
@@ -85,11 +94,12 @@ Wait for the run to finish (a few seconds) and read its outcome before acting on
    - `ANSWERED` or `APPROVED_SMALL_EXCEPTION`: row 8 applies on the next run.
 3. **Astra** (Claude Fable, User decision M5). On `ESCALATE_ASTRA`:
    - label the issue `consult-astra`;
-   - post one line in the Slack decision channel:
-     `ASTRA_CONSULT_REQUEST repo=<owner/repo> issue=<n> comment=<question comment id>`;
-   - the host operator runs `aiops-fable consult` with exactly those values, and the tool
-     posts `ASTRA_CONSULT_V1 result=<ANSWERED|USER_REQUIRED> by=ASTRA_FABLE` on the issue.
-     Never write that line yourself.
+   - when the protected bridge is adopted/qualified, call `astra-consult` with the
+     canonical question comment id. A reviewer question must carry the verified
+     `ASTRA_REVIEW_QUESTION_V1` reference described in PROGRAM_ASTRA_AUTOMATION.md;
+   - consume the actual protected operation result. The tool posts the human
+     projection; never write an Astra answer marker yourself;
+   - until rollout is qualified, retain the existing host-operator fixed-tool path.
 4. **User.** If Astra answers `USER_REQUIRED`, label the issue `needs-user` and notify the User. Never answer for the User.
 
 ## 5. Visibility (every run)

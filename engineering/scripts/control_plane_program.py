@@ -32,6 +32,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -61,10 +62,60 @@ ASTRA_GATES = ("NONE", "MILESTONE", "ARCHITECTURE", "RELEASE")
 DELIVERABLE_MODES = ("PR",)  # program mode completes a node only through a host-pinned, merged PR
 REQUIRED_REVIEWS = {"A0": 0, "A1": 1, "A2": 2, "A3": 2}
 BLOCKING_LABELS = {"needs-user", "blocked", "decision-required"}
+FABLE_PROGRAM_COMMAND = ("/usr/bin/sudo", "-n", "/opt/aiops/bin/aiops-fable", "program")
 
 
 class ProgramError(cp.ControlPlaneError):
     pass
+
+
+def fable_program(operation: str, issue_number: int, **fields) -> Dict[str, Any]:
+    """The root-owned bridge recomputes authority; only its stdout is a receipt.
+
+    No token in argv, env preservation, free-form shell, model choice, file path,
+    comment verdict or unlimited retry. Model audits may take up to three hours;
+    check is a short receipt read. An interrupted admitted request stays UNKNOWN.
+    """
+    cfg = cp.load_config()
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise ProgramError("GITHUB_TOKEN is required")
+    payload = {"operation": operation, "repository": cfg["repository"], "issue": issue_number,
+               "github_token": token, **fields}
+    try:
+        result = subprocess.run(FABLE_PROGRAM_COMMAND, input=json.dumps(payload), text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                                env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+                                timeout=14400 if operation in ("audit", "consult") else 120)
+    except subprocess.TimeoutExpired:
+        raise ProgramError("program Astra request timed out; reconcile it on the host; do not resubmit") from None
+    try:
+        answer = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        raise ProgramError("protected program Astra bridge returned no valid JSON; do not resubmit") from None
+    if result.returncode or not isinstance(answer, dict) or answer.get("status") == "ERROR":
+        raise ProgramError("protected program Astra bridge failed; inspect its host receipt")
+    return answer
+
+
+def astra_audit(issue_number: int, pr_number: int, head: str) -> Dict[str, Any]:
+    cp.require_runtime_enabled()
+    return fable_program("audit", issue_number, pr=pr_number, head=head)
+
+
+def astra_consult(issue_number: int, question: int) -> Dict[str, Any]:
+    cp.require_runtime_enabled()
+    return fable_program("consult", issue_number, question=question)
+
+
+def astra_receipt_matches(receipt, expected, gate, floor):
+    return isinstance(receipt, dict) and receipt.get("status") == "POSTED" \
+        and receipt.get("result") in ("PASS", "PASS_WITH_NOTES") \
+        and receipt.get("scope_result") == "WITHIN_APPROVED_PLAN" \
+        and receipt.get("program_binding") == expected and receipt.get("binding") == expected \
+        and receipt.get("gate") == gate and receipt.get("verified_depth") in AUDIT_FLOORS \
+        and AUDIT_FLOORS.index(receipt["verified_depth"]) >= AUDIT_FLOORS.index(floor) \
+        and isinstance(receipt.get("comment_url"), str) and bool(receipt["comment_url"].strip())
 
 
 # --------------------------------------------------------------------------- GitHub
@@ -160,6 +211,8 @@ def load_plan(api: cp.GithubApi, cfg: Dict[str, Any], plan_commit: str) -> Dict[
         plan = json.loads(base64.b64decode(content["content"]).decode("utf-8"))
     except (KeyError, TypeError, ValueError) as exc:
         raise ProgramError(f"{PLAN_PATH} at {plan_commit} is unreadable") from exc
+    if isinstance(plan, dict) and "PENDING" in str(plan.get("approval_pointer", "")).upper():
+        raise ProgramError("program scope/start approval is pending; do not dispatch")
     return validate_plan(plan, cfg)
 
 
@@ -196,6 +249,11 @@ def validate_plan(plan: Any, cfg: Dict[str, Any]) -> Dict[str, Any]:
             raise ProgramError(f"node {node['id']} has an invalid gate field")
         if node["deliverable_mode"] not in DELIVERABLE_MODES:
             raise ProgramError(f"node {node['id']}: program mode supports deliverable_mode PR only")
+        for flag in ("user_merge", "astra_auto_merge"):
+            if flag in node and type(node[flag]) is not bool:
+                raise ProgramError(f"node {node['id']} has invalid {flag}")
+        if node.get("user_merge") is True and node.get("astra_auto_merge") is True:
+            raise ProgramError(f"node {node['id']}: User-only merge cannot also delegate its Astra merge")
         if node["audit_floor"] == "A0":
             # Program mode has no A0 qualification path (DISPATCH section 16: authorization pointer,
             # path contract, attestation), so A0 is promoted to A1 and gets its independent review.
@@ -548,6 +606,12 @@ def start(issue_number: int, program: str, node_id: str, plan_commit: str, packe
     if active_rows_for_task(board, cfg["repository"], tid):
         cp.write_github_output("launch_required", "false")
         return {"status": "TASK_ACTIVE", "issue": issue_number}
+    previous_writer = current_writer(task_rows(cfg, tid))
+    if node.get("astra_auto_merge") is True and previous_writer and released(previous_writer) \
+            and status["plan_commit"] == plan_commit:
+        decision = fable_program("decision-status", issue_number)
+        if decision.get("status") != "CLEAR":
+            raise ProgramError("Fable decision is unresolved or USER_REQUIRED; an approved plan revision is required")
     attempt = None
     if record is not None:
         state = record["launch_state"]
@@ -973,10 +1037,31 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     if len(passing_lanes) < REQUIRED_REVIEWS[floor]:
         reasons.append(f"{len(passing_lanes)} of {REQUIRED_REVIEWS[floor]} required independent reviews at effective "
                        f"floor {floor} (host-pinned verdicts from distinct non-writer lanes) PASS at this head")
-    if contract_change:
-        reasons.append("a current-head review reports a contract change; Astra/User decision required")
+    if node.get("user_merge") is True:
+        reasons.append("approved plan reserves this node's merge to the User")
+    delegated_astra = node.get("astra_auto_merge") is True and node.get("user_merge") is not True
     if gate != "NONE" or floor == "A3":
-        reasons.append(f"Astra gate {gate} is not machine-verifiable here; User merges")
+        if not delegated_astra:
+            reasons.append(f"Astra gate {gate} is not delegated by this approved plan; User merges")
+        else:
+            try:
+                receipt = fable_program("check", issue_number, pr=pr_number, head=head)
+            except ProgramError as exc:
+                reasons.append(str(exc))
+            else:
+                expected = {"repository": cfg["repository"], "issue": issue_number,
+                            "program": plan["program"], "node": node["id"], "plan_commit": mstatus["plan_commit"],
+                            "task_revision": writer["task_revision"] if writer else None,
+                            "writer_launch": writer["launch_request_id"] if writer else None,
+                            "pr": pr_number, "head": head, "gate": gate, "depth": floor}
+                if not astra_receipt_matches(receipt, expected, gate, floor):
+                    reasons.append("required current-head protected Fable scope audit is missing or not passing")
+    elif contract_change:
+        reasons.append("a current-head review reports a contract change; Astra/User decision required")
+    if contract_change and (gate == "NONE" or not delegated_astra):
+        message = "a current-head review reports a contract change; Astra/User decision required"
+        if message not in reasons:
+            reasons.append(message)
     pending = pending_dependencies(api, cfg, plan, node)
     if pending:
         reasons.append(f"dependencies are not DONE: {pending}")
@@ -1010,7 +1095,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("lanes")
-    for name in ("materialize", "start", "review", "finalize-review", "reap", "merge-check", "merge"):
+    for name in ("materialize", "start", "review", "finalize-review", "reap", "merge-check", "merge", "astra-audit", "astra-consult"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--args-json", default="{}")
         cmd.add_argument("--issue-number", type=int)
@@ -1035,6 +1120,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             result = {"state": finalize_review(args.issue_number, args.result, args.launch_request_id)}
         elif args.command == "reap":
             result = reap(args.issue_number, extra.get("launch_request_id", ""), extra.get("evidence", ""))
+        elif args.command == "astra-audit":
+            result = astra_audit(args.issue_number, int(extra.get("pr_number", 0)), extra.get("head", ""))
+        elif args.command == "astra-consult":
+            result = astra_consult(args.issue_number, int(extra.get("question_comment_id", 0)))
         elif args.command == "merge":
             result = merge(args.issue_number, int(extra.get("pr_number", 0)))
         else:

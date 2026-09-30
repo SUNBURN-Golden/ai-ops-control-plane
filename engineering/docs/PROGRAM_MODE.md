@@ -1,5 +1,12 @@
 # Program mode — 설계 초안 v2
 
+2026-09-30 후속 구현 후보: [Program Astra automation](PROGRAM_ASTRA_AUTOMATION.md).
+현재 A3/마일스톤의 무조건 수동 병합과 Fable 수동 호출 공백을, 승인된 node의
+명시적 위임과 보호된 exact-HEAD scope receipt로 연결한다. 이 후보의 독립 A3
+감사·User 병합·host qualification/attestation 전에는 기존 운영이 적용된다.
+`user_merge=true` 노드·범위 밖 결정·화면/작품 승인·출시·추가 과금은 그대로
+User 권한이다. M1의 computed READY_FOR_MERGE 조건을 텍스트 PASS로 대체하지 않는다.
+
 v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. v2는 v1(`52ad415`) 재검토에서 남은 F4(불명 생성 요청)와 구현 확인 항목 2개를 반영하고, 호스트 조사 결과(§15)를 더했다. 대응표는 §14에 있다.
 
 상태: **설계 초안**. 코드, 호스트, 활성화 기록은 바꾸지 않는다. 이 문서는

@@ -341,3 +341,11 @@ python3 scripts/control_plane.py validate-repo
 
 테스트는 중복·경쟁·UNKNOWN·stale receipt·환경 누출·activation 거절을 다룬다.
 실제 provider 과금, host 격리, GitHub/Slack 종단 동작을 검증했다는 뜻은 아니다.
+# Program Astra bridge (implementation candidate)
+
+The protected `aiops-fable program` path, scoped audit receipts and automatic
+consult invocation are specified in [PROGRAM_ASTRA_AUTOMATION.md](PROGRAM_ASTRA_AUTOMATION.md).
+They require their own exact-HEAD A3 adoption and host qualification. This change
+leaves the committed activation pointer unchanged; the new RUNTIME_PATHS cannot
+be activated by the mere existence of this document.
+

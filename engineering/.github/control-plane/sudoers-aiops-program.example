@@ -27,3 +27,8 @@ astra-control ALL=(astra-builder-glm) NOPASSWD: /opt/astra/libexec/astra-glm-ada
 
 # CURSOR lane: the same three adapter modes the other lanes already have.
 astra-control ALL=(astra-builder-cursor) NOPASSWD: /opt/astra/libexec/astra-cursor-adapter --preflight, /opt/astra/libexec/astra-cursor-adapter --launch, /opt/astra/libexec/astra-cursor-adapter --quiescence
+
+
+# Protected Fable bridge only. No env preservation, arbitrary command or path.
+# Its stdin JSON is validated against installed profiles and host pins.
+RUNNER_USER ALL=(root) NOPASSWD: /opt/aiops/bin/aiops-fable program
