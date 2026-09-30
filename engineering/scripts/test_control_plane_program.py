@@ -673,6 +673,26 @@ class ProgramModeTests(unittest.TestCase):
         self.cfg.pop("program_required_checks")
         self.assertIn("required checks are not declared", self.reasons(issue))
 
+    def test_only_the_newest_run_of_each_check_counts(self):
+        # A head keeps every run of a check: the skipped run from while its PR was a draft, or
+        # a failed attempt before a re-run. Branch protection reads the newest one; so do we.
+        issue, _ = self.released_writer()
+        self.reviewed(issue)
+
+        def run(run_id, conclusion, status="completed", app=None):
+            return {"id": run_id, "name": "offline", "status": status, "conclusion": conclusion,
+                    **({"app": {"id": app}} if app else {})}
+
+        for runs, ready in (
+                ([run(1, "skipped"), run(2, "success")], True),       # draft, then ready for review
+                ([run(4, "success"), run(3, "failure")], True),       # a failed attempt, then a re-run
+                ([run(5, "success"), run(6, "failure")], False),      # a newer run failed
+                ([run(7, "success"), run(8, None, "in_progress")], False),
+                ([run(9, "success", app=1), run(10, "failure", app=2)], False)):  # another app's check
+            with self.subTest(runs=runs):
+                self.gh.checks[HEAD] = runs
+                self.assertEqual(prog.merge_check(issue, 7)["ready"], ready, self.reasons(issue))
+
     def test_a_reviewers_verified_required_depth_raises_the_floor(self):
         # Astra A3 finding 6: EFFECTIVE_AUDIT_FLOOR = max(plan floor, VERIFIED_REQUIRED_DEPTH).
         issue, _ = self.released_writer()

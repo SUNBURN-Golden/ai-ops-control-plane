@@ -60,7 +60,7 @@ program mode의 sudoers 원문은 `.github/control-plane/sudoers-aiops-program.e
 - runner 규칙은 `reap`의 `--pin-stdin` 형식만 허용한다. `migrate`, `reconcile`, `init`, `materialize-resolve`는 허용하지 않는다.
 - control identity는 각 레인 adapter의 `--quiescence`만 레인 계정으로 실행한다. root로는 실행하지 않는다.
 - program mode 테스트는 런타임이 helper에 보내는 모든 인수가 이 규칙에 맞는지 검사한다. 새 helper 호출을 더하면 이 파일도 같이 고쳐야 한다.
-- 설치 후 확인: `diff <(sed 's/RUNNER_USER/<runner 계정>/' sudoers-aiops-program.example) /etc/sudoers.d/aiops-program`
+- 설치 후 확인: `diff <(sed 's/^RUNNER_USER /<runner 계정> /' sudoers-aiops-program.example) /etc/sudoers.d/aiops-program`
 
 host policy 모양은 `.github/control-plane/host-policy.example.json`에 있다.
 예시는 UID=0 / 빈 repo / PENDING evidence라서 그대로는 실행되지 않는다.
