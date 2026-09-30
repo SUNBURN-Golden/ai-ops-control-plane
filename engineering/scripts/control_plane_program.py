@@ -885,6 +885,22 @@ def all_check_runs(api: cp.GithubApi, head: str) -> List[Dict[str, Any]]:
         page += 1
 
 
+def latest_check_runs(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The newest run of each check (app and name), as branch protection reads a head.
+
+    A head keeps every run: the skipped one from while its PR was a draft, a failed attempt
+    before a re-run. Only the newest run of each check says what the head is now. Check run
+    ids only grow, so the larger id is the newer run.
+    """
+    newest: Dict[tuple, tuple] = {}
+    for index, run in enumerate(runs):
+        key = ((run.get("app") or {}).get("id"), run.get("name"))
+        order = (run.get("id") if type(run.get("id")) is int else 0, index)
+        if key not in newest or order > newest[key][0]:
+            newest[key] = (order, run)
+    return [run for _, run in newest.values()]
+
+
 def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     """DISPATCH section 18, computed from host pins, the plan and live PR state. Anything not
     computable makes the PR not ready."""
@@ -920,7 +936,7 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     labels = {label.get("name") for label in issue.get("labels", [])}
     if labels & BLOCKING_LABELS:
         reasons.append(f"unresolved blocker labels: {sorted(labels & BLOCKING_LABELS)}")
-    runs = all_check_runs(api, head) if head else []
+    runs = latest_check_runs(all_check_runs(api, head)) if head else []
     if any(r.get("status") != "completed" or r.get("conclusion") not in ("success", "neutral", "skipped")
            for r in runs):
         reasons.append("verification gate: a check run is incomplete or failing on the head")

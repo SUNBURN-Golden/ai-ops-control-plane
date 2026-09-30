@@ -28,10 +28,17 @@
       "BeautifulMind-JT"
     ],
     "enabled_builders": [
-      "DEVIN"
+      "DEVIN",
+      "GROK_BUILD",
+      "GLM"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
-    "deployment_enabled": true
+    "deployment_enabled": true,
+    "program_merge_policy": "STANDARD",
+    "program_required_checks": [
+      "protocol",
+      "kernel"
+    ]
   },
   "BeautifulMind-JT/ZARI": {
     "schema_version": 1,
@@ -62,10 +69,16 @@
       "BeautifulMind-JT"
     ],
     "enabled_builders": [
-      "DEVIN"
+      "DEVIN",
+      "GROK_BUILD",
+      "GLM"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
-    "deployment_enabled": true
+    "deployment_enabled": true,
+    "program_merge_policy": "STANDARD",
+    "program_required_checks": [
+      "bridge"
+    ]
   },
   "BeautifulMind-JT/film-unit-mv-studio": {
     "schema_version": 1,
@@ -96,10 +109,17 @@
       "BeautifulMind-JT"
     ],
     "enabled_builders": [
-      "DEVIN"
+      "DEVIN",
+      "GROK_BUILD",
+      "GLM"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
-    "deployment_enabled": true
+    "deployment_enabled": true,
+    "program_merge_policy": "STANDARD",
+    "program_required_checks": [
+      "Python 3.11 / FFmpeg",
+      "Python 3.12 / FFmpeg"
+    ]
   },
   "BeautifulMind-JT/maeum-gyeol": {
     "schema_version": 1,
@@ -130,10 +150,16 @@
       "BeautifulMind-JT"
     ],
     "enabled_builders": [
-      "DEVIN"
+      "DEVIN",
+      "GROK_BUILD",
+      "GLM"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
-    "deployment_enabled": true
+    "deployment_enabled": true,
+    "program_merge_policy": "STANDARD",
+    "program_required_checks": [
+      "reproduce"
+    ]
   },
   "BeautifulMind-JT/kix-commerce-apps": {
     "schema_version": 1,
@@ -164,9 +190,15 @@
       "BeautifulMind-JT"
     ],
     "enabled_builders": [
-      "DEVIN"
+      "DEVIN",
+      "GROK_BUILD",
+      "GLM"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
-    "deployment_enabled": true
+    "deployment_enabled": true,
+    "program_merge_policy": "STANDARD",
+    "program_required_checks": [
+      "Typecheck, build, and test (stub)"
+    ]
   }
 }
