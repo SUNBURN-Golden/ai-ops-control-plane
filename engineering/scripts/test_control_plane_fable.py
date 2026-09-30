@@ -162,6 +162,45 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", fable.child_env("/home"))
 
 
+class InstalledClaudeTests(Base):
+    def binary(self, mode=0o755, *, link=True):
+        (self.runs / "lib").mkdir(mode=0o755)
+        (self.runs / "bin").mkdir(mode=0o755)
+        real = self.runs / "lib" / "cli.js"
+        real.write_text("#!/usr/bin/env node\n")
+        real.chmod(mode)
+        path = self.runs / "bin" / "claude"
+        if link:
+            path.symlink_to(real)
+        else:
+            real.rename(path)
+        os.chmod(self.runs, 0o755)
+        return str(path)
+
+    def test_a_root_symlink_to_a_protected_file_is_accepted(self):
+        """A symlink always reads as mode 0777 from lstat; only its owner and target count."""
+        path = self.binary()
+        self.assertEqual(fable.installed_claude((str(self.runs / "none"), path), owner=os.getuid()), path)
+
+    def test_writable_targets_or_directories_are_refused(self):
+        path = self.binary(0o775)
+        with self.assertRaisesRegex(fable.FableError, "cli.js must be owned by root"):
+            fable.installed_claude((path,), owner=os.getuid())
+
+    def test_a_writable_regular_file_or_directory_is_refused(self):
+        path = self.binary(0o777, link=False)
+        with self.assertRaisesRegex(fable.FableError, "claude must be owned by root"):
+            fable.installed_claude((path,), owner=os.getuid())
+        os.chmod(path, 0o755)
+        os.chmod(self.runs / "bin", 0o777)
+        with self.assertRaisesRegex(fable.FableError, "bin must be owned by root"):
+            fable.installed_claude((path,), owner=os.getuid())
+
+    def test_a_missing_cli_is_reported(self):
+        with self.assertRaisesRegex(fable.FableError, "not installed"):
+            fable.installed_claude((str(self.runs / "none"),), owner=os.getuid())
+
+
 class ExtractTests(Base):
     def test_top_directory_is_stripped_and_links_are_skipped(self):
         dest = self.runs / "tree"

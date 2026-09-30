@@ -743,16 +743,22 @@ def root_file(path, *, secret=False):
         raise FableError(f"{path} must be a root-owned regular file" + (" with mode 0600" if secret else ""))
 
 
-def installed_claude():
-    for candidate in CLAUDE_PATHS:
+def installed_claude(paths=CLAUDE_PATHS, owner=0):
+    """The CLI and every directory holding it must be owner-controlled; a symlink's own mode is always 0777."""
+    for candidate in paths:
         if os.path.lexists(candidate):
             real = os.path.realpath(candidate)
-            for path in (candidate, real):
-                info = os.lstat(path) if path == candidate else os.stat(path)
-                if info.st_uid != 0 or info.st_mode & 0o022:
-                    raise FableError(f"{path} must be root-owned and not group/other writable")
+            link = os.lstat(candidate)
+            if link.st_uid != owner or (not stat.S_ISLNK(link.st_mode) and link.st_mode & 0o022):
+                raise FableError(f"{candidate} must be owned by root and not group/other writable")
+            if not stat.S_ISREG(os.stat(real).st_mode):
+                raise FableError(f"{real} is not a regular file")
+            for path in dict.fromkeys((real, os.path.dirname(real), os.path.dirname(candidate))):
+                info = os.stat(path)
+                if info.st_uid != owner or info.st_mode & 0o022:
+                    raise FableError(f"{path} must be owned by root and not group/other writable")
             return candidate
-    raise FableError("claude is not installed in " + " or ".join(CLAUDE_PATHS))
+    raise FableError("claude is not installed in " + " or ".join(paths))
 
 
 def production_context(need_github=True):
