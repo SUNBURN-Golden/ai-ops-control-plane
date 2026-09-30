@@ -150,16 +150,10 @@
       "BeautifulMind-JT"
     ],
     "enabled_builders": [
-      "DEVIN",
-      "GROK_BUILD",
-      "GLM"
+      "DEVIN"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
-    "deployment_enabled": true,
-    "program_merge_policy": "STANDARD",
-    "program_required_checks": [
-      "reproduce"
-    ]
+    "deployment_enabled": true
   },
   "BeautifulMind-JT/kix-commerce-apps": {
     "schema_version": 1,
