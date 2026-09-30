@@ -302,6 +302,11 @@ def model_output(raw):
     """Parse the CLI's stream, prove extra usage stayed blocked and the run was a successful Fable run."""
     events = events_of(raw)
     limits = [event.get("rate_limit_info") for event in events if event.get("type") == "rate_limit_event"]
+    failed = [event for event in events if event.get("type") == "result" and event.get("is_error") is not False]
+    if not limits and failed:
+        # A run that never reached the model reports its own failure first, e.g. a bad Claude token.
+        detail = TOKEN_SHAPES.sub("***", str(failed[-1].get("result")))[:300]
+        raise FableError(f"model run failed before any usage: HTTP {failed[-1].get('api_error_status')}: {detail}")
     if not limits:
         raise FableError("OVERAGE_UNVERIFIED: the run reported no rate-limit status; nothing is posted")
     for info in limits:

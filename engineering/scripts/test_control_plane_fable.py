@@ -254,6 +254,15 @@ class OutputTests(unittest.TestCase):
             with self.subTest(reason=reason), self.assertRaisesRegex(fable.FableError, reason):
                 fable.model_output(raw)
 
+    def test_an_early_failure_is_reported_as_itself(self):
+        failed = [{"type": "system", "subtype": "init"},
+                  {"type": "result", "subtype": "success", "is_error": True, "api_error_status": 401,
+                   "result": "Failed to authenticate. API Error: 401 OAuth access token is invalid sk-ant-oat01-abcdefghijk"}]
+        raw = "".join(json.dumps(event) + "\n" for event in failed).encode()
+        with self.assertRaisesRegex(fable.FableError, "failed before any usage: HTTP 401") as caught:
+            fable.model_output(raw)
+        self.assertNotIn("abcdefghijk", str(caught.exception))
+
     def test_the_stream_stops_at_the_first_sign_of_extra_usage(self):
         allowed = {"type": "rate_limit_event", "rate_limit_info": {**BLOCKED, "overageStatus": "allowed"}}
         lines = [json.dumps({"type": "system"}), json.dumps(allowed), json.dumps({"type": "assistant", "n": 1})]
