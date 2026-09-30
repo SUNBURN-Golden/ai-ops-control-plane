@@ -165,6 +165,14 @@ the projection is not. This guard does not grant new authority to Opus.
 
 ## Validation and remaining limits
 
+The follow-up [program execution evolution design](PROGRAM_EXECUTION_EVOLUTION_DESIGN_KO.md)
+specifies typed terminal quota failures, protected one-shot resumption,
+cross-repository evidence and proposal-only plan migration, and shared completion
+reporting with separate qualification/acceptance/release facets. Its
+[implementation tasks](PROGRAM_EXECUTION_EVOLUTION_TASKS_KO.md) are prospective;
+they do not change the ERROR/UNKNOWN fences or APIs implemented by this document.
+The follow-up must be separately adopted, implemented and host-qualified.
+
 Regression tests cover the existing program/host-pin workflow and Fable tool.
 New tests cover scope delegation, user-only merges, required CI/reviews, exact
 bindings, pending approval, receipt dedupe/crash/error/busy fencing, secret
