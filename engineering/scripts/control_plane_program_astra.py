@@ -17,18 +17,19 @@ import tempfile
 
 import control_plane as cp
 import control_plane_program as prog
+import control_plane_program_receipts as receipt_journal
+import control_plane_program_quota as quota_runtime
 
 
-class BridgeError(RuntimeError):
-    pass
+BridgeError = receipt_journal.ReceiptError
 
 
 def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def protected(path, directory=False):
-    info = os.lstat(path)
+def protected(path, directory=False, *, info=None):
+    info = os.lstat(path) if info is None else info
     expected = stat.S_ISDIR if directory else stat.S_ISREG
     if not expected(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
         raise BridgeError("program Astra state must be root-owned and not group/other writable")
@@ -36,12 +37,12 @@ def protected(path, directory=False):
 
 POLICY_PATHS = ("AGENTS.md", "RUNBOOKS/DISPATCH.md", "docs/PROGRAM_MODE.md",
                 "docs/CONTROL_PLANE_RUNTIME.md", "docs/COORDINATOR_PLAYBOOK.md",
-                "docs/PROGRAM_ASTRA_AUTOMATION.md", "docs/PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md")
+                "docs/PROGRAM_ASTRA_AUTOMATION.md", "docs/PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md", "docs/PROGRAM_FABLE_RECOVERY.md")
 
 
 def installed_fingerprint(ctx):
     """Bind protected installed bytes, not an untrusted working tree or stdin."""
-    paths = [Path(module.__file__) for module in (cp, prog)] + [Path(__file__), cp.CONFIG_PATH, cp.ACTIVATION_PATH,
+    paths = [Path(module.__file__) for module in (cp, prog, receipt_journal, quota_runtime)] + [Path(__file__), cp.CONFIG_PATH, cp.ACTIVATION_PATH,
              cp.CONFIG_PATH.with_name("projects.json")] + [cp.ROOT / name for name in POLICY_PATHS]
     hashes = []
     for path in paths:
@@ -149,128 +150,54 @@ def request_context(api, cfg, issue_number, pr_number=None, head=None, *, decisi
     return binding, issue, plan, node, rows, writer
 
 
-class Receipts:
-    """Root-owned, fail-closed admission and results; one request per exact binding.
-
-    A crash or lost result leaves RUNNING/UNKNOWN. It is never auto-resubmitted.
-    A changed head/revision/question gets a different key; old authority is not
-    transferred. No user-supplied path, run id or arbitrary GitHub verdict is read.
-    """
+class Receipts(receipt_journal.Receipts):
     def __init__(self, root, tool_sha, secret_values=()):
-        self.root, self.tool_sha = Path(root), tool_sha
-        self.secret_values = tuple(secret_values)
-        protected(self.root, directory=True)
-
-    def key(self, action, binding):
-        return hashlib.sha256(canonical({"action": action, "binding": binding,
-                                        "tool_sha256": self.tool_sha}).encode()).hexdigest()
-
-    def read(self, action, binding):
-        path = self.root / (self.key(action, binding) + ".json")
-        if not path.exists():
-            return {"status": "MISSING"}
-        protected(path)
-        try:
-            value = json.loads(path.read_text())
-        except (ValueError, OSError):
-            raise BridgeError("program Astra receipt is unreadable") from None
-        if not isinstance(value, dict) or value.get("action") != action or value.get("binding") != binding \
-                or value.get("tool_sha256") != self.tool_sha:
-            raise BridgeError("program Astra receipt binding is invalid")
-        return value
-
-    def write(self, action, binding, result):
-        path = self.root / (self.key(action, binding) + ".json")
-        value = {"action": action, "binding": binding, "tool_sha256": self.tool_sha, **result}
-        fd, temporary = tempfile.mkstemp(dir=self.root)
-        try:
-            with os.fdopen(fd, "w") as handle:
-                handle.write(canonical(value)); handle.flush(); os.fsync(handle.fileno())
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, path)
-            directory_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-        return value
-
-    def execute(self, action, binding, invoke):
-        lock_path = self.root / (self.key(action, binding) + ".lock")
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        try:
-            protected(lock_path)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return {"status": "RUNNING"}
-            previous = self.read(action, binding)
-            if previous["status"] != "MISSING":
-                return previous if previous["status"] != "RUNNING" else {**previous, "status": "UNKNOWN"}
-            global_fd = os.open(self.root / "model.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-            try:
-                protected(self.root / "model.lock")
-                try:
-                    fcntl.flock(global_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    return {"status": "BUSY"}  # no request has been admitted or model invoked
-                return self._invoke(action, binding, invoke)
-            finally:
-                os.close(global_fd)
-        finally:
-            os.close(fd)
-
-    def _invoke(self, action, binding, invoke):
-        self.write(action, binding, {"status": "RUNNING"})
-        try:
-            result = invoke()
-            if result.get("status") != "POSTED" or result.get("program_binding") != binding:
-                raise BridgeError("Fable result is not a bound durable POSTED receipt")
-            return self.write(action, binding, result)
-        except Exception as exc:
-            self.write(action, binding, {"status": "ERROR",
-                                        "reason": cp.program_error_reason(exc, self.secret_values)})
-            raise
-
-    def decision_status(self, binding):
-        for path in self.root.glob("*.json"):
-            protected(path)
-            value = json.loads(path.read_text())
-            if value.get("action") not in ("consult", "audit"):
-                continue
-            if any(value.get("binding", {}).get(key) != val for key, val in binding.items()):
-                continue
-            if value.get("status") != "POSTED" or value.get("result") in ("USER_REQUIRED", "DECISION_REQUIRED") \
-                    or value.get("scope_result") == "USER_REQUIRED":
-                return {"status": "BLOCKED", "reason": "Fable decision is unresolved or requires the User"}
-        return {"status": "CLEAR"}  # no new grant; the existing Opus/User path still applies
+        super().__init__(root, tool_sha, secret_values, trust=protected)
 
 
-def run(ctx, fable, payload):
-    allowed = {"operation", "repository", "issue", "pr", "head", "question", "github_token"}
-    if not isinstance(payload, dict) or set(payload) - allowed:
-        raise BridgeError("invalid program Astra input")
-    repository, operation, issue_number = payload.get("repository"), payload.get("operation"), payload.get("issue")
-    if not isinstance(repository, str) or not fable.REPOSITORY_RE.fullmatch(repository) \
-            or type(issue_number) is not int or issue_number <= 0 \
-            or operation not in ("audit", "check", "consult", "consult-check", "decision-status"):
-        raise BridgeError("invalid program Astra target or operation")
-    if not isinstance(payload.get("github_token"), str) or not payload["github_token"]:
-        raise BridgeError("GitHub token is required on stdin")
-    # Only the allowlisted installed profiles are used. No caller-controlled root
-    # path, PYTHONPATH, credential path, Git ref or model is accepted.
-    for path in (cp.CONFIG_PATH, cp.CONFIG_PATH.with_name("projects.json")):
-        protected(path)
-        for directory in path.parents:
-            protected(directory, directory=True)
-    os.environ["ASTRA_TARGET_REPOSITORY"] = repository
+def operator_reconcile(ctx, fable, payload):
+    """Separate root operator entry. Never reachable through program stdin."""
+    fields = {"repository", "admission", "expected_version", "github_token"}
+    if os.geteuid() != 0 or not isinstance(payload, dict) or set(payload) not in (fields, fields | {"quota_attempt"}) \
+            or not isinstance(payload.get("repository"), str) \
+            or not fable.REPOSITORY_RE.fullmatch(payload["repository"]) \
+            or not isinstance(payload.get("github_token"), str) or not payload["github_token"] \
+            or not receipt_journal.HEX.fullmatch(str(payload.get("admission", ""))) \
+            or not receipt_journal.HEX.fullmatch(str(payload.get("expected_version", ""))):
+        raise BridgeError("invalid root operator reconciliation input")
+    os.environ["ASTRA_TARGET_REPOSITORY"] = payload["repository"]
     cfg = cp.load_config()
     fingerprint = installed_fingerprint(ctx)
     require_service_authorization(fingerprint)
-    api = cp.GithubApi(repository, payload["github_token"])
+    store = Receipts(ctx.runs_dir / "program", fingerprint, getattr(ctx, "secret_values", ()))
+    parent_store = store
+    if "quota_attempt" in payload:
+        incident = payload["quota_attempt"]
+        if not isinstance(incident, str) or not receipt_journal.HEX.fullmatch(incident):
+            raise BridgeError("invalid operator quota incident selector")
+        quota = quota_runtime.Quota(store, lambda run: fable.verify_failure_evidence(ctx, run),
+                                   lambda: (_ for _ in ()).throw(BridgeError("operator entry never runs a model")),
+                                   lambda *_: None)
+        store = quota.operator_store(incident, payload["admission"])
+    admission = store.admission(payload["admission"])
+    if admission["binding"].get("repository") != cfg["repository"]:
+        raise BridgeError("reconciliation admission targets another repository")
+    if "quota_attempt" in payload:
+        scope = receipt_journal.digest(list(parent_store.scope(admission["action"], admission["binding"])))
+        with parent_store.locked(scope + ".scope.lock") as acquired:
+            if not acquired:
+                return {"status": "RUNNING"}
+            with parent_store.locked("model.lock") as acquired:
+                if not acquired:
+                    return {"status": "BUSY"}
+                return store.reconcile(payload["admission"], payload["expected_version"],
+                                       lambda run: fable.verify_failure_evidence(ctx, run))
+    return store.reconcile(payload["admission"], payload["expected_version"],
+                           lambda run: fable.verify_failure_evidence(ctx, run))
+
+
+def resolve_request(api, cfg, issue_number, operation, payload):
+    repository = cfg["repository"]
     if operation in ("audit", "check"):
         pr, head = payload.get("pr"), payload.get("head")
         if type(pr) is not int or pr <= 0 or not isinstance(head, str) or not prog.SHA.fullmatch(head):
@@ -310,17 +237,102 @@ def run(ctx, fable, payload):
             raise BridgeError("consult source has no exact SHA")
         binding.update(question=question, question_sha256=hashlib.sha256(comment.get("body", "").encode()).hexdigest(),
                        source=source, question_launch=candidate["launch_request_id"])
+    return binding, issue, plan, node, rows, writer
+
+
+def require_quota_context(action, api, cfg, context):
+    binding, issue, plan, node, rows, writer = context
+    if node.get("user_merge") is True or node.get("astra_gate") == "RELEASE":
+        raise BridgeError("automatic quota readmission cannot cross User-only or RELEASE authority")
+    if action == "audit":
+        tid = prog.task_id_for(plan["program"], node["id"])
+        verdicts = prog.current_verdicts(cfg, tid, rows, writer, binding["head"])
+        if any(verdict.get("contract_change") == "YES" for _, verdict in verdicts):
+            raise BridgeError("automatic quota readmission cannot settle a contract-change decision")
+        if issue.get("labels") and {label.get("name") for label in issue["labels"]} & prog.BLOCKING_LABELS:
+            raise BridgeError("quota audit has an unresolved product blocker")
+        if prog.verification_reasons(api, cfg, binding["head"]):
+            raise BridgeError("quota audit requires the same current-head verification gate as merge")
+        if prog.pending_dependencies(api, cfg, plan, node):
+            raise BridgeError("quota audit dependencies are not DONE")
+
+
+def run(ctx, fable, payload):
+    allowed = {"operation", "repository", "issue", "pr", "head", "question", "github_token"}
+    if not isinstance(payload, dict) or set(payload) - allowed:
+        raise BridgeError("invalid program Astra input")
+    repository, operation, issue_number = payload.get("repository"), payload.get("operation"), payload.get("issue")
+    if not isinstance(repository, str) or not fable.REPOSITORY_RE.fullmatch(repository) \
+            or type(issue_number) is not int or issue_number <= 0 \
+            or operation not in ("audit", "check", "consult", "consult-check", "decision-status", "quota-readiness", "quota-resume"):
+        raise BridgeError("invalid program Astra target or operation")
+    if not isinstance(payload.get("github_token"), str) or not payload["github_token"]:
+        raise BridgeError("GitHub token is required on stdin")
+    # Only the allowlisted installed profiles are used. No caller-controlled root
+    # path, PYTHONPATH, credential path, Git ref or model is accepted.
+    for path in (cp.CONFIG_PATH, cp.CONFIG_PATH.with_name("projects.json")):
+        protected(path)
+        for directory in path.parents:
+            protected(directory, directory=True)
+    os.environ["ASTRA_TARGET_REPOSITORY"] = repository
+    cfg = cp.load_config()
+    fingerprint = installed_fingerprint(ctx)
+    require_service_authorization(fingerprint)
+    api = cp.GithubApi(repository, payload["github_token"])
+    context_operation = operation
+    if operation in ("quota-readiness", "quota-resume"):
+        if payload.get("question") is not None:
+            if payload.get("pr") is not None or payload.get("head") is not None:
+                raise BridgeError("quota target cannot mix audit and consultation selectors")
+            context_operation = "consult"
+        else:
+            context_operation = "audit"
+    context = resolve_request(api, cfg, issue_number, context_operation, payload)
+    if operation in ("quota-readiness", "quota-resume"):
+        require_quota_context(context_operation, api, cfg, context)
+    binding, issue, plan, node, rows, writer = context
     root = ctx.runs_dir / "program"
     if not root.exists():
         root.mkdir(mode=0o700)
     receipts = Receipts(root, fingerprint, (*getattr(ctx, "secret_values", ()), payload["github_token"]))
-    if operation == "check":
-        return receipts.read("audit", binding)
-    if operation == "consult-check":
-        return receipts.read("consult", binding)
+    def refresh(action, expected):
+        old_target = os.environ.get("ASTRA_TARGET_REPOSITORY")
+        try:
+            target = expected["repository"]
+            os.environ["ASTRA_TARGET_REPOSITORY"] = target
+            current_cfg = cp.load_config()
+            current_fingerprint = installed_fingerprint(ctx)
+            require_service_authorization(current_fingerprint)
+            current_api = cp.GithubApi(target, payload["github_token"])
+            selector = {"pr": expected["pr"], "head": expected["head"]} if action == "audit" \
+                else {"question": expected["question"]}
+            current_context = resolve_request(current_api, current_cfg, expected["issue"], action, selector)
+            require_quota_context(action, current_api, current_cfg, current_context)
+            current_binding = current_context[0]
+            return {"binding": current_binding, "tool_sha256": current_fingerprint}
+        finally:
+            if old_target is None:
+                os.environ.pop("ASTRA_TARGET_REPOSITORY", None)
+            else:
+                os.environ["ASTRA_TARGET_REPOSITORY"] = old_target
+    quota = quota_runtime.Quota(receipts, lambda run: fable.verify_failure_evidence(ctx, run),
+                               lambda: fable.preflight(ctx, getattr(ctx, "claude_version", "")), refresh)
+    action = "audit" if context_operation in ("audit", "check") else "consult"
     if operation == "decision-status":
-        return receipts.decision_status(binding)
-    if operation == "audit":
+        original = receipts.decision_status(binding)
+        return original if original.get("status") != "CLEAR" else quota.decision_status(binding)
+    if operation == "quota-readiness":
+        return quota.readiness(action, binding)
+    if operation in ("check", "consult-check"):
+        unresolved = quota.unresolved(action, binding)
+        if unresolved:
+            return {"status": "UNKNOWN", "quota_attempt": unresolved,
+                    "reason": "a quota retry execution is unresolved"}
+        effective = quota.effective(action, binding)
+        if effective.get("status") == "POSTED" and receipts.unresolved(action, binding):
+            return {"status": "UNKNOWN", "reason": "an ancestor execution is unresolved"}
+        return effective
+    if action == "audit":
         def invoke():
             result = fable.audit(ctx, repository, binding["pr"], binding["head"], binding["gate"], binding["depth"],
                                  again=True,
@@ -332,4 +344,24 @@ def run(ctx, fable, payload):
             return fable.consult(ctx, repository, issue_number, binding["question"], ref=binding["source"], again=True,
                                  program_context={"binding": binding, "node": node,
                                                   "approval_pointer": plan["approval_pointer"]})
-    return receipts.execute(operation, binding, invoke)
+    if operation == "quota-resume":
+        return quota.resume(action, binding, invoke)
+    unresolved = quota.unresolved(action, binding)
+    if unresolved:
+        return {"status": "UNKNOWN", "quota_attempt": unresolved}
+    existing = quota.effective(action, binding)
+    if existing.get("status") != "MISSING":
+        return existing
+    queued = quota.fair_blocked(action, binding)
+    if queued:
+        return {"status": "QUEUED", "quota_attempt": queued,
+                "reason": "a due quota retry precedes fresh model admission"}
+    def guard():
+        # Recheck at the actual model-admission linearization point. Time and
+        # another task's known quota evidence can change after the outer query.
+        incident = quota._ancestor(binding)
+        if incident:
+            return {"status": "UNKNOWN", "ancestor_admission": incident}
+        due = quota.fair_blocked(action, binding)
+        return {"status": "QUEUED", "quota_attempt": due} if due else None
+    return receipts.execute(action, binding, invoke, admission_guard=guard)

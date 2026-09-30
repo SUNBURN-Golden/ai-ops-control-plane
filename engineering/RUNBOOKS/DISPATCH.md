@@ -890,3 +890,6 @@ Scheduling (lanes free up in this priority order):
 2. pending reviews that lane can take;
 3. new builds, only while tasks waiting for review or fix number fewer than
    `max_active_sessions`.
+
+
+Recovery source candidate update: `docs/PROGRAM_FABLE_RECOVERY.md` specifies the implemented protected admission journal and bounded terminal-failure reconciliation. Earlier statements that reconciliation is unimplemented describe the #46 checkpoint; it remains uninstalled/unqualified and grants no operator override for unproven UNKNOWN. Full host activation is still NOT_READY.

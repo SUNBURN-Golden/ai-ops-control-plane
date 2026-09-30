@@ -157,10 +157,11 @@ class MainEntryTests(unittest.TestCase):
             rc = fable.main(["program"])
         return rc, json.loads(output.getvalue()), trust, production, run
 
-    def test_valid_entry_uses_bounded_stdin_and_checks_three_installed_modules(self):
+    def test_valid_entry_uses_bounded_stdin_and_checks_all_installed_modules(self):
         token = "private-github-test-secret"; payload = {"operation": "check", "github_token": token}
         rc, result, trust, production, run = self.invoke(json.dumps(payload), run_result={"status": "MISSING"})
-        self.assertEqual(rc, 0); self.assertEqual(result["status"], "MISSING"); self.assertEqual(trust.call_count, 3)
+        self.assertEqual(rc, 0); self.assertEqual(result["status"], "MISSING"); self.assertEqual(trust.call_count, 5)
+        self.assertIn("control_plane_program_receipts.py", [call.args[0].name for call in trust.call_args_list])
         self.assertEqual(production.call_args.kwargs["github_token"], token)
         self.assertEqual(run.call_args.args[2], payload)
 

@@ -378,5 +378,8 @@ The candidate leaves activation unchanged and has no qualified protected Fable
 receipt reconciler. Full automation remains NOT_READY until that separate
 implementation/audit/actual qualification. Builder-session reconcile cannot
 settle a Fable model request; no receipt deletion, new HEAD/plan/tool hash or
-workflow cancellation substitutes for terminal evidence. Future typed 429
-settlement/retry in the execution-evolution design remains unimplemented.
+workflow cancellation substitutes for terminal evidence. Typed failure/journal recovery is now a source candidate documented in
+`PROGRAM_FABLE_RECOVERY.md`; installed automatic recovery remains unqualified.
+
+
+Recovery source candidate update: `docs/PROGRAM_FABLE_RECOVERY.md` specifies the implemented protected admission journal and bounded terminal-failure reconciliation. Earlier statements that reconciliation is unimplemented describe the #46 checkpoint; it remains uninstalled/unqualified and grants no operator override for unproven UNKNOWN. Full host activation is still NOT_READY.

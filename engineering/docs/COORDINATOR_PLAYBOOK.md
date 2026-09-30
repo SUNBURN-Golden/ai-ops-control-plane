@@ -7,8 +7,9 @@ operator policy remains operative until separate User adoption, exact-HEAD A3
 review and protected service authorization. The coordinator never decides that a
 host is qualified: the fixed operation verifies the installed authorization
 record. Missing/PENDING authorization is a blocker, not a fallback permission.
-The protected receipt reconciler is not implemented/qualified here; end-to-end
-automation remains NOT_READY until that separate qualification is complete.
+The bounded receipt recovery implementation is a source candidate only
+(`docs/PROGRAM_FABLE_RECOVERY.md`); end-to-end automation remains NOT_READY until
+its final independent audit, adoption and actual host qualification.
 
 It is a decision table, not a judgment aid. Rows have explicit top-to-bottom
 priority; every row includes the condition that no earlier row applies. When no
@@ -98,7 +99,7 @@ review/comment prose. A cached observation expires on any binding change.
 | 13q | All required current-head reviews PASS, and there is no completed `merge-check` result for the current plan/task/writer/PR/head binding | `merge-check` only. Its returned `astra_status`, `astra_result`, `scope_result` and `ready` choose the following rows on the next wake. Never infer protected receipt state from a comment. |
 | 13a | Current computed `merge-check` has `astra_status=MISSING` or `BUSY` and `astra_audit_allowed=true` | `astra-audit` with exact delivered PR/head. The boolean requires every ordinary CI/review/dependency/body/authority condition; BUSY is unadmitted and may be retried on the next event/heartbeat. Do not repeatedly recheck in this session. |
 | 13b | Current computed result has `astra_status=POSTED` and `astra_result=FAIL` | Link its actual findings, then same-owner `start` for fixes. No automatic audit resubmission at the same binding. |
-| 13c | Current computed result has `astra_status=RUNNING`, `UNKNOWN` or `ERROR`, or `astra_result=DECISION_REQUIRED`, or `scope_result=USER_REQUIRED` | User/operator path; do not merge or resume over the protected blocker. A model that may be running is not cancelled or resubmitted. |
+| 13c | Current computed result has `astra_status=RUNNING`, `UNKNOWN` or `ERROR`, or `astra_result=DECISION_REQUIRED`, or `scope_result=USER_REQUIRED` | User/operator path; do not merge or resume over the protected blocker. Only ERROR may enter the separately adopted and installed Recovery candidate rows below, where the root service computes quota eligibility. A model that may be running is not cancelled or resubmitted. |
 | 13d | Current computed result has `ready=false` and is not covered by 13a–13c or the exact envelope-repair condition in 14a | Post the exact computed reasons once per binding and use the named User/operator path. Missing/PENDING service authorization, declared RELEASE, contract change and User-only holds cannot be bypassed. |
 | 14 | Current computed `merge-check` has `ready=true` and either `astra_status=NOT_REQUIRED`, or `astra_status=POSTED` with `astra_result=PASS`/`PASS_WITH_NOTES` and `scope_result=WITHIN_APPROVED_PLAN` | `merge` (M1 executor). It recomputes all gates and pins that head. `NOT_READY` returns reasons; a changed binding invalidates the cached observation. |
 | 14a | `merge-check` reports "task issue body differs" | `review` with slot 1 (it restores the envelope; an answered slot returns `REVIEW_EXISTS`, an A0 task reports that no slot is required), then `merge-check` again |
@@ -160,3 +161,21 @@ Stop the run, without partial writes, after any of these:
 - a rule conflict.
 
 The next run recomputes everything.
+
+
+Recovery source candidate update: `docs/PROGRAM_FABLE_RECOVERY.md` specifies the implemented protected admission journal and bounded terminal-failure reconciliation. Earlier statements that reconciliation is unimplemented describe the #46 checkpoint; it remains uninstalled/unqualified and grants no operator override for unproven UNKNOWN. Full host activation is still NOT_READY.
+
+
+## Recovery candidate rows (only after exact installed qualification)
+
+These rows supplement the decision table only after this final recovery/runtime
+scope is adopted and qualified. They do not grant permission to invoke an
+uninstalled API. On a protected Astra ERROR, use `quota-readiness` with the
+original pinned delivery or question selector. It is evidence-only and runs no
+model. `WAITING_QUOTA` ends the event; the existing hourly heartbeat can query
+again. `DUE` allows exactly one `quota-resume`, which revalidates admission and
+runs fresh preflight under the shared lock. `QUEUED`/`BUSY` ends the event.
+`UNKNOWN`, policy failure, stale context or another failed attempt is reported
+and remains fenced; the coordinator cannot reconcile it. A linked POSTED result
+returns to the normal merge/decision gates, not directly to a merge. No standing
+routine, polling, timer, model substitution or account/billing change is added.

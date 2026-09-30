@@ -173,15 +173,17 @@ its binding from the host despite an edited issue envelope; this relaxation
 creates no delivery/review pin. Audit/consult retain verified-release and exact
 envelope requirements.
 
-## Unimplemented reconciliation and readiness
+## Recovery candidate and readiness
 
-This candidate has no implemented or qualified protected Fable receipt
-reconciler. Builder-session reconcile does not settle an admitted Fable run.
-ERROR/UNKNOWN, ambiguous publication or lost archive remains fenced. Full
-automation is NOT_READY until the separate append-only terminal settlement and
-reconcile work is independently audited, installed and actually qualified. A
-happy-path fixture is insufficient and no current operation is represented as
-that future reconciler.
+The protected append-only journal and bounded operator terminal-failure
+reconciler are source candidates described in
+[PROGRAM_FABLE_RECOVERY](PROGRAM_FABLE_RECOVERY.md). Builder-session reconcile
+does not settle an admitted Fable run. Only verified failed termination with
+unstarted publication can settle its execution fence; original ERROR remains.
+Unproven UNKNOWN, ambiguous publication and lost archive stay fenced. Full
+automation is NOT_READY until the final recovery/runtime implementation is
+independently audited, installed and actually qualified. A local fixture is
+insufficient and no source check is represented as host qualification.
 
 ## Rollout on the host
 
@@ -191,12 +193,14 @@ that future reconciler.
    User merge. #44's old DECISION_REQUIRED is not transferred to a new HEAD.
 2. Keep active/UNKNOWN task and model requests fenced during rollout. Install
    the audited `control_plane_fable.py` as `/opt/aiops/bin/aiops-fable` and install
-   `control_plane_program_astra.py`, `control_plane_program.py`, `control_plane.py`
+   `control_plane_program_astra.py`, `control_plane_program_receipts.py`,
+   `control_plane_program_quota.py`, `control_plane_program.py`, `control_plane.py`
    from the same accepted commit into `/opt/aiops/lib/program/`, root-owned and
    not group/other writable. Protect every directory in the path chain.
 3. Copy the same commit's central config and project profiles to
    `/opt/aiops/lib/.github/control-plane/`, with a protected root-owned directory
-   chain. Install the seven fingerprinted policy documents from the same
+   chain. Install all fingerprinted policy documents (`POLICY_PATHS`, including
+   `docs/PROGRAM_FABLE_RECOVERY.md`) from the same
    accepted commit at their paths beneath `/opt/aiops/lib`. The support's
    `control_plane.ROOT` resolves to `/opt/aiops/lib`.
    Copy the actual accepted activation through its normal operator process;
@@ -254,3 +258,6 @@ dependencies are still not read by the runtime; existing pending-node plan
 revisions remain required. An unavailable service, missing hardware, human screen
 or artwork approval, live financial/chain permission or a new consequential
 design choice remains an explicit blocker, not a fake completed node.
+
+
+Recovery implementation status: [PROGRAM_FABLE_RECOVERY](PROGRAM_FABLE_RECOVERY.md) supersedes the earlier unimplemented-reconciler description for source capability only. Installation, independent A3 and actual host qualification remain PENDING; ambiguous UNKNOWN is still fenced.

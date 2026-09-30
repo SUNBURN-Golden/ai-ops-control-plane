@@ -86,7 +86,7 @@ def fable_program(operation: str, issue_number: int, **fields) -> Dict[str, Any]
         result = subprocess.run(FABLE_PROGRAM_COMMAND, input=json.dumps(payload), text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
                                 env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-                                timeout=14400 if operation in ("audit", "consult") else 120)
+                                timeout=28800 if operation == "quota-resume" else 14400 if operation in ("audit", "consult") else 120)
     except subprocess.TimeoutExpired:
         raise ProgramError("program Astra request timed out; reconcile it on the host; do not resubmit") from None
     except OSError:
@@ -106,6 +106,18 @@ def fable_program(operation: str, issue_number: int, **fields) -> Dict[str, Any]
 def astra_audit(issue_number: int, pr_number: int, head: str) -> Dict[str, Any]:
     cp.require_runtime_enabled()
     return fable_program("audit", issue_number, pr=pr_number, head=head)
+
+
+def quota_operation(operation: str, issue_number: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+    cp.require_runtime_enabled()
+    if set(fields) - {"pr_number", "head", "question_comment_id"}:
+        raise ProgramError("quota operations accept only the original delivery or question selector")
+    question = fields.get("question_comment_id")
+    if question is not None:
+        if "pr_number" in fields or "head" in fields:
+            raise ProgramError("quota target cannot mix delivery and consultation")
+        return fable_program(operation, issue_number, question=question)
+    return fable_program(operation, issue_number, pr=fields.get("pr_number"), head=fields.get("head"))
 
 
 def astra_consult(issue_number: int, question: int) -> Dict[str, Any]:
@@ -974,6 +986,29 @@ def latest_check_runs(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [run for _, run in newest.values()]
 
 
+def verification_reasons(api, cfg, head):
+    """One current-head CI predicate shared by merge and quota readmission."""
+    reasons = []
+    runs = latest_check_runs(all_check_runs(api, head)) if head else []
+    if any(r.get("status") != "completed" or r.get("conclusion") not in ("success", "neutral", "skipped")
+           for r in runs):
+        reasons.append("verification gate: a check run is incomplete or failing on the head")
+    required_checks = cfg.get("program_required_checks")
+    if not isinstance(required_checks, list) or not required_checks \
+            or not all(isinstance(name, str) and name.strip() for name in required_checks):
+        reasons.append("verification gate: the product's required checks are not declared (program_required_checks)")
+    else:
+        for name in required_checks:
+            named = [r for r in runs if r.get("name") == name]
+            if not named or not all(r.get("status") == "completed" and r.get("conclusion") == "success"
+                                    for r in named):
+                reasons.append(f"verification gate: required check {name!r} has not succeeded on the head")
+    combined = api._request("GET", f"/commits/{head}/status") if head else {}
+    if (combined or {}).get("statuses") and (combined or {}).get("state") != "success":
+        reasons.append(f"verification gate: commit statuses are {combined.get('state')}")
+    return reasons
+
+
 def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     """DISPATCH section 18, computed from host pins, the plan and live PR state. Anything not
     computable makes the PR not ready."""
@@ -1009,23 +1044,7 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     labels = {label.get("name") for label in issue.get("labels", [])}
     if labels & BLOCKING_LABELS:
         reasons.append(f"unresolved blocker labels: {sorted(labels & BLOCKING_LABELS)}")
-    runs = latest_check_runs(all_check_runs(api, head)) if head else []
-    if any(r.get("status") != "completed" or r.get("conclusion") not in ("success", "neutral", "skipped")
-           for r in runs):
-        reasons.append("verification gate: a check run is incomplete or failing on the head")
-    required_checks = cfg.get("program_required_checks")
-    if not isinstance(required_checks, list) or not required_checks \
-            or not all(isinstance(name, str) and name.strip() for name in required_checks):
-        reasons.append("verification gate: the product's required checks are not declared (program_required_checks)")
-    else:
-        for name in required_checks:
-            named = [r for r in runs if r.get("name") == name]
-            if not named or not all(r.get("status") == "completed" and r.get("conclusion") == "success"
-                                    for r in named):
-                reasons.append(f"verification gate: required check {name!r} has not succeeded on the head")
-    combined = api._request("GET", f"/commits/{head}/status") if head else {}
-    if (combined or {}).get("statuses") and (combined or {}).get("state") != "success":
-        reasons.append(f"verification gate: commit statuses are {combined.get('state')}")
+    reasons.extend(verification_reasons(api, cfg, head))
     if any(row.get("role") == "REVIEWER" and row.get("state") in ("SUBMITTING", "CONFIRMED", "UNKNOWN")
            for row in rows):
         reasons.append("a review session of this task is still active or unresolved")
@@ -1114,7 +1133,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("lanes")
-    for name in ("materialize", "start", "review", "finalize-review", "reap", "merge-check", "merge", "astra-audit", "astra-consult"):
+    for name in ("materialize", "start", "review", "finalize-review", "reap", "merge-check", "merge", "astra-audit", "astra-consult", "quota-readiness", "quota-resume"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--args-json", default="{}")
         cmd.add_argument("--issue-number", type=int)
@@ -1143,6 +1162,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             result = astra_audit(args.issue_number, int(extra.get("pr_number", 0)), extra.get("head", ""))
         elif args.command == "astra-consult":
             result = astra_consult(args.issue_number, int(extra.get("question_comment_id", 0)))
+        elif args.command in ("quota-readiness", "quota-resume"):
+            result = quota_operation(args.command, args.issue_number, extra)
         elif args.command == "merge":
             result = merge(args.issue_number, int(extra.get("pr_number", 0)))
         else:

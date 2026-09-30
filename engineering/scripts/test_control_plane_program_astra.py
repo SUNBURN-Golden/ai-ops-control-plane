@@ -154,6 +154,24 @@ class ContextTests(unittest.TestCase):
         with patch.object(prog, "fable_program", return_value=self.receipt(binding)):
             self.assertFalse(prog.merge_check(issue, 7)["ready"])
 
+    def test_quota_readmission_reuses_actual_current_ci_predicate(self):
+        issue, _, _ = self.reviewed_delivery()
+        context = bridge.request_context(self.r.gh, self.r.cfg, issue, 7, runtime.HEAD)
+        bridge.require_quota_context("audit", self.r.gh, self.r.cfg, context)
+        self.r.gh.checks[runtime.HEAD][0]["conclusion"] = "failure"
+        with self.assertRaisesRegex(bridge.BridgeError, "verification"):
+            bridge.require_quota_context("audit", self.r.gh, self.r.cfg, context)
+
+    def test_quota_retry_never_settles_contract_change_or_user_release(self):
+        issue, _, _ = self.reviewed_delivery(change="YES")
+        context = bridge.request_context(self.r.gh, self.r.cfg, issue, 7, runtime.HEAD)
+        with self.assertRaisesRegex(bridge.BridgeError, "contract-change"):
+            bridge.require_quota_context("audit", self.r.gh, self.r.cfg, context)
+        for change in ({"user_merge": True}, {"astra_gate": "RELEASE"}):
+            updated = list(context); updated[3] = {**context[3], **change}
+            with self.assertRaisesRegex(bridge.BridgeError, "User-only or RELEASE"):
+                bridge.require_quota_context("audit", self.r.gh, self.r.cfg, tuple(updated))
+
     def test_stored_user_required_blocks_builder_resume_even_without_labels(self):
         issue, _, _ = self.reviewed_delivery()
         self.r.gh.issues[issue]["labels"] = []
@@ -214,6 +232,7 @@ class ContextTests(unittest.TestCase):
 class TrustTests(unittest.TestCase):
     def test_actual_program_audit_reads_immutable_approved_tree_and_binds_result(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        fable_tests.mock_root_evidence(self, Path(tmp.name))
         approved = "d" * 40
         github = fable_tests.FakeGitHub()
         github.trees[approved] = fable_tests.archive({"AGENTS.md": "approved rules",

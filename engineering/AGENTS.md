@@ -374,9 +374,11 @@ No User choice outside the approved scope is delegated.
 The candidate's runner-root command is a narrow exception requiring its own
 User security-boundary adoption and protected authorization, not a general
 root/shell/Python grant. Admitted ERROR/UNKNOWN requests remain fenced. The
-protected receipt reconciler is not implemented or qualified in this candidate;
-end-to-end automation is NOT_READY until that separate work is audited and
-qualified. A new plan, HEAD, tool hash or deleted projection is not reconciliation.
+protected receipt journal and bounded operator terminal-failure reconciler are
+source candidates documented in `docs/PROGRAM_FABLE_RECOVERY.md`. Unproven
+UNKNOWN remains fenced; no generic operator override or PASS is created. They
+are not installed or qualified. End-to-end automation stays NOT_READY until the
+accepted recovery/runtime scope is independently audited and actually qualified. A new plan, HEAD, tool hash or deleted projection is not reconciliation.
 
 Grok never merges.
 A reviewer PASS or required Astra PASS is not a merge command.

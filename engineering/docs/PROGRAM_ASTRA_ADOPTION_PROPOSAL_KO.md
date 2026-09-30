@@ -31,6 +31,9 @@ record는 operator가 실제 exact-HEAD 독립 A3·사용자 결정·host qualif
 - M4의 단일 PAT를 가진 workflow 호출자가 후보 고정 root 프로세스를 시작할 수 있다. stdin 검증·root record·host binding으로 범위를 좁히지만 PAT 자체의 직접 GitHub 권한을 회수하지는 않는다.
 - root bridge가 untrusted GitHub 자료를 읽고 모델을 호출한다. 기존 안전한 archive 추출, read-only 모델·비밀 필터·서로 다른 리뷰·scope receipt가 필요하며 prompt injection 가능성을 0으로 만들었다고 하지 않는다.
 - runner timeout/cancel이 root audit의 종료를 증명하지 않는다. 요청은 계속 실행 중이거나 UNKNOWN이며 receipts/global model lock을 유지한다. 원본 audit를 3시간 전에 취소·재제출하지 않는다. runner 수와 task concurrency 대기는 운영 qualification에서 확인한다.
-- 현재 ERROR/UNKNOWN에 대한 보호된 operator-only append-only reconcile/settlement는 아직 구현되지 않았다. 새 계획/HEAD/영수증 삭제를 reconciliation으로 사용하지 않는다. 실패는 계속 차단하고 수동 보고한다. 자동 복구를 포함한 운영 qualification은 [후속 설계](PROGRAM_EXECUTION_EVOLUTION_DESIGN_KO.md)의 reconcile 구현·독립 검증 전에는 완료로 표시할 수 없다.
+- `PROGRAM_FABLE_RECOVERY.md`의 보호된 journal 및 bounded operator terminal-failure settlement는 소스 후보로 구현했다. 실제 설치·qualification은 아직 없으며, 증거 없는 UNKNOWN에 대한 임의 override는 제공하지 않는다. 새 계획/HEAD/영수증 삭제를 reconciliation으로 사용하지 않는다. 실패는 계속 차단하고 수동 보고한다. 자동 복구를 포함한 운영 qualification은 [후속 설계](PROGRAM_EXECUTION_EVOLUTION_DESIGN_KO.md)의 reconcile 구현·독립 검증 전에는 완료로 표시할 수 없다.
 
 코드의 fail-closed 수정과 문서 후보 작성은 진행할 수 있다. 이 결정 후보의 채택, bootstrap 병합, 실호스트 설치·qualification·activation은 각각 실제 권한과 evidence를 갖춰야 한다. Codex self-check나 병렬 검토는 Fable gate나 대표님의 결정을 대신하지 않는다.
+
+
+Recovery source candidate update: `docs/PROGRAM_FABLE_RECOVERY.md` specifies the implemented protected admission journal and bounded terminal-failure reconciliation. Earlier statements that reconciliation is unimplemented describe the #46 checkpoint; it remains uninstalled/unqualified and grants no operator override for unproven UNKNOWN. Full host activation is still NOT_READY.

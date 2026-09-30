@@ -21,6 +21,45 @@ CLAUDE_TOKEN = "claude-oauth-value-for-tests"
 SESSION = "0f8fad5b-d9cb-469f-a165-70867728950e"
 
 
+def mock_root_evidence(test, directory):
+    """Simulate only owner UID for this test's private evidence directory.
+
+    CI is unprivileged. File types, modes, hard links, sizes and content remain
+    real, and production checks are unchanged. Fixtures never invoke a model.
+    """
+    directory = os.path.abspath(directory)
+    real_lstat, real_fstat = os.lstat, os.fstat
+
+    def belongs(path):
+        try:
+            value = os.path.abspath(os.fsdecode(path))
+        except (TypeError, ValueError):
+            return False
+        return value == directory or value.startswith(directory + os.sep)
+
+    def root_owner(info):
+        values = list(info)
+        values[4] = 0
+        return os.stat_result(values)
+
+    def lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        return root_owner(info) if belongs(path) else info
+
+    def fstat(fd):
+        info = real_fstat(fd)
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            return info
+        return root_owner(info) if belongs(target) else info
+
+    for name, value in (("lstat", lstat), ("fstat", fstat)):
+        mocked = patch.object(fable.os, name, value)
+        mocked.start()
+        test.addCleanup(mocked.stop)
+
+
 def archive(files, *, top="BeautifulMind-JT-ai-ops-control-plane-0123456", links=(), extra=()):
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
@@ -122,6 +161,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.runs = Path(self.tmp.name)
+        mock_root_evidence(self, self.runs)
 
     def tearDown(self):
         self.tmp.cleanup()
