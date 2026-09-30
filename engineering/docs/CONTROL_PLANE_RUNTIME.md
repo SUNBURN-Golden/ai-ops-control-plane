@@ -287,8 +287,16 @@ sudo env GH_TOKEN="$(gh auth token)" /opt/aiops/bin/aiops-fable consult \
 - **읽기 전용 모델:** 감사 계정 UID로 `claude -p`를 실행한다. `--restricted --safe-mode --tools Read,Grep,Glob
   --permission-mode dontAsk --strict-mcp-config`이므로 작업 폴더 밖을 읽지 못하고, 명령 실행·쓰기·웹 도구·
   훅·MCP·CLAUDE.md·저장소 설정이 없다. 환경 변수는 HOME, PATH, LANG, Claude 토큰, 자동 업데이트·비필수 통신 끄기뿐이다.
-  `--fallback-model`은 쓰지 않는다. Fable을 쓸 수 없으면 실패하고 기다린다.
-- **결과 검사:** CLI 결과가 성공이고 `modelUsage`에 `claude-fable-5-1`이 있어야 한다. 구조화된 판정은
+  `--fallback-model`은 쓰지 않고, 거절 시 자동 모델 전환도 끈다(`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`).
+  Fable을 쓸 수 없거나 거절하면 실패하고 기다린다.
+- **추가 과금 차단:** CLI 출력(stream-json)의 `rate_limit_event`가 `overageStatus: "rejected"`, `isUsingOverage: false`여야 한다.
+  초과 사용(extra usage)이 막혀 있다는 뜻이다. 다른 값이 한 번이라도 나오면 그 즉시 실행을 끊고 아무것도 올리지 않는다
+  (`OVERAGE_NOT_BLOCKED`). 이 신호가 없으면 확인할 수 없으므로 역시 올리지 않는다(`OVERAGE_UNVERIFIED`).
+  첫 요청 뒤에야 신호가 오므로, 초과 사용이 켜진 계정이라도 한 실행에서 새는 양은 첫 요청 하나로 제한된다.
+  확실히 0원으로 하려면 claude.ai 설정 > 사용량(Usage)에서 추가 사용량(usage credits)과 자동 충전을 끈다.
+  `ANTHROPIC_API_KEY`는 모델 환경에 넘기지 않으므로 API 종량 과금 경로도 없다.
+- **결과 검사:** CLI 결과가 성공이고 `modelUsage`에 `claude-fable-5-1` **하나만** 있어야 한다.
+  거절 후 다른 모델로 바뀐 기록(`model_refusal_fallback`)이 있으면 올리지 않는다(`MODEL_FALLBACK`). 구조화된 판정은
   일관돼야 한다(PASS는 finding 없음, PASS_WITH_NOTES는 NOTE만, FAIL은 BLOCKING 하나 이상,
   DECISION_REQUIRED는 질문 필수). 어긋나면 아무것도 올리지 않는다.
 - **자격 증명 차단:** 올릴 글에 두 토큰 값이나 토큰 모양의 문자열이 있으면 올리지 않는다. `@` 멘션은 무력화한다.
@@ -302,7 +310,7 @@ sudo env GH_TOKEN="$(gh auth token)" /opt/aiops/bin/aiops-fable consult \
   `ASTRA_CONSULT_V1 result=<ANSWERED|USER_REQUIRED> by=ASTRA_FABLE question=<id> ref=<sha> session=<id>`이다.
 - 도구는 이 첫 두 줄만 읽어 이전 결과를 찾는다. gate는 이 글을 읽지 않는다(M4).
 
-증거: 실행 폴더에 packet, 원본 CLI 출력(`claude-output.json`), 올린 글, `run.json`이 남는다.
+증거: 실행 폴더에 packet, 원본 CLI 출력(`claude-output.jsonl`), 올린 글, `run.json`이 남는다.
 댓글에는 host run id, 모델 세션, 도구 sha256, 원본 출력 sha256이 있다.
 
 실패하면 `{"status": "ERROR", "reason": ...}`를 출력하고 아무것도 올리지 않는다. 운영자는 원문을 보고하고 멈춘다.

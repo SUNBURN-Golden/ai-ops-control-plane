@@ -6,7 +6,9 @@ It copies the exact sources into a per-run directory, runs Claude Fable as the
 auditor UID in restricted read-only mode (Read, Grep and Glob inside that
 directory; no commands, no network tools, no project settings, hooks, MCP or
 CLAUDE.md), checks the structured result and posts one comment. The model never
-holds a GitHub credential and cannot read the Claude token file.
+holds a GitHub credential and cannot read the Claude token file. A run stops as
+soon as Claude reports that extra (overage) usage is not blocked, so it never
+bills beyond the subscription.
 """
 from __future__ import annotations
 
@@ -25,6 +27,8 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -46,6 +50,7 @@ MAX_TREE = 1 << 30
 MAX_MEMBERS = 200_000
 MAX_DIFF = 64 << 20
 MAX_RESPONSE = 8 << 20
+MAX_OUTPUT = 256 << 20
 MAX_FIELD = 20_000
 MAX_FINDINGS = 100
 COMMENT_LIMIT = 60_000
@@ -185,7 +190,8 @@ class FableError(RuntimeError):
 def claude_argv(claude, system, schema):
     # The prompt goes on stdin. No --fallback-model: a model is never substituted.
     return [claude, "-p", "--model", MODEL, "--effort", EFFORT, "--max-turns", str(MAX_TURNS),
-            "--output-format", "json", "--json-schema", json.dumps(schema, separators=(",", ":")),
+            "--output-format", "stream-json", "--verbose",
+            "--json-schema", json.dumps(schema, separators=(",", ":")),
             "--append-system-prompt", system,
             "--restricted", "--safe-mode", "--disable-slash-commands", "--tools", "Read,Grep,Glob",
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
@@ -193,9 +199,10 @@ def claude_argv(claude, system, schema):
 
 
 def child_env(home, claude_token=None):
+    # CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK: a Fable refusal must fail the run, never hand it to another model.
     env = {"HOME": home, "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",
            "DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-           "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
+           "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1", "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
     if claude_token is not None:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = claude_token
     return env
@@ -270,21 +277,54 @@ def consult_verdict(value):
             "pointers": text_list(value["pointers"], "pointers")}
 
 
-def model_output(raw):
-    """Parse the CLI's JSON result and prove it came from a successful Fable run."""
+def overage_violation(info):
+    """None only when Claude reports that this run cannot use extra (overage) usage."""
+    if not isinstance(info, dict):
+        return "no rate-limit status"
+    if info.get("isUsingOverage") is not False:
+        return f"isUsingOverage={info.get('isUsingOverage')!r}"
+    if info.get("overageStatus") != "rejected":
+        return f"overageStatus={info.get('overageStatus')!r}"
+    return None
+
+
+def events_of(raw):
     try:
-        data = json.loads(raw)
+        events = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
     except (ValueError, UnicodeDecodeError):
-        raise FableError("model output is not JSON") from None
-    if not isinstance(data, dict) or data.get("type") != "result":
-        raise FableError("model output is not a result")
+        raise FableError("model output is not JSON lines") from None
+    if not all(isinstance(event, dict) for event in events):
+        raise FableError("model output is not JSON lines")
+    return events
+
+
+def model_output(raw):
+    """Parse the CLI's stream, prove extra usage stayed blocked and the run was a successful Fable run."""
+    events = events_of(raw)
+    limits = [event.get("rate_limit_info") for event in events if event.get("type") == "rate_limit_event"]
+    if not limits:
+        raise FableError("OVERAGE_UNVERIFIED: the run reported no rate-limit status; nothing is posted")
+    for info in limits:
+        reason = overage_violation(info)
+        if reason:
+            raise FableError(f"OVERAGE_NOT_BLOCKED: {reason}; turn off extra usage for this Claude account")
+    fallback = [event for event in events if event.get("type") == "system"
+                and event.get("subtype") == "model_refusal_fallback"]
+    if fallback:
+        raise FableError(f"MODEL_FALLBACK: {MODEL} refused ({fallback[0].get('api_refusal_category')}) and the "
+                         f"session switched to {fallback[0].get('fallback_model')}; nothing is posted")
+    results = [event for event in events if event.get("type") == "result"]
+    if not results:
+        raise FableError("model output has no result")
+    data = dict(results[-1])
+    data["overage"] = {key: limits[-1].get(key) for key in ("overageStatus", "overageDisabledReason")}
     if data.get("subtype") != "success" or data.get("is_error") is not False:
         raise FableError(f"model run did not succeed: {data.get('subtype')}")
     usage = data.get("modelUsage")
-    if not isinstance(usage, dict) or not any(
+    if not isinstance(usage, dict) or not usage or not all(
             key == MODEL or (isinstance(entry, dict) and entry.get("canonicalModel") == MODEL)
             for key, entry in usage.items()):
-        raise FableError(f"model run did not use {MODEL}")
+        raise FableError(f"model run did not use {MODEL} alone: {sorted(usage or {})}")
     if not isinstance(data.get("structured_output"), dict):
         raise FableError("model returned no structured result")
     session = data.get("session_id")
@@ -407,6 +447,24 @@ def belongs(comment, repository, number):
     return str(comment.get("issue_url", "")).lower().endswith(f"/repos/{repository}/issues/{number}".lower())
 
 
+def read_stream(stream):
+    """Collect the CLI's JSON lines; stop at the first sign that extra usage is not blocked."""
+    lines, size = [], 0
+    for line in iter(stream.readline, b""):
+        lines.append(line)
+        size += len(line)
+        if size > MAX_OUTPUT:
+            return b"".join(lines), True
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(event, dict) and event.get("type") == "rate_limit_event"
+                and overage_violation(event.get("rate_limit_info"))):
+            return b"".join(lines), True
+    return b"".join(lines), False
+
+
 class Runner:
     """Runs the model as the auditor UID in its own process group."""
 
@@ -422,17 +480,36 @@ class Runner:
         return completed.stdout.strip()[:200]
 
     def __call__(self, work, system, schema, prompt):
-        proc = subprocess.Popen(claude_argv(self.claude, system, schema), cwd=work,
-                                env=child_env(self.home, self.claude_token), stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, user=self.uid,
-                                group=self.gid, extra_groups=[], umask=0o077, start_new_session=True)
-        try:
-            out, err = proc.communicate(prompt.encode(), timeout=TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()
-            raise FableError("model run timed out") from None
-        return proc.returncode, out, err
+        timed_out = []
+
+        def kill(proc, reason=None):
+            if reason:
+                timed_out.append(reason)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        with tempfile.TemporaryFile() as err:
+            proc = subprocess.Popen(claude_argv(self.claude, system, schema), cwd=work,
+                                    env=child_env(self.home, self.claude_token), stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=err, user=self.uid, group=self.gid,
+                                    extra_groups=[], umask=0o077, start_new_session=True)
+            timer = threading.Timer(TIMEOUT_SECONDS, kill, (proc, "timeout"))
+            timer.start()
+            try:
+                proc.stdin.write(prompt.encode())
+                proc.stdin.close()
+                out, stop = read_stream(proc.stdout)
+                if stop:
+                    kill(proc)
+                proc.wait()
+            finally:
+                timer.cancel()
+            if timed_out:
+                raise FableError("model run timed out")
+            err.seek(0)
+            return proc.returncode, out, err.read()[-65536:]
 
 
 class Context:
@@ -451,11 +528,11 @@ class Context:
 
     def run_model(self, run, system, schema, prompt, validate):
         code, out, err = self.runner(run / "work", system, schema, prompt)
-        (run / "claude-output.json").write_bytes(out)
+        (run / "claude-output.jsonl").write_bytes(out)
         (run / "claude-stderr.txt").write_bytes(err[-65536:])
+        data = model_output(out)
         if code:
             raise FableError(f"model run exited {code}")
-        data = model_output(out)
         return data, validate(data["structured_output"]), sha256_bytes(out)
 
     def finish(self, run, record, repository, number, body):
@@ -472,6 +549,8 @@ def run_trailer(ctx, data, output_sha, run_id, claude_version):
     return (f"<details><summary>실행 기록</summary>\n\n"
             f"- host run: `{run_id}`\n- model session: `{data['session_id']}`\n- models: `{models}`\n"
             f"- turns: {data.get('num_turns')}\n- claude: `{claude_version}`\n"
+            f"- extra usage: blocked (`{data['overage'].get('overageStatus')}`, "
+            f"`{data['overage'].get('overageDisabledReason')}`)\n"
             f"- aiops-fable sha256: `{ctx.tool_sha256}`\n- raw output sha256: `{output_sha}`\n"
             f"</details>\n")
 
@@ -636,21 +715,25 @@ def consult(ctx, repository, number, comment_id, ref=None, again=False, claude_v
 
 
 def preflight(ctx, claude_version=""):
-    """Prove login, the model and confinement: read an inside nonce; an outside read must be denied."""
-    nonce = secrets.token_hex(16)
+    """Prove login, the model and confinement: an inside note is read; the note beside the folder is not."""
+    nonce, outside = secrets.token_hex(16), secrets.token_hex(16)
     run_id, run = ctx.new_run("preflight", "x/self", 0)
     write(run / "work" / "note.txt", nonce + "\n")
-    prompt = ("Call the Read tool on note.txt and put its content, trimmed, in nonce. Then call the Read tool "
-              "exactly once on /etc/hostname and set outside_read_ok to true only if it returned file content.")
+    write(run / "outside.txt", outside + "\n")  # readable by the auditor UID; only the tool confinement stops it
+    prompt = ("This is a sandbox self-test. Call the Read tool on note.txt and put its content, trimmed, in nonce. "
+              "Then call the Read tool exactly once on ../outside.txt and set outside_read_ok to true only if it "
+              "returned file content.")
     data, verdict, _ = ctx.run_model(run, PREFLIGHT_SYSTEM, PREFLIGHT_SCHEMA, prompt, lambda value: value)
     denied = [d for d in data.get("permission_denials") or []
-              if isinstance(d, dict) and (d.get("tool_input") or {}).get("file_path") == "/etc/hostname"]
+              if isinstance(d, dict) and str((d.get("tool_input") or {}).get("file_path", "")).endswith("outside.txt")]
     if verdict.get("nonce") != nonce:
         raise FableError("preflight: the model did not read the inside file")
-    if verdict.get("outside_read_ok") is not False or not denied:
+    if (verdict.get("outside_read_ok") is not False or not denied
+            or outside.encode() in (run / "claude-output.jsonl").read_bytes()):
         raise FableError("preflight: an outside read was not proven denied")
     return {"status": "PASS", "run": run_id, "model": MODEL, "session": data["session_id"],
-            "models": sorted(data["modelUsage"]), "claude": claude_version, "tool_sha256": ctx.tool_sha256}
+            "models": sorted(data["modelUsage"]), "extra_usage": data["overage"], "claude": claude_version,
+            "tool_sha256": ctx.tool_sha256}
 
 
 def root_file(path, *, secret=False):

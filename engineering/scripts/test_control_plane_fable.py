@@ -42,12 +42,19 @@ def archive(files, *, top="BeautifulMind-JT-ai-ops-control-plane-0123456", links
     return buffer.getvalue()
 
 
-def cli_output(structured, *, models=None, subtype="success", is_error=False, denials=()):
-    return json.dumps({
+BLOCKED = {"status": "allowed", "overageStatus": "rejected", "overageDisabledReason": "org_level_disabled",
+           "isUsingOverage": False}
+
+
+def cli_output(structured, *, models=None, subtype="success", is_error=False, denials=(), limits=(BLOCKED,)):
+    events = [{"type": "system", "subtype": "init", "session_id": SESSION}]
+    events += [{"type": "rate_limit_event", "rate_limit_info": info} for info in limits]
+    events.append({
         "type": "result", "subtype": subtype, "is_error": is_error, "session_id": SESSION, "num_turns": 7,
         "modelUsage": models if models is not None else {fable.MODEL: {"canonicalModel": fable.MODEL}},
         "structured_output": structured, "permission_denials": list(denials), "result": "",
-    }).encode()
+    })
+    return "".join(json.dumps(event) + "\n" for event in events).encode()
 
 
 def verdict(result="PASS", findings=(), question=""):
@@ -137,6 +144,8 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
         self.assertEqual(argv[argv.index("--mcp-config") + 1], '{"mcpServers":{}}')
         self.assertEqual(argv[argv.index("--model") + 1], "claude-fable-5-1")
+        self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+        self.assertIn("--verbose", argv)
         self.assertEqual(json.loads(argv[argv.index("--json-schema") + 1]), fable.AUDIT_SCHEMA)
         for forbidden in ("--fallback-model", "--dangerously-skip-permissions", "bypassPermissions",
                           "--add-dir", "--allowedTools", "Bash", "WebFetch"):
@@ -146,7 +155,9 @@ class CommandTests(unittest.TestCase):
     def test_model_environment_holds_no_github_token(self):
         env = fable.child_env("/var/lib/aiops-auditor", CLAUDE_TOKEN)
         self.assertEqual(set(env), {"HOME", "PATH", "LANG", "CLAUDE_CODE_OAUTH_TOKEN", "DISABLE_AUTOUPDATER",
-                                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DBUS_SESSION_BUS_ADDRESS"})
+                                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DBUS_SESSION_BUS_ADDRESS",
+                                    "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"})
+        self.assertEqual(env["CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"], "1")
         self.assertNotIn(GH_TOKEN, json.dumps(env))
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", fable.child_env("/home"))
 
@@ -183,15 +194,37 @@ class OutputTests(unittest.TestCase):
         good = fable.model_output(cli_output(verdict()))
         self.assertEqual(good["session_id"], SESSION)
         fable.model_output(cli_output(verdict(), models={"x": {"canonicalModel": fable.MODEL}}))
+        fallback = json.dumps({"type": "system", "subtype": "model_refusal_fallback", "original_model": fable.MODEL,
+                               "fallback_model": "claude-opus-4-8", "api_refusal_category": "cyber"}).encode()
         for raw, reason in (
                 (cli_output(verdict(), models={"claude-haiku-4-5": {"canonicalModel": "claude-haiku-4-5"}}),
                  "did not use"),
+                (cli_output(verdict(), models={fable.MODEL: {}, "claude-opus-4-8": {}}), "alone"),
+                (cli_output(verdict(), models={}), "alone"),
+                (fallback + b"\n" + cli_output(verdict()), "MODEL_FALLBACK"),
                 (cli_output(verdict(), subtype="error_max_turns"), "did not succeed"),
                 (cli_output(verdict(), is_error=True), "did not succeed"),
                 (cli_output(None), "no structured result"),
-                (b"not json", "not JSON")):
+                (b"not json", "not JSON"),
+                (cli_output(verdict(), limits=()), "OVERAGE_UNVERIFIED"),
+                (cli_output(verdict(), limits=({**BLOCKED, "overageStatus": "allowed"},)), "OVERAGE_NOT_BLOCKED"),
+                (cli_output(verdict(), limits=(BLOCKED, {**BLOCKED, "isUsingOverage": True})), "OVERAGE_NOT_BLOCKED"),
+                (cli_output(verdict(), limits=({k: v for k, v in BLOCKED.items() if k != "isUsingOverage"},)),
+                 "OVERAGE_NOT_BLOCKED"),
+                (b"\n".join(cli_output(verdict()).split(b"\n")[:2]) + b"\n", "no result")):
             with self.subTest(reason=reason), self.assertRaisesRegex(fable.FableError, reason):
                 fable.model_output(raw)
+
+    def test_the_stream_stops_at_the_first_sign_of_extra_usage(self):
+        allowed = {"type": "rate_limit_event", "rate_limit_info": {**BLOCKED, "overageStatus": "allowed"}}
+        lines = [json.dumps({"type": "system"}), json.dumps(allowed), json.dumps({"type": "assistant", "n": 1})]
+        out, stop = fable.read_stream(io.BytesIO("\n".join(lines).encode() + b"\n"))
+        self.assertTrue(stop)
+        self.assertNotIn(b'"assistant"', out)
+        out, stop = fable.read_stream(io.BytesIO(cli_output(verdict())))
+        self.assertFalse(stop)
+        self.assertEqual(fable.model_output(out)["overage"],
+                         {"overageStatus": "rejected", "overageDisabledReason": "org_level_disabled"})
 
     def test_verdict_must_be_consistent(self):
         self.assertEqual(fable.audit_verdict(verdict())["result"], "PASS")
@@ -247,13 +280,14 @@ class AuditTests(Base):
         for field in ("AUDIT_RESULT: PASS_WITH_NOTES", f"AUDITED_HEAD_OR_EVIDENCE_SHA: {HEAD}",
                       "AUDITOR_DESIGNATION_POINTER: N/A (configured Astra, User decision M5)",
                       f"AUDITOR_IDENTITY_OR_SESSION: ASTRA_FABLE claude-fable-5-1 session={SESSION}",
-                      "VERIFIED_CONTRACT_CHANGE_REQUIRED: NO", "F1 [NOTE]", "@​octocat", "f" * 64):
+                      "VERIFIED_CONTRACT_CHANGE_REQUIRED: NO", "F1 [NOTE]", "@​octocat", "f" * 64,
+                      "extra usage: blocked (`rejected`, `org_level_disabled`)"):
             self.assertIn(field, body)
         run = self.run_dir()
         self.assertFalse((run / "work" / "head").exists())
         self.assertFalse((run / "work" / "base").exists())
         self.assertEqual(json.loads((run / "run.json").read_text())["comment_url"], "https://github.com/posted")
-        self.assertEqual(fable.sha256_bytes((run / "claude-output.json").read_bytes()), record["output_sha256"])
+        self.assertEqual(fable.sha256_bytes((run / "claude-output.jsonl").read_bytes()), record["output_sha256"])
 
     def test_moved_or_closed_pull_request_stops_before_the_model(self):
         for github, reason in ((FakeGitHub(head="d" * 40), "HEAD_MOVED"), (FakeGitHub(state="closed"), "not open")):
@@ -310,6 +344,13 @@ class AuditTests(Base):
                 fable.audit(self.context(github, runner), REPO, 5, HEAD, "ARCHITECTURE", "A3")
             self.assertEqual(github.posts, [])
 
+    def test_extra_usage_that_is_not_blocked_posts_nothing(self):
+        github = FakeGitHub()
+        runner = FakeRunner(output=cli_output(verdict(), limits=({**BLOCKED, "overageStatus": "allowed"},)))
+        with self.assertRaisesRegex(fable.FableError, "OVERAGE_NOT_BLOCKED"):
+            fable.audit(self.context(github, runner), REPO, 5, HEAD, "ARCHITECTURE", "A3")
+        self.assertEqual(github.posts, [])
+
     def test_long_findings_are_cut_to_fit_one_comment(self):
         many = [finding("BLOCKING", detail="x" * 5000) for _ in range(40)]
         github = FakeGitHub()
@@ -362,24 +403,28 @@ class ConsultTests(Base):
 
 
 class PreflightTests(Base):
-    def reply(self, *, nonce=None, outside=False, denied=True):
+    def reply(self, *, nonce=None, outside=False, denied=True, leak=False):
         def inspect(work):
             self.nonce = (work / "note.txt").read_text().strip()
-        denials = [{"tool_name": "Read", "tool_input": {"file_path": "/etc/hostname"}}] if denied else []
+            self.outside = (work.parent / "outside.txt").read_text().strip()
+        denials = [{"tool_name": "Read", "tool_input": {"file_path": "/runs/x/outside.txt"}}] if denied else []
 
         class Runner(FakeRunner):
             def __call__(inner, work, system, schema, prompt):
                 inspect(work)
                 inner.output = cli_output({"nonce": nonce or self.nonce, "outside_read_ok": outside},
                                           denials=denials)
+                if leak:
+                    inner.output += json.dumps({"type": "user", "text": self.outside}).encode() + b"\n"
                 return super().__call__(work, system, schema, prompt)
         return Runner()
 
     def test_preflight_proves_an_inside_read_and_a_denied_outside_read(self):
         result = fable.preflight(self.context(FakeGitHub(), self.reply()), "2.1.285 (Claude Code)")
         self.assertEqual((result["status"], result["model"]), ("PASS", "claude-fable-5-1"))
+        self.assertEqual(result["extra_usage"]["overageStatus"], "rejected")
         for kwargs, reason in (({"denied": False}, "outside read"), ({"outside": True}, "outside read"),
-                               ({"nonce": "0" * 32}, "inside file")):
+                               ({"leak": True}, "outside read"), ({"nonce": "0" * 32}, "inside file")):
             with self.subTest(kwargs=kwargs), self.assertRaisesRegex(fable.FableError, reason):
                 fable.preflight(self.context(FakeGitHub(), self.reply(**kwargs)))
 
