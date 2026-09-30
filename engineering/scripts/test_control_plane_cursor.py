@@ -82,17 +82,26 @@ class CursorRegistrationTests(unittest.TestCase):
              self.assertRaisesRegex(FileNotFoundError, "not installed"):
             host.load_host_policy("preflight")
 
-    def test_registered_cursor_is_not_automatically_enabled_for_a_product(self):
+    def test_cursor_is_enabled_only_for_program_mode_products(self):
+        """User decision M6 (2026-09-30): the four program products run CURSOR; maeum-gyeol stays deferred."""
         profiles = cp.load_json(cp.CONFIG_PATH.with_name("projects.json"))
+        enabled = []
         for repo in profiles:
             with self.subTest(repo=repo), patch.dict(os.environ, {"ASTRA_TARGET_REPOSITORY": repo}):
                 cfg = cp.load_config()
                 self.assertIn("CURSOR", cfg["allowed_builders"])
-                self.assertNotIn("CURSOR", cfg["enabled_builders"])
+                if "CURSOR" in cfg["enabled_builders"]:
+                    self.assertEqual(cfg["program_merge_policy"], "STANDARD")
+                    self.assertEqual(cfg["enabled_builders"][-1], "CURSOR")
+                    enabled.append(repo)
+                    continue
                 with patch.object(cp, "host_call") as invoke, \
                      self.assertRaisesRegex(cp.ControlPlaneError, "builder is not enabled"):
                     cp.host_preflight("CURSOR")
                 invoke.assert_not_called()
+        self.assertEqual(sorted(enabled), sorted(repo for repo, profile in profiles.items()
+                                                 if profile.get("program_merge_policy") == "STANDARD"))
+        self.assertNotIn("BeautifulMind-JT/maeum-gyeol", enabled)
 
 
 class CursorQualificationTests(unittest.TestCase):

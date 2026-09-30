@@ -45,6 +45,8 @@ v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. v2는 v1(`52
   3. 계산할 수 없는 조건이 있으면 준비 안 됨으로 본다. 예를 들어 제품 문서에 기계로 읽을 수 없는 병합 규칙이 있는 경우다. 이때는 User에게 넘긴다.
   4. 현장 소장이 판정 결과를 텍스트로 주장해서는 병합할 수 없다(§18: "computed, never accepted as arbitrary text").
 
+**결정 M6 (User, 2026-09-30): CURSOR를 지금 켠다.** 네 제품(kix-protocol, ZARI, film, kix-commerce-apps)의 `enabled_builders`에 CURSOR를 더한다. `BUILDER_LANES.md`의 CURSOR 인수 4~7단계(격리 증명, 레인 자격 판정, adapter 독립 검토, 진단 canary)는 하지 않고, 그 위험을 User가 감수한다. 첫 CURSOR 작업이 canary가 된다. 마음결은 그대로 DEVIN만 쓴다.
+
 **결정 M5 (User, 2026-09-30): 설계 권한과 감사(Astra)를 Claude Fable로 바꾸고, 그록봇이 실행한다.**
 - Astra 역할은 그대로 두고, 맡는 모델만 ChatGPT에서 Claude Fable(`claude-fable-5-1`)로 바꾼다.
 - 그록봇 컴퓨터의 고정 도구 `aiops-fable`로만 실행한다(`CONTROL_PLANE_RUNTIME.md` "Astra on the host").
@@ -569,6 +571,7 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
   - **User가 감수한다 (M4 결정, 2026-09-29: 레인별 계정을 두지 않는다).** 레인이 계산된 gate를 거치지 않고 직접 병합하거나 push하는 것은 control plane이 막지 못한다. 계산된 gate는 control plane 자신의 병합(`operation=merge`)과 준비 판정에만 적용된다.
   - 같은 이유로 필수 체크 확인은 CI가 만든 check run을 전제한다. 레인 토큰으로 가짜 `success` check run을 만들 수 있으면, 이 확인은 증거가 되지 못한다. 이 위험도 같은 결정으로 감수한다.
 - **prestart 재시도:** `FAILED_PRESTART`(예: 45초 안에 끝나지 않는 CURSOR clone)는 다음 실행에서 다시 시도된다. 이 재시도에는 별도 상한이 없고, host `max_launches_per_24h`만 막는다. program mode에서는 이 값을 정해 둔다(P3).
+- **CURSOR (M6):** 인수 4~7단계 없이 켰다. 격리와 자격이 실제 작업에서 처음 확인된다. 첫 CURSOR 작업을 운영자가 끝까지 지켜보고, 이상하면 host `enabled_builders`에서 CURSOR를 빼서 멈춘다.
 - **CURSOR:** M3 결정에 따라 systemd 없는 adapter(`adapters/cursor/`)로 바꿨다. 이 adapter는 v2 packet을 stdin으로 받고, 서명 도구를 쓰며, 모든 프로세스가 helper의 launch 아래에 있다. 그래서 program mode 순서의 마지막 레인으로 선택된다. 호스트 설치와 자격 검증(P3) 전에는 host `enabled_builders`와 preflight가 막는다.
 - **세션 키는 그 세션의 모델이 읽을 수 있다:** 서명 도구 파일은 그 레인 UID 소유(0600)다. 그래서 리뷰 대상 PR 안의 prompt injection이 리뷰어 모델에게 키를 출력하게 만들 수 있다. 키가 새면 그 세션의 판정을 위조할 수 있다.
   - 막는 방법은 키를 레인이 읽을 수 없는 별도 UID의 서명 helper에 두는 것이다. M4 결정(단순하게)에 따라 이것은 하지 않고, 위험을 감수한다. 키는 세션마다 새로 만들므로, 샌 키는 그 한 세션의 판정에만 쓸 수 있다.

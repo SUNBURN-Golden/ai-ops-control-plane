@@ -30,7 +30,8 @@
     "enabled_builders": [
       "DEVIN",
       "GROK_BUILD",
-      "GLM"
+      "GLM",
+      "CURSOR"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
     "deployment_enabled": true,
@@ -71,7 +72,8 @@
     "enabled_builders": [
       "DEVIN",
       "GROK_BUILD",
-      "GLM"
+      "GLM",
+      "CURSOR"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
     "deployment_enabled": true,
@@ -111,7 +113,8 @@
     "enabled_builders": [
       "DEVIN",
       "GROK_BUILD",
-      "GLM"
+      "GLM",
+      "CURSOR"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
     "deployment_enabled": true,
@@ -186,7 +189,8 @@
     "enabled_builders": [
       "DEVIN",
       "GROK_BUILD",
-      "GLM"
+      "GLM",
+      "CURSOR"
     ],
     "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
     "deployment_enabled": true,
