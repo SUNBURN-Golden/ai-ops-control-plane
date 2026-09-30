@@ -113,6 +113,7 @@ flowchart TD
   - 세션 종료가 확인되면 **병합과 상관없이** 반환한다(§6).
 - **빌더 세션은 스스로 끝난다**
   - 빌더는 PR과 `ASTRA_DELIVERY_V1` 댓글(PR URL, HEAD SHA)을 남기면 세션을 끝낸다.
+  - 전달 PR은 draft가 아닌 리뷰 준비 상태로 연다. 그래야 필수 CI가 그 HEAD에서 돈다. draft PR은 merge-check을 통과하지 못한다.
   - 막히면 `DECISION_REQUIRED`, `BLOCKED` 또는 `STALLED`를 남기고 끝낸다.
   - 세션을 끝낼 수 없거나, 끝났는지 확인할 수 없는 제공자는 program mode 레인 자격을 얻지 못한다(P3).
 - **재개**
