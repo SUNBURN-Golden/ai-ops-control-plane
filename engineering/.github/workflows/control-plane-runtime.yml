@@ -1,15 +1,4 @@
-name: Central Control Plane Runtime
-
-# Production central dispatch/admission entry point.
-# Source of truth for this workflow's logic is the audited copy at
-# engineering/.github/workflows/control-plane-runtime.yml (non-executing nested
-# source). This root copy only differs in script paths (engineering/scripts/)
-# and the explicit ASTRA_TARGET_REPOSITORY selection. Both files are covered by
-# the audited-runtime attestation in control_plane.py (RUNTIME_PATHS).
-#
-# Installed disabled: activation.json has runtime_enabled=false and
-# user_activation_approval=NOT_APPROVED, so every dispatch operation fails
-# closed until separate User authorization plus a bounded canary decision.
+name: Control Plane Runtime
 
 on:
   workflow_dispatch:
@@ -32,16 +21,6 @@ on:
           - astra-consult
           - quota-readiness
           - quota-resume
-      target_repository:
-        description: "Consumer product repository profile (projects.json)"
-        required: true
-        type: choice
-        options:
-          - BeautifulMind-JT/kix-protocol
-          - BeautifulMind-JT/ZARI
-          - BeautifulMind-JT/film-unit-mv-studio
-          - BeautifulMind-JT/maeum-gyeol
-          - BeautifulMind-JT/kix-commerce-apps
       issue_number:
         description: "Canonical GitHub task issue number (required for dispatch)"
         required: false
@@ -87,7 +66,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: astra-control-${{ github.repository }}-${{ inputs.target_repository }}-${{ inputs.issue_number || inputs.program_args || 'preflight' }}
+  group: astra-control-${{ github.repository }}-${{ inputs.issue_number || inputs.program_args || 'preflight' }}
   cancel-in-progress: false
 
 jobs:
@@ -96,7 +75,6 @@ jobs:
     runs-on: [self-hosted, astra-control-plane]
     timeout-minutes: ${{ inputs.operation == 'quota-resume' && 490 || contains(fromJSON('["astra-audit","astra-consult"]'), inputs.operation) && 245 || 15 }}
     env:
-      ASTRA_TARGET_REPOSITORY: ${{ inputs.target_repository }}
       ISSUE_NUMBER: ${{ inputs.issue_number }}
       EXPECTED_TASK_ID: ${{ inputs.expected_task_id }}
       EXPECTED_TASK_REVISION: ${{ inputs.expected_task_revision }}
@@ -112,7 +90,7 @@ jobs:
           fetch-depth: 0
 
       - name: Validate repository contract
-        run: python3 -I engineering/scripts/control_plane.py validate-repo
+        run: python3 -I scripts/control_plane.py validate-repo
 
       - name: Host preflight
         if: ${{ inputs.operation == 'preflight' }}
@@ -120,9 +98,9 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$PREFLIGHT_BUILDER" == "ALL" ]]; then
-            python3 -I engineering/scripts/control_plane.py host-preflight
+            python3 -I scripts/control_plane.py host-preflight
           else
-            python3 -I engineering/scripts/control_plane.py host-preflight --builder-id "$PREFLIGHT_BUILDER"
+            python3 -I scripts/control_plane.py host-preflight --builder-id "$PREFLIGHT_BUILDER"
           fi
 
       - name: Validate dispatch input
@@ -145,14 +123,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
         run: >-
-          python3 -I engineering/scripts/control_plane.py prepare-dispatch
+          python3 -I scripts/control_plane.py prepare-dispatch
           --issue-number "$ISSUE_NUMBER"
           --packet "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-packet.json"
 
       - name: Launch through protected host admission
         if: ${{ inputs.operation == 'dispatch' && steps.prepare.outputs.launch_required == 'true' }}
         run: >-
-          python3 -I engineering/scripts/control_plane.py launch-dispatch
+          python3 -I scripts/control_plane.py launch-dispatch
           --packet "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-packet.json"
           --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
 
@@ -162,7 +140,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
           LAUNCH_REQUEST_ID: ${{ steps.prepare.outputs.launch_request_id }}
         run: >-
-          python3 -I engineering/scripts/control_plane.py finalize-dispatch
+          python3 -I scripts/control_plane.py finalize-dispatch
           --issue-number "$ISSUE_NUMBER"
           --launch-request-id "$LAUNCH_REQUEST_ID"
           --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
@@ -179,13 +157,13 @@ jobs:
 
       - name: Program lane board
         if: ${{ inputs.operation == 'lanes' }}
-        run: python3 -I engineering/scripts/control_plane_program.py lanes
+        run: python3 -I scripts/control_plane_program.py lanes
 
       - name: Program materialize
         if: ${{ inputs.operation == 'materialize' }}
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
-        run: python3 -I engineering/scripts/control_plane_program.py materialize --args-json "$PROGRAM_ARGS"
+        run: python3 -I scripts/control_plane_program.py materialize --args-json "$PROGRAM_ARGS"
 
       - name: Program start (prepare writer)
         id: pstart
@@ -193,7 +171,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
         run: >-
-          python3 -I engineering/scripts/control_plane_program.py start
+          python3 -I scripts/control_plane_program.py start
           --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
           --packet "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-packet.json"
 
@@ -203,14 +181,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
         run: >-
-          python3 -I engineering/scripts/control_plane_program.py review
+          python3 -I scripts/control_plane_program.py review
           --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
           --packet "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-packet.json"
 
       - name: Launch program session through protected host admission
         if: ${{ (inputs.operation == 'start' && steps.pstart.outputs.launch_required == 'true') || (inputs.operation == 'review' && steps.preview.outputs.launch_required == 'true') }}
         run: >-
-          python3 -I engineering/scripts/control_plane.py launch-dispatch
+          python3 -I scripts/control_plane.py launch-dispatch
           --packet "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-packet.json"
           --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
 
@@ -220,7 +198,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
           LAUNCH_REQUEST_ID: ${{ steps.pstart.outputs.launch_request_id }}
         run: >-
-          python3 -I engineering/scripts/control_plane.py finalize-dispatch
+          python3 -I scripts/control_plane.py finalize-dispatch
           --issue-number "$ISSUE_NUMBER"
           --launch-request-id "$LAUNCH_REQUEST_ID"
           --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
@@ -231,7 +209,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
           LAUNCH_REQUEST_ID: ${{ steps.preview.outputs.launch_request_id }}
         run: >-
-          python3 -I engineering/scripts/control_plane_program.py finalize-review
+          python3 -I scripts/control_plane_program.py finalize-review
           --issue-number "$ISSUE_NUMBER"
           --launch-request-id "$LAUNCH_REQUEST_ID"
           --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
@@ -240,43 +218,43 @@ jobs:
         if: ${{ inputs.operation == 'reap' }}
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
-        run: python3 -I engineering/scripts/control_plane_program.py reap --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+        run: python3 -I scripts/control_plane_program.py reap --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
 
       - name: Program merge readiness (computed, no merge)
         if: ${{ inputs.operation == 'merge-check' }}
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
-        run: python3 -I engineering/scripts/control_plane_program.py merge-check --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+        run: python3 -I scripts/control_plane_program.py merge-check --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
 
       - name: Program merge (User decision M1; only a computed READY_FOR_MERGE, pinned to its head)
         if: ${{ inputs.operation == 'merge' }}
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
-        run: python3 -I engineering/scripts/control_plane_program.py merge --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+        run: python3 -I scripts/control_plane_program.py merge --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
 
       - name: Program Astra audit (protected exact-head scope receipt)
         if: ${{ inputs.operation == 'astra-audit' }}
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
-        run: python3 -I engineering/scripts/control_plane_program.py astra-audit --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+        run: python3 -I scripts/control_plane_program.py astra-audit --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
 
       - name: Program Astra consultation (protected canonical decision request)
         if: ${{ inputs.operation == 'astra-consult' }}
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
-        run: python3 -I engineering/scripts/control_plane_program.py astra-consult --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+        run: python3 -I scripts/control_plane_program.py astra-consult --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
 
       - name: Program quota readiness (protected evidence only)
         if: ${{ inputs.operation == 'quota-readiness' }}
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
-        run: python3 -I engineering/scripts/control_plane_program.py quota-readiness --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+        run: python3 -I scripts/control_plane_program.py quota-readiness --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
 
       - name: Program quota resume (one fresh preflight and linked attempt)
         if: ${{ inputs.operation == 'quota-resume' }}
         env:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
-        run: python3 -I engineering/scripts/control_plane_program.py quota-resume --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+        run: python3 -I scripts/control_plane_program.py quota-resume --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
 
       - name: Wake the coordinator (best effort, never changes the outcome)
         if: ${{ always() && contains(fromJSON('["materialize","start","review","reap","merge","astra-audit","astra-consult","quota-resume"]'), inputs.operation) }}
@@ -308,4 +286,5 @@ jobs:
           except Exception as exc:  # best effort: the hourly heartbeat covers a lost wake
               print(f"coordinator wake failed: {type(exc).__name__}")
           PY
+
 

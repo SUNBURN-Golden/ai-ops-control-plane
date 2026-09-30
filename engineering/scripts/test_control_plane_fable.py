@@ -28,7 +28,7 @@ def mock_root_evidence(test, directory):
     real, and production checks are unchanged. Fixtures never invoke a model.
     """
     directory = os.path.abspath(directory)
-    real_lstat, real_fstat = os.lstat, os.fstat
+    real_lstat, real_stat, real_fstat = os.lstat, os.stat, os.fstat
 
     def belongs(path):
         try:
@@ -46,6 +46,10 @@ def mock_root_evidence(test, directory):
         info = real_lstat(path, *args, **kwargs)
         return root_owner(info) if belongs(path) else info
 
+    def stat(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        return root_owner(info) if belongs(path) else info
+
     def fstat(fd):
         info = real_fstat(fd)
         try:
@@ -54,7 +58,7 @@ def mock_root_evidence(test, directory):
             return info
         return root_owner(info) if belongs(target) else info
 
-    for name, value in (("lstat", lstat), ("fstat", fstat)):
+    for name, value in (("lstat", lstat), ("stat", stat), ("fstat", fstat)):
         mocked = patch.object(fable.os, name, value)
         mocked.start()
         test.addCleanup(mocked.stop)
@@ -220,25 +224,32 @@ class InstalledClaudeTests(Base):
     def test_a_root_symlink_to_a_protected_file_is_accepted(self):
         """A symlink always reads as mode 0777 from lstat; only its owner and target count."""
         path = self.binary()
-        self.assertEqual(fable.installed_claude((str(self.runs / "none"), path), owner=os.getuid()), path)
+        self.assertEqual(fable.installed_claude((str(self.runs / "none"), path)), path)
 
     def test_writable_targets_or_directories_are_refused(self):
         path = self.binary(0o775)
         with self.assertRaisesRegex(fable.FableError, "cli.js must be owned by root"):
-            fable.installed_claude((path,), owner=os.getuid())
+            fable.installed_claude((path,))
 
     def test_a_writable_regular_file_or_directory_is_refused(self):
         path = self.binary(0o777, link=False)
         with self.assertRaisesRegex(fable.FableError, "claude must be owned by root"):
-            fable.installed_claude((path,), owner=os.getuid())
+            fable.installed_claude((path,))
         os.chmod(path, 0o755)
         os.chmod(self.runs / "bin", 0o777)
         with self.assertRaisesRegex(fable.FableError, "bin must be owned by root"):
-            fable.installed_claude((path,), owner=os.getuid())
+            fable.installed_claude((path,))
 
     def test_a_missing_cli_is_reported(self):
         with self.assertRaisesRegex(fable.FableError, "not installed"):
-            fable.installed_claude((str(self.runs / "none"),), owner=os.getuid())
+            fable.installed_claude((str(self.runs / "none"),))
+
+    def test_root_fixture_is_independent_of_the_calling_ci_uid(self):
+        path = self.binary()
+        with patch.object(os, "getuid", return_value=1001):
+            self.assertEqual(fable.installed_claude((path,)), path)
+        with self.assertRaisesRegex(fable.FableError, "claude must be owned by root"):
+            fable.installed_claude((path,), owner=1001)
 
 
 class ExtractTests(Base):
