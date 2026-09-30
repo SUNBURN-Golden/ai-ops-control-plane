@@ -45,17 +45,28 @@ v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. v2는 v1(`52
   3. 계산할 수 없는 조건이 있으면 준비 안 됨으로 본다. 예를 들어 제품 문서에 기계로 읽을 수 없는 병합 규칙이 있는 경우다. 이때는 User에게 넘긴다.
   4. 현장 소장이 판정 결과를 텍스트로 주장해서는 병합할 수 없다(§18: "computed, never accepted as arbitrary text").
 
+**결정 M5 (User, 2026-09-30): 설계 권한과 감사(Astra)를 Claude Fable로 바꾸고, 그록봇이 실행한다.**
+- Astra 역할은 그대로 두고, 맡는 모델만 ChatGPT에서 Claude Fable(`claude-fable-5-1`)로 바꾼다.
+- 그록봇 컴퓨터의 고정 도구 `aiops-fable`로만 실행한다(`CONTROL_PLANE_RUNTIME.md` "Astra on the host").
+  - `aiops-fable audit`: PR 하나를 정확한 HEAD에서 감사하고, 결과를 그 PR에 댓글로 남긴다.
+  - `aiops-fable consult`: 질문 댓글 하나에 설계 권한자로 답한다.
+- 그록봇은 요청이 적은 인자 그대로 명령을 실행하고 결과를 그대로 전한다. 판정하지 않는다.
+- 설계 초안은 지금처럼 Opus가 쓴다. Fable은 설계 판단, 설계 감사, 구현 감사를 맡는다.
+- 모델은 읽기 전용이다. 명령 실행, 파일 쓰기, 네트워크 도구가 없고, GitHub 토큰을 갖지 않는다. 결과 댓글은 도구가 운영자 토큰으로 올린다.
+- 이전 ChatGPT Astra에 보낸 요청은 무효다. 이전 결과는 그 결과가 감사한 HEAD에 대한 기록으로만 남는다.
+- 남는 위험은 §13에 적는다.
+
 ## 1. 역할
 
 | 역할 | 담당 | 하는 일 | 하지 않는 일 |
 |---|---|---|---|
 | USER | 대표님 | 제품 범위, 청사진 변경, 화면 승인, 출시, 위험 감수. 병합 실행은 M1에 따라 위임했다 | — |
-| ASTRA | ChatGPT Astra | 설계 권한자, A3 감사, Opus가 넘긴 질문 | 일상 리뷰 |
+| ASTRA | Claude Fable (`claude-fable-5-1`, M5) | 설계 권한자, A3 감사, Opus가 넘긴 질문. 그록봇이 `aiops-fable`로 실행 | 일상 리뷰, 코드·문서 작성 |
 | OPUS | Claude Opus (고강도) | 첫 질문 응답, 작은 설계 예외 승인, 설계 초안 작성 | 제품 코드 작성, 자기가 쓴 설계의 감사 |
 | COORDINATOR | Claude Sonnet 5.5 | 계획에서 다음 작업 선택, 지시서 작성, 발송, 리뷰 요청, 질문 전달, 정리, 현황 게시 | 코드 작성·리뷰, 설계 판단, 레인을 판단으로 고르기, 호스트 직접 조작 |
 | BUILDER | 레인 1개 | 작업 하나를 PR까지 | 범위 밖 수정, 병합 |
 | REVIEWER | 빌더와 다른 레인 1개(A2 이상은 2개) | 현재 HEAD 읽기 전용 리뷰 | 코드 수정 |
-| HOST OPERATOR | 그록봇 | 설치, 자격 검증, boundary 재고정, 수동 reconcile | 지시서 작성, 리뷰, 레인 선택 |
+| HOST OPERATOR | 그록봇 | 설치, 자격 검증, boundary 재고정, 수동 reconcile, `aiops-fable` 실행(M5) | 지시서 작성, 리뷰, 레인 선택, Astra 판정의 수정 |
 | MECHANICAL | runtime + host helper | 검증, 레인 선택 계산, 입장 제어, 기록 | 의미 판단 |
 
 현장 소장은 규칙표를 따르는 운전자다. 레인 선택은 기계 계층이 계산하고,
@@ -240,8 +251,10 @@ flowchart TD
    - `ANSWERED`: 답을 주고 같은 빌더가 계속한다.
    - `APPROVED_SMALL_EXCEPTION`: 작은 예외를 승인하고 근거를 남긴다.
    - `ESCALATE_ASTRA`: Astra에게 넘긴다.
-4. Astra에게 넘기면 현장 소장이 Slack 결정 채널과 GitHub에 요청을 남긴다.
-   - Astra는 GitHub에 답한다.
+4. Astra에게 넘기면 현장 소장이 이슈에 `consult-astra` 라벨을 붙이고, Slack 결정 채널에 한 줄을 남긴다.
+   - 그 줄: `ASTRA_CONSULT_REQUEST repo=<저장소> issue=<번호> comment=<질문 댓글 id>`
+   - 운영자(그록봇)가 그 값 그대로 `aiops-fable consult`를 실행한다(M5). 도구가 `ASTRA_CONSULT_V1 result=<ANSWERED|USER_REQUIRED> by=ASTRA_FABLE` 답을 이슈에 올린다.
+   - 운영자에게 이 줄을 전달하는 것은 지금은 User나 Slack이다. 현장 소장이 runtime으로 직접 부르는 방식은 program mode를 다시 켤 때 따로 정한다.
    - `USER_REQUIRED`이면 현장 소장이 이슈에 `needs-user` 라벨을 붙이고 Slack으로 User에게 알린다.
 5. Opus는 그 작업의 코드를 쓰지 않는다(비작성자). 자기가 초안을 쓴 설계는 감사하지 않는다.
 
@@ -539,7 +552,7 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 
 - ~~claude.ai Connectors에서 Slack 연결~~ 완료 (2026-09-29 보고).
 - ~~Grok Build, GLM, Cursor 구독과 로그인~~ 완료 (2026-09-29 보고). 호스트의 빌더 Unix 계정에 로그인됐는지는 P3에서 확인한다.
-- ChatGPT Astra가 Slack 결정 채널을 보고 GitHub에 답하도록 설정한다.
+- ~~ChatGPT Astra가 Slack 결정 채널을 보고 GitHub에 답하도록 설정한다.~~ M5로 대체했다. 대신 그록봇 컴퓨터의 감사 계정에 Claude 로그인을 한 번 한다(그록봇이 로그인 주소를 전달한다).
 - Routine API 토큰을 GitHub secret에 등록한다.
 - ~~M1(병합 위임)~~ 결정: 위임 (2026-09-29).
 - ~~M2(GLM 하네스)~~ 결정: OpenCode + Z.AI Coding Plan 승인 (2026-09-29).
@@ -571,6 +584,12 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 - **ledger v2 이전:** 운영자가 백업한 뒤 한 트랜잭션으로 수행한다. 실패하면 되돌린다.
 - **boundary 재고정:** ai-ops main 커밋마다 필요하다. 제품 저장소의 병합에는 필요 없다. 자동화는 별도 결정으로 한다.
 - **CONFIRMED 복구:** host는 CONFIRMED인데 GitHub finalize가 사라진 경우, 자동 복구가 없다(기존 Astra 노트). 현장 소장은 이 경우 멈추고 운영자에게 알린다.
+- **Astra = Claude Fable (M5):** User가 감수한다(2026-09-30).
+  - **같은 회사의 모델:** 설계 초안과 감사 도구의 지시문은 Opus가 쓰고, 감사는 Fable이 한다. 둘 다 Claude다. 독립성은 세션, 모델, 고정 지시문으로만 나뉜다.
+  - **감사 댓글도 단일 토큰으로 올라간다(M4):** 같은 토큰으로 가짜 `ASTRA_AUDIT_V1` 댓글을 만들 수 있다. gate는 이 글을 읽지 않는다. 강한 증거는 host 실행 폴더의 원본 출력이고, 댓글에 그 sha256이 있다.
+  - **PR 내용의 prompt injection:** 감사 대상 안의 글이 판정을 흔들 수 있다. 읽기 전용, 네트워크 없음, 자격 증명 없음, 고정 지시문, 조작 시도는 BLOCKING으로 보고하게 한 것이 대책이다.
+  - **도구 변경:** `aiops-fable`을 바꾸면 그 변경도 감사받는다. 도구 파일은 `RUNTIME_PATHS`에 있어서 활성화 재결합이 필요하다.
+  - **대체 모델 없음:** Fable을 쓸 수 없으면 감사는 기다린다. 다른 모델로 바꾸지 않는다(`AGENTS.md` §12).
 
 ## 14. v0 A3 감사(FAIL) 대응
 

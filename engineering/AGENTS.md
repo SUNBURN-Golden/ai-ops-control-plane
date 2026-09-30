@@ -9,6 +9,8 @@ Program mode (User decisions of 2026-09-29, `docs/PROGRAM_MODE.md`, A3 design PA
 runs every registered product from one User "start" command through the same gates below.
 
 User decides. Astra owns architecture, architecture exceptions and explicit milestone/release gates.
+Since User decision M5 (2026-09-30) the Astra role is held by Claude Fable (`claude-fable-5-1`),
+run read-only on the host through the fixed `aiops-fable` tool (`docs/CONTROL_PLANE_RUNTIME.md`).
 The mechanical layer dispatches deterministically; Grok is only an optional command relay.
 Devin, native Grok Build, GLM and Cursor CLI are peer autonomous builders. GitHub stores durable truth. Slack is a cockpit.
 
@@ -32,8 +34,8 @@ pointers.
 | Role | Job | Must not |
 |---|---|---|
 | USER | Final authority: product scope, consequential architecture choice, risk acceptance, merge | Be silently substituted by an agent |
-| ASTRA | Principal Architect / Design Authority; architecture exceptions; explicitly required milestone, architecture and release audits | Become the routine ticket manager or default A1/A2 reviewer; implement audit fixes; audit a change it authored or modified |
-| GROK | Optional human-facing command relay to the mechanical control plane | Engineer, architect, reviewer, semantic router, event bus, polling daemon |
+| ASTRA | Principal Architect / Design Authority; architecture exceptions; explicitly required milestone, architecture and release audits. Held by Claude Fable (M5), run only through `aiops-fable audit` and `aiops-fable consult` | Become the routine ticket manager or default A1/A2 reviewer; implement audit fixes; audit a change it authored or modified; write code or documents; run outside the fixed tool |
+| GROK | Optional human-facing command relay to the mechanical control plane; host operator, including running the fixed `aiops-fable` commands (M5) | Engineer, architect, reviewer, semantic router, event bus, polling daemon; edit an Astra prompt, argument meaning or result |
 | BUILDER | One configured autonomous writer: DEVIN, GROK_BUILD, GLM or CURSOR; investigate → implement → test/debug → PR/evidence | Change approved architecture silently; write outside the assigned task/worktree; merge |
 | REVIEWER | Configured non-author read-only reviewer; may be a different builder lane or User-designated external lane | Modify the reviewed change or become a second writer |
 | CHEAP_WORKER | Explicitly authorized mechanical work | Become a second writer on a substantive task |
@@ -106,6 +108,9 @@ Grok may:
   including the User's program-mode "start" command;
 - execute exactly one pre-authorized mechanical action named by a normalized event;
 - relay exact CI/review/audit/blocker pointers;
+- run `aiops-fable audit` or `aiops-fable consult` with exactly the arguments a
+  request names, and relay the result the tool posts, literally (User decision M5).
+  Running the tool is not code review by Grok: Grok reads no diff and forms no verdict;
 - post one short status or receipt;
 - end the session.
 
@@ -307,6 +312,8 @@ write, PR creation, admin, secrets, delete or merge permission.
 
 Builder credentials are scoped to their assigned repository/task branch/PR and
 have no merge/admin authority. Reviewer credentials are read/comment only.
+Since M5, Astra has no GitHub identity: `aiops-fable` posts the Astra result with the
+operator's token, and the model never holds a GitHub credential.
 Program mode decision M4 (User, 2026-09-29) departs from this: lanes do not get
 separate GitHub identities, so a lane token can merge or push directly. User
 accepts that residual (`docs/PROGRAM_MODE.md` §13). No gate reads GitHub text
@@ -387,12 +394,15 @@ CURSOR identifies the Cursor CLI harness, not a model or native GROK_BUILD.
 Its exact installed model/effort slug and subscription route are qualified
 separately. Do not label Cursor as GLM or reuse another lane's provider approval.
 
-Astra requests go directly from the mechanical layer to configured Slack audit
-or decision channels. Grok is not a browser driver or intermediary for ChatGPT.
+Since M5 an Astra request is a GitHub pointer (a pull request at an exact head, or a
+question comment) that the host operator runs through `aiops-fable`; the tool posts
+the result. Slack may notify, and Slack delivery is not an audit or User decision.
+Grok is not a browser driver and does not rephrase requests.
 Only scoped architecture/A3/milestone/release requests invoke Astra. This User
 instruction authorizes engineering Astra consultation; unrelated root-domain
-approval rules remain in force. Slack delivery is not an audit or User decision.
-See docs/ASTRA_SLACK.md for consumer identity, duplicate protection and setup.
+approval rules remain in force.
+See `docs/CONTROL_PLANE_RUNTIME.md` (Astra on the host); `docs/ASTRA_SLACK.md` keeps
+the Slack sender, whose ChatGPT receiver M5 retired.
 
 Keep existing repository-specific review and safety gates. Measure validated
 task throughput, per-builder cost, Astra usage, Grok usage, User interventions,

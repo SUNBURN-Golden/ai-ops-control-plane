@@ -252,6 +252,62 @@ identity 누락/불일치, 응답 유실, malformed JSON, nonzero exit는 `UNKNO
 blind retry하지 않는다. 단순 nohup이나 CLI 종료를 durable session 증거로 쓰지 않는다.
 GitHub finalization도 정확한 launch request를 대조하며 이전 run의 결과 파일을 재사용하지 않는다.
 
+## Astra on the host (Claude Fable, User 결정 M5)
+
+User 결정 M5(2026-09-30)에 따라 Astra 역할은 Claude Fable(`claude-fable-5-1`)이 맡는다.
+그록봇 컴퓨터에서 고정 도구 `scripts/control_plane_fable.py`(설치 이름 `aiops-fable`)로만 실행한다.
+운영자(그록봇)는 요청이 적은 인자 그대로 실행하고, 도구가 올린 결과를 그대로 전한다.
+
+설치 배치:
+
+| 경로 | 소유와 모드 | 내용 |
+|---|---|---|
+| `/opt/aiops/bin/aiops-fable` | root, 0755 | `scripts/control_plane_fable.py` 그대로. sha256은 설치 지시서로 고정한다 |
+| `/usr/local/bin/claude` 또는 `/usr/bin/claude` | root, group/other 쓰기 불가 (실제 파일도) | Claude Code CLI |
+| `/etc/aiops/fable-claude-token` | root, 0600 | `claude setup-token`으로 만든 Claude 토큰. 감사 계정은 읽을 수 없다 |
+| 계정 `aiops-auditor` | root가 아닌 system 계정, 홈 `/var/lib/aiops-auditor` (0700) | 모델을 실행하는 UID. GitHub 자격 증명이 없다 |
+| `/var/lib/aiops-fable/runs` | root, 0755 | 실행 폴더. 각 실행은 `root:aiops-auditor` 0750 |
+
+명령 (root. audit와 consult는 운영자의 GitHub 토큰을 `GH_TOKEN`으로 받는다. preflight는 GitHub을 쓰지 않는다):
+
+```sh
+sudo /opt/aiops/bin/aiops-fable preflight
+sudo env GH_TOKEN="$(gh auth token)" /opt/aiops/bin/aiops-fable audit \
+  --repository <owner/repo> --pr <n> --head <40자 SHA> --gate <ARCHITECTURE|MILESTONE|RELEASE> \
+  --depth <A1|A2|A3> [--request-comment <id>]
+sudo env GH_TOKEN="$(gh auth token)" /opt/aiops/bin/aiops-fable consult \
+  --repository <owner/repo> --issue <n> --comment <질문 댓글 id> [--ref <branch|SHA>]
+```
+
+도구가 지키는 것:
+- **정확한 대상:** PR이 열려 있고 head가 `--head`와 같아야 시작한다. 다르면 `HEAD_MOVED`로 멈춘다.
+  질문 댓글과 요청 댓글은 그 이슈나 PR의 것이어야 한다. 저장소는 `BeautifulMind-JT/` 아래만 받는다.
+- **복사본만 읽는다:** head와 merge base의 tarball을 실행 폴더에 푼다(링크·특수 파일은 건너뛰고 목록만 남김,
+  크기 상한). 전체 diff는 host에서 만든다. 끝나면 두 트리를 지운다.
+- **읽기 전용 모델:** 감사 계정 UID로 `claude -p`를 실행한다. `--restricted --safe-mode --tools Read,Grep,Glob
+  --permission-mode dontAsk --strict-mcp-config`이므로 작업 폴더 밖을 읽지 못하고, 명령 실행·쓰기·웹 도구·
+  훅·MCP·CLAUDE.md·저장소 설정이 없다. 환경 변수는 HOME, PATH, LANG, Claude 토큰, 자동 업데이트·비필수 통신 끄기뿐이다.
+  `--fallback-model`은 쓰지 않는다. Fable을 쓸 수 없으면 실패하고 기다린다.
+- **결과 검사:** CLI 결과가 성공이고 `modelUsage`에 `claude-fable-5-1`이 있어야 한다. 구조화된 판정은
+  일관돼야 한다(PASS는 finding 없음, PASS_WITH_NOTES는 NOTE만, FAIL은 BLOCKING 하나 이상,
+  DECISION_REQUIRED는 질문 필수). 어긋나면 아무것도 올리지 않는다.
+- **자격 증명 차단:** 올릴 글에 두 토큰 값이나 토큰 모양의 문자열이 있으면 올리지 않는다. `@` 멘션은 무력화한다.
+- **중복 방지:** 같은 head의 감사, 같은 질문의 답이 이미 있으면 멈춘다. 다시 하려면 `--again`을 붙인다.
+
+결과 형식:
+- 감사: 첫 두 줄이 `<!-- aiops-fable-audit -->`와
+  `ASTRA_AUDIT_V1 pr=<n> head=<sha> result=<판정> depth=<A1|A2|A3> auditor=ASTRA_FABLE session=<id>`이다.
+  본문에 `DISPATCH.md` §14의 결과 필드와 finding이 있다. 요약은 쉬운 한국어다.
+- 상담: 첫 두 줄이 `<!-- aiops-fable-consult -->`와
+  `ASTRA_CONSULT_V1 result=<ANSWERED|USER_REQUIRED> by=ASTRA_FABLE question=<id> ref=<sha> session=<id>`이다.
+- 도구는 이 첫 두 줄만 읽어 이전 결과를 찾는다. gate는 이 글을 읽지 않는다(M4).
+
+증거: 실행 폴더에 packet, 원본 CLI 출력(`claude-output.json`), 올린 글, `run.json`이 남는다.
+댓글에는 host run id, 모델 세션, 도구 sha256, 원본 출력 sha256이 있다.
+
+실패하면 `{"status": "ERROR", "reason": ...}`를 출력하고 아무것도 올리지 않는다. 운영자는 원문을 보고하고 멈춘다.
+우회하거나 다른 모델로 다시 돌리지 않는다.
+
 ## 활성화와 검증
 
 `runtime_enabled=false` 유지. 기본 branch의 workflow만 self-hosted job을 실행한다.

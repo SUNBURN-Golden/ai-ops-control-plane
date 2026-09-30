@@ -390,6 +390,14 @@ This section applies only when at least one is true:
 EFFECTIVE_AUDIT_FLOOR=A3 implies ASTRA_GATE=ARCHITECTURE for the current
 task revision/current HEAD.
 
+Configured Astra (User decision M5, 2026-09-30): Claude Fable (`claude-fable-5-1`),
+run by the host operator through `aiops-fable audit` (a pull request at its exact
+head) or `aiops-fable consult` (one question comment). ACCEPTED_AUDITOR_IDENTITY is
+`ASTRA_FABLE claude-fable-5-1`; the tool's comment binds each result to the model
+session and the host run (`docs/CONTROL_PLANE_RUNTIME.md`, Astra on the host). M5
+replaced the earlier ChatGPT Astra: requests outstanding to it are invalid, and its
+past results remain records for the exact heads they audited only.
+
 Astra-request delivery uses the same fail-closed send discipline as writer and
 reviewer launch and is serialized by task revision + current HEAD/evidence SHA
 (or by an explicitly identified milestone/release evidence packet).
@@ -693,7 +701,8 @@ Target logical permissions:
 - Cheap writer: only explicitly assigned branch/task.
 - Reviewer: repo/PR read + finding comment only; no source write.
 - Astra: repo/PR read + architecture/audit/decision evidence write only; no
-  source write/merge.
+  source write/merge. Since M5 the model holds no credential: it reads a host copy
+  of the exact sources, and `aiops-fable` posts its result with the operator token.
 - Mechanical layer: event validation + control-record/claim/status mutation and
   configured builder/reviewer launch only; no source write/merge.
 - User: final authority.

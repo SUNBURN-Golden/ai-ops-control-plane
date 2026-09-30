@@ -60,6 +60,7 @@ RUNTIME_PATHS = (
     ".github/control-plane/projects.json",
     "scripts/control_plane.py", "scripts/control_plane_host.py",
     "scripts/control_plane_program.py", "scripts/test_control_plane_program.py",
+    "scripts/control_plane_fable.py", "scripts/test_control_plane_fable.py",
     "docs/PROGRAM_MODE.md", "docs/COORDINATOR_PLAYBOOK.md",
     "adapters/imported/astra-devin-adapter", "adapters/imported/astra-grok-adapter",
     "adapters/imported/astra-glm-adapter", "adapters/imported/astra-builder-devin",
