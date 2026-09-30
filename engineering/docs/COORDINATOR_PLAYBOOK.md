@@ -83,10 +83,13 @@ Wait for the run to finish (a few seconds) and read its outcome before acting on
 1. **Opus.** Fire the `opus-consult` Routine through its API trigger. Send the task issue URL and the question comment URL only. Label the issue `consult-opus`.
 2. **Opus answers** with one `ASTRA_CONSULT_V1 result=<ANSWERED|APPROVED_SMALL_EXCEPTION|ESCALATE_ASTRA>` comment.
    - `ANSWERED` or `APPROVED_SMALL_EXCEPTION`: row 8 applies on the next run.
-3. **Astra.** On `ESCALATE_ASTRA`:
-   - post a request in the Slack decision channel with the issue URL and the question URL;
-   - label the issue `consult-astra`.
-   - Astra answers on GitHub.
+3. **Astra** (Claude Fable, User decision M5). On `ESCALATE_ASTRA`:
+   - label the issue `consult-astra`;
+   - post one line in the Slack decision channel:
+     `ASTRA_CONSULT_REQUEST repo=<owner/repo> issue=<n> comment=<question comment id>`;
+   - the host operator runs `aiops-fable consult` with exactly those values, and the tool
+     posts `ASTRA_CONSULT_V1 result=<ANSWERED|USER_REQUIRED> by=ASTRA_FABLE` on the issue.
+     Never write that line yourself.
 4. **User.** If Astra answers `USER_REQUIRED`, label the issue `needs-user` and notify the User. Never answer for the User.
 
 ## 5. Visibility (every run)

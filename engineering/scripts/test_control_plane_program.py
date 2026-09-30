@@ -1100,6 +1100,14 @@ class ProgramModeTests(unittest.TestCase):
         envelope = cp.parse_task_envelope(self.gh.issues[issue]["body"])
         self.assertEqual((envelope["BUILDER_ID"], envelope["TASK_ID"]), ("DEVIN", "ZARI-N1"))
 
+    def test_the_brief_asks_for_a_ready_pull_request_on_the_task_branch(self):
+        """merge-check refuses a draft, and draft-first product CI skips drafts."""
+        issue = self.materialized()
+        self.launch_writer(issue)
+        body = " ".join(self.gh.issues[issue]["body"].split())
+        self.assertIn("work on the branch `astra/zari-n1`", body)
+        self.assertIn("as ready for review, not a draft", body)
+
     def test_select_lane_follows_fixed_order_and_global_cap(self):
         board = {"active_total": 0, "max_active_sessions": 4,
                  "lanes": [{"lane": lane, "enabled": True, "active": []} for lane in prog.LANE_ORDER]}

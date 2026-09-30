@@ -302,8 +302,9 @@ def render_task(plan: Dict[str, Any], node: Dict[str, Any], plan_commit: str, is
         ("PLAN_COMMIT", plan_commit),
     ]
     delivery = (f"Deliverable protocol (program mode): work on the branch `{branch_for(task_id_for(program, node['id']))}` "
-                "and open the pull request from it. When it is ready, run this session's signer (the session prompt "
-                "gives the command) and post one comment on this issue containing the single "
+                "and open the pull request from it as ready for review, not a draft, so this repository's required "
+                "checks run on its head (program mode authorizes this). When it is ready, run this session's signer "
+                "(the session prompt gives the command) and post one comment on this issue containing the single "
                 "`ASTRA_DELIVERY_V1 ... mac=...` line it prints, then end the session. If blocked, post the signer's "
                 "`ASTRA_BLOCKED_V1 ... mac=...` line (DECISION_REQUIRED, BLOCKED or STALLED) with the reason and end "
                 "the session; unsigned markers are ignored. Do not merge.")

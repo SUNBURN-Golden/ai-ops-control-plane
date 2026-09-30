@@ -1,5 +1,10 @@
 # Direct Slack requests to Astra
 
+> **User decision M5 (2026-09-30):** the Astra role is held by Claude Fable, run on the
+> host through `aiops-fable` (`docs/CONTROL_PLANE_RUNTIME.md`, Astra on the host). The
+> ChatGPT receiver below is retired and must not be configured. The sender remains a
+> notification path only; a Slack message never starts or replaces an `aiops-fable` run.
+
 Slack carries requests and notifications. GitHub records the authoritative task,
 decision, exact SHA and audit. Grok Bot is not required to ask Astra or relay its
 answer. No shared browser session, raw Slack firehose or standing LLM routine.
