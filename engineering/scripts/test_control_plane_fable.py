@@ -337,6 +337,30 @@ class AuditTests(Base):
         self.assertEqual(json.loads((run / "run.json").read_text())["comment_url"], "https://github.com/posted")
         self.assertEqual(fable.sha256_bytes((run / "claude-output.jsonl").read_bytes()), record["output_sha256"])
 
+    def test_the_auditor_can_read_everything_whatever_the_umask(self):
+        """A strict operator umask once left the run folder root-only and the audit read nothing."""
+        seen = {}
+
+        def inspect(work):
+            for path in [work, *work.rglob("*")]:
+                seen[str(path.relative_to(work))] = (path.is_dir(), path.stat().st_mode & 0o777)
+            seen["run"] = (True, work.parent.stat().st_mode & 0o777)
+
+        trees = {HEAD: archive({"AGENTS.md": "rule one\nrule two\n", "docs/deep/x.md": "x\n"}),
+                 MERGE_BASE: archive({"AGENTS.md": "rule one\n"})}
+        old = os.umask(0o077)
+        try:
+            fable.audit(self.context(FakeGitHub(trees=trees), FakeRunner(verdict(), inspect=inspect)), REPO, 5,
+                        HEAD, "ARCHITECTURE", "A3")
+        finally:
+            os.umask(old)
+        self.assertEqual(seen.pop("run"), (True, 0o750))
+        self.assertIn("audit/diff.patch", seen)
+        self.assertIn("head/docs/deep/x.md", seen)
+        for name, (is_dir, mode) in seen.items():
+            with self.subTest(name=name):
+                self.assertEqual(mode & (0o055 if is_dir else 0o044), 0o055 if is_dir else 0o044)
+
     def test_moved_or_closed_pull_request_stops_before_the_model(self):
         for github, reason in ((FakeGitHub(head="d" * 40), "HEAD_MOVED"), (FakeGitHub(state="closed"), "not open")):
             runner = FakeRunner(verdict())

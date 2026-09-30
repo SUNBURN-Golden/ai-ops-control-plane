@@ -394,9 +394,24 @@ class GitHub:
                             limit=MAX_ARCHIVE)
 
 
+def make_dir(path, mode=0o755):
+    # mkdir's mode is masked by the caller's umask; chmod is exact.
+    path.mkdir()
+    path.chmod(mode)
+
+
+def open_tree(root):
+    """Directories 0755 and files readable by all, whatever umask the operator's shell had."""
+    for top, _, files in os.walk(root):
+        os.chmod(top, 0o755)
+        for name in files:
+            path = os.path.join(top, name)
+            os.chmod(path, (os.lstat(path).st_mode & 0o755) | 0o444)
+
+
 def extract_tree(archive, dest):
     """Extract a GitHub tarball without its top directory; links and specials are skipped."""
-    dest.mkdir(mode=0o755)
+    make_dir(dest)
     skipped, total, count = [], 0, 0
     try:
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
@@ -415,6 +430,7 @@ def extract_tree(archive, dest):
                 tar.extract(member.replace(name=name, deep=False), dest, filter="data")
     except (tarfile.TarError, OSError) as exc:
         raise FableError(f"source archive rejected: {type(exc).__name__}") from None
+    open_tree(dest)
     return skipped
 
 
@@ -429,7 +445,7 @@ def tree_diff(work, *extra):
 
 
 def write(path, text):
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(text if isinstance(text, bytes) else text.encode("utf-8"))
     path.chmod(0o644)
 
 
@@ -484,7 +500,21 @@ class Runner:
             raise FableError("claude --version failed")
         return completed.stdout.strip()[:200]
 
+    def unreadable(self, work):
+        """The first path under work the auditor UID cannot read, checked as that UID before any usage."""
+        completed = subprocess.run(
+            ["find", str(work), "(", "-type", "d", "(", "!", "-readable", "-o", "!", "-executable", ")",
+             "-o", "-type", "f", "!", "-readable", ")", "-print", "-quit"],
+            env=child_env(self.home), cwd="/", capture_output=True, text=True, timeout=600, check=False,
+            user=self.uid, group=self.gid, extra_groups=[])
+        if completed.returncode or completed.stdout.strip() or completed.stderr.strip():
+            return (completed.stdout.strip() or completed.stderr.strip() or str(work)).splitlines()[0][:300]
+        return None
+
     def __call__(self, work, system, schema, prompt):
+        blocked = self.unreadable(work)
+        if blocked:
+            raise FableError(f"the auditor account cannot read the run folder: {blocked}")
         timed_out = []
 
         def kill(proc, reason=None):
@@ -525,10 +555,10 @@ class Context:
     def new_run(self, kind, repository, number):
         run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + secrets.token_hex(4)
         run = self.runs_dir / f"{run_id}-{kind}-{repository.split('/')[1]}-{number}"
-        run.mkdir(mode=0o750)
+        make_dir(run, 0o750)
         if self.gid is not None:
             os.chown(run, 0, self.gid)
-        (run / "work").mkdir(mode=0o755)
+        make_dir(run / "work")
         return run_id, run
 
     def run_model(self, run, system, schema, prompt, validate):
@@ -637,10 +667,10 @@ def audit(ctx, repository, number, head, gate, depth, request_comment=None, agai
                   "title": pr.get("title"), "author": (pr.get("user") or {}).get("login"),
                   "base_ref": pr["base"]["ref"], "merge_base_sha": merge_base, "head_sha": head,
                   "gate": gate, "requested_depth": depth, "skipped_links_and_specials": skipped}
-        (work / "audit").mkdir(mode=0o755)
+        make_dir(work / "audit")
         write(work / "audit" / "packet.json", json.dumps(packet, indent=2, ensure_ascii=False))
-        (work / "audit" / "diff.patch").write_bytes(tree_diff(work))
-        (work / "audit" / "files.txt").write_bytes(tree_diff(work, "--name-status"))
+        write(work / "audit" / "diff.patch", tree_diff(work))
+        write(work / "audit" / "files.txt", tree_diff(work, "--name-status"))
         write(work / "audit" / "pr_body.md", pr.get("body") or "")
         if request_text:
             write(work / "audit" / "request.md", request_text)
@@ -698,7 +728,7 @@ def consult(ctx, repository, number, comment_id, ref=None, again=False, claude_v
         packet = {"kind": "consult", "repository": repository, "issue": number, "issue_url": issue.get("html_url"),
                   "question_comment_id": comment_id, "question_url": question.get("html_url"),
                   "source_ref": ref, "source_sha": sha, "skipped_links_and_specials": skipped}
-        (work / "consult").mkdir(mode=0o755)
+        make_dir(work / "consult")
         write(work / "consult" / "packet.json", json.dumps(packet, indent=2, ensure_ascii=False))
         write(work / "consult" / "question.md", question.get("body") or "")
         write(work / "consult" / "issue.md", f"# {issue.get('title')}\n\n{issue.get('body') or ''}")
@@ -824,6 +854,7 @@ def main(argv=None):
     c.add_argument("--ref", type=pattern(REF_RE, "a branch, tag or SHA"))
     c.add_argument("--again", action="store_true")
     args = parser.parse_args(argv)
+    os.umask(0o022)
     try:
         ctx, version = production_context(need_github=args.command != "preflight")
         if args.command == "preflight":
