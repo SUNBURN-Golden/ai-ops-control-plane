@@ -48,19 +48,57 @@ runner의 sudo 허용은 고정 helper의 `launch`, 정확한 세 builder별
 `materialize-*`를 더한다). `status`는 sudoers에서
 그 인수 형식만 허용하고(가능하면 정규식), ledger를 바꾸지 않는다. 이 항목이 없으면
 host-preflight와 모든 재시도가 fail-closed로 거부된다. shell, 임의 Python, 임의 인수,
-`init`, `reconcile`, root 실행을 허용하지 않는다. builder에는 이 sudo 권한이 없다.
+`init`, `reconcile`, 일반 root 실행을 허용하지 않는다. builder에는 이 sudo 권한이 없다.
+추가 `aiops-fable program` root 예외는 아래 후보 절에서 별도로 정의하며,
+2026-10-01 User A / Option C 채택은
+[PA-1 결정 기록](PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md#pa-1-채택-결정--2026-10-01-a-option-c)에 남긴다.
+채택 기록만으로 설치하거나 활성화하지 않는다. 이번 F1–F3 수정의 최종 #47 HEAD에 대한
+독립 A3 재감사와 실제 host qualification, protected service authorization 전에는 기존 금지가 적용된다.
+별도 후보 파일을 추가한 사실은 설치·허가가 아니다. 예외가 채택되어도 shell·임의 Python/인수,
+init/reconcile나 builder root를 허용하지 않는다.
 관리자만 DB를 최초 `init`한다. 손실된 DB를 빈 DB로 재생성해 복구하지 않는다.
 원 ledger와 외부 session을 대사하기 전 dispatch를 재개하지 않는다.
 최초 활성화 전에도 ledger에 없는 기존 writer/session이 없는지 확인한다.
 
-program mode의 sudoers 원문은 `.github/control-plane/sudoers-aiops-program.example`이다.
+program mode 상태는 재부팅해도 남는 저장소에 둔다. `/var/lib/astra/control/`의
+원장과 transactional side file, `/var/lib/aiops-fable/` 전체의 실행 archive·receipt·
+immutable journal·quota ticket/claim/child 기록을 함께 보존한다. 재부팅 때 초기화되는
+그록봇 VM은 이 설치 조건을 충족하지 않는다. 다른 host로 이전할 때는 admission을
+멈추고 기존 기록·binding·권한을 그대로 옮긴 뒤 hash/chain과 외부 세션을 대사한다.
+빈 원장으로 새로 시작하거나 GitHub 댓글만 복사해서 UNKNOWN/소비된 quota claim을
+없애지 않는다. 실제 영속 backing과 재부팅 생존 검증은 설치 qualification에 기록하며,
+폴더 marker 하나로 증명하지 않는다. 상세 절차는
+`PROGRAM_FABLE_RECOVERY.md`의 "Durable host state and migration"을 따른다.
+
+`materialize-list --repository <repo> --program <key>`는 보호된 policy로 범위를
+검증하는 읽기 전용 canonical 원장 조회다(최대 10,000개). CREATED뿐 아니라
+UNKNOWN·SUBMITTING·ABANDONED의 ID도 보존해 반환하며, 이슈 projection이 삭제돼도
+plan에서 해당 ID를 없애거나 이름을 바꿔 fence를 회피할 수 없다. 완료 판정·원장 수정·
+임의 파일 읽기 권한은 주지 않는다.
+
+program mode의 일반 설치 sudoers 원문은 `.github/control-plane/sudoers-aiops-program.example`이다.
+이 파일의 runner 규칙에는 root 실행 대상이 없다. 별도 PA-1 후보 파일을 일반 설치에 합치거나
+`*.candidate`를 일괄 복사하지 않는다.
+
 - 설치 위치는 `/etc/sudoers.d/aiops-program`이고, root:root 0440이다. 파일 이름에 점(`.`)이 있으면 sudo가 읽지 않는다.
 - 바꾸는 곳은 `RUNNER_USER` 하나다. 기존 `status --launch-request-id` 규칙의 사용자 칸을 그대로 쓴다.
 - 인수는 sudo 1.9.10 이상의 정규식(`^...$`)으로 제한한다. helper의 인수 검증과 같은 모양이다.
 - runner 규칙은 `reap`의 `--pin-stdin` 형식만 허용한다. `migrate`, `reconcile`, `init`, `materialize-resolve`는 허용하지 않는다.
 - control identity는 각 레인 adapter의 `--quiescence`만 레인 계정으로 실행한다. root로는 실행하지 않는다.
 - program mode 테스트는 런타임이 helper에 보내는 모든 인수가 이 규칙에 맞는지 검사한다. 새 helper 호출을 더하면 이 파일도 같이 고쳐야 한다.
+- 설치·검증에서는 일반 예시에 runner root 대상이 없음을 확인하고, 실제 runner 계정만 치환한 바이트를 `visudo -cf`로 검사한다.
 - 설치 후 확인: `diff <(sed 's/^RUNNER_USER /<runner 계정> /' sudoers-aiops-program.example) /etc/sudoers.d/aiops-program`
+
+PA-1 root 예외의 원문은 **`.github/control-plane/sudoers-aiops-program-astra.candidate`**에만 있다.
+[PA-1 A / Option C 채택 결정 기록](PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md#pa-1-채택-결정--2026-10-01-a-option-c)을
+먼저 확인하고, F1–F3 수정의 최종 #47 HEAD 독립 A3 재감사와 정상 User 병합,
+실제 host/service qualification 및 protected authorization을 충족한 경우에만 그 후보 파일을 쓴다.
+하나라도 없거나 PENDING이면 후보 설치·검증을 진행하지 않고 일반 예시만 유지한다.
+조건이 충족되면 같은 accepted commit의 후보를 runner 계정만 치환하여 `visudo -cf`로 검사하고,
+별도 `/etc/sudoers.d/aiops-program-astra`(root:root 0440)에 설치한다. 후보 파일과 이 설치 파일을
+동일 치환 후 정확히 비교한다. 이 검증은 일반 `/etc/sudoers.d/aiops-program` 비교와 분리한다.
+설치 성공도 활성화 승인이나 실제 서비스 qualification을 대신하지 않는다.
+`control_plane_install.py`의 disabled pin 설치는 sudoers를 복사하거나 PA-1 예외를 설치하지 않는다.
 
 host policy 모양은 `.github/control-plane/host-policy.example.json`에 있다.
 예시는 UID=0 / 빈 repo / PENDING evidence라서 그대로는 실행되지 않는다.
@@ -258,6 +296,15 @@ User 결정 M5(2026-09-30)에 따라 Astra 역할은 Claude Fable(`claude-fable-
 그록봇 컴퓨터에서 고정 도구 `scripts/control_plane_fable.py`(설치 이름 `aiops-fable`)로만 실행한다.
 운영자(그록봇)는 요청이 적은 인자 그대로 실행하고, 도구가 올린 결과를 그대로 전한다.
 
+**실행 강도 고정 (User, 2026-10-01):** `control_plane_fable.py`의 `EFFORT = "low"`를
+모든 preflight/audit/consult/program 호출의 공통 `claude_argv`가 `--effort low`로 사용한다.
+호출 인자나 환경 변수로 강도를 바꾸지 않는다. 모델·과금 guard·동시 실행 잠금은 그대로다.
+설치본을 현장에서 편집하지 않는다. 승인된 exact commit의
+`engineering/scripts/control_plane_fable.py`를 `/opt/aiops/bin/aiops-fable`로 바이트 그대로
+설치하고 `cmp`와 양쪽 SHA256 일치를 확인한다. 지원 모듈/정책도 같은 승인 commit을
+사용하고 protected fingerprint/qualification을 다시 결합한다. hash 불일치는 HOLD다.
+이 문단은 실제 호스트 설치 완료 기록이 아니며 후보 HEAD의 독립 감사와 설치 경계를 유지한다.
+
 설치 배치:
 
 | 경로 | 소유와 모드 | 내용 |
@@ -289,9 +336,21 @@ sudo env GH_TOKEN="$(gh auth token)" /opt/aiops/bin/aiops-fable consult \
   훅·MCP·CLAUDE.md·저장소 설정이 없다. 환경 변수는 HOME, PATH, LANG, Claude 토큰, 자동 업데이트·비필수 통신 끄기뿐이다.
   `--fallback-model`은 쓰지 않고, 거절 시 자동 모델 전환도 끈다(`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`).
   Fable을 쓸 수 없거나 거절하면 실패하고 기다린다.
-- **추가 과금 차단:** CLI 출력(stream-json)의 `rate_limit_event`가 `overageStatus: "rejected"`, `isUsingOverage: false`여야 한다.
-  초과 사용(extra usage)이 막혀 있다는 뜻이다. 다른 값이 한 번이라도 나오면 그 즉시 실행을 끊고 아무것도 올리지 않는다
-  (`OVERAGE_NOT_BLOCKED`). 이 신호가 없으면 확인할 수 없으므로 역시 올리지 않는다(`OVERAGE_UNVERIFIED`).
+- **추가 과금 신호 검사:** `overage_policy`는 CLI 출력(stream-json)의 `rate_limit_event`를 아래 표와 동일하게 검사한다.
+
+  <!-- FABLE_OVERAGE_POLICY_V1 -->
+  | overageStatus | status | isUsingOverage | 처리 | 의미 |
+  |---|---|---|---|---|
+  | `rejected` | 무관 | 정확히 bool `false` | CONTINUE | 추가 사용 차단 신호 |
+  | 키 없음 | `allowed` 또는 `allowed_warning` | 정확히 bool `false` | CONTINUE | 승인된 구독 실행 신호; 과금 차단 확인 아님; quota 재시도 없음 |
+  | 그 밖의 모든 조합 | 무관 | 무관 | STOP | OVERAGE_NOT_BLOCKED 또는 OVERAGE_UNVERIFIED |
+  <!-- /FABLE_OVERAGE_POLICY_V1 -->
+
+  `overageStatus` 키 없음은 null과 다르다. `isUsingOverage`가 true이거나 `overageStatus`가
+  allowed/allowed_warning이면 `OVERAGE_NOT_BLOCKED`, 그 밖의 불명·누락·잘못된 타입은
+  `OVERAGE_UNVERIFIED`로 즉시 끊고 아무것도 올리지 않는다. 표의 두 CONTINUE 경우 외에는 모두 중단한다.
+  승인된 구독 실행 신호에서는 누락 값을 rejected로 합성하지 않으며, "과금 차단 확인"이라고 주장하지 않는다.
+  이 신호로는 quota 재시도 admission을 만들지 않는다.
   첫 요청 뒤에야 신호가 오므로, 초과 사용이 켜진 계정이라도 한 실행에서 새는 양은 첫 요청 하나로 제한된다.
   확실히 0원으로 하려면 claude.ai 설정 > 사용량(Usage)에서 추가 사용량(usage credits)과 자동 충전을 끈다.
   `ANTHROPIC_API_KEY`는 모델 환경에 넘기지 않으므로 API 종량 과금 경로도 없다.
@@ -312,6 +371,13 @@ sudo env GH_TOKEN="$(gh auth token)" /opt/aiops/bin/aiops-fable consult \
 
 증거: 실행 폴더에 packet, 원본 CLI 출력(`claude-output.jsonl`), 올린 글, `run.json`이 남는다.
 댓글에는 host run id, 모델 세션, 도구 sha256, 원본 출력 sha256이 있다.
+
+고정 CLI의 preflight·audit·consult 및 program 모델 실행은 보호된 전역
+`account-model.lock`을 admission 전에 비대기 방식으로 획득한다. 잠겨 있으면
+BUSY이며 모델·admission은 시작하지 않는다. 보호 중단은 원본 이벤트·중단 기록·
+process group 부재·게시 NOT_STARTED를 모두 검증한 운영자만 TERMINAL_FAILED로
+정산할 수 있다. 자동 한도 재개 권한을 주지 않는다. 래퍼 밖 Claude/Opus 실행은
+이 잠금의 적용 대상이 아니다.
 
 실패하면 `{"status": "ERROR", "reason": ...}`를 출력하고 아무것도 올리지 않는다. 운영자는 원문을 보고하고 멈춘다.
 우회하거나 다른 모델로 다시 돌리지 않는다.
@@ -341,3 +407,45 @@ python3 scripts/control_plane.py validate-repo
 
 테스트는 중복·경쟁·UNKNOWN·stale receipt·환경 누출·activation 거절을 다룬다.
 실제 provider 과금, host 격리, GitHub/Slack 종단 동작을 검증했다는 뜻은 아니다.
+# Program Astra bridge (implementation candidate)
+
+The protected `aiops-fable program` path, scoped audit receipts and automatic
+consult invocation are a restricted Option C candidate in
+[PROGRAM_ASTRA_AUTOMATION.md](PROGRAM_ASTRA_AUTOMATION.md). The User's A / Option C
+governance/security-boundary adoption of 2026-10-01 is recorded in
+[PA-1](PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md#pa-1-채택-결정--2026-10-01-a-option-c).
+Its final #47 F1–F3 fixes and exact-HEAD independent A3 re-audit must precede
+installation; actual host qualification and activation remain pending. A declared RELEASE gate, current reviewer contract-change YES and
+User-only node always hold automatic merge regardless of a scope receipt.
+
+The separate `.github/control-plane/sudoers-aiops-program-astra.candidate`
+permits only the exact `/opt/aiops/bin/aiops-fable program` command after the
+recorded adoption and rollout conditions above. The ordinary install example
+has no runner-root rule. Bounded stdin is validated by the
+protected service, not a coordinator interpretation. Before GitHub/model work,
+the service requires root-protected `program-astra-authorization.json` beside
+its installed config. It binds accepted runtime commit, actual decision/audit/
+qualification evidence and installed Fable/support/config/profile/policy hashes.
+Missing/PENDING or changed fingerprints refuse direct calls as well as workflow
+calls. Filling example pointer fields cannot establish actual qualification.
+
+Install the same audited commit's seven policy documents (AGENTS, DISPATCH,
+PROGRAM_MODE, CONTROL_PLANE_RUNTIME, COORDINATOR_PLAYBOOK,
+PROGRAM_ASTRA_AUTOMATION and the adoption proposal) beneath the installed
+`/opt/aiops/lib` root, together with the protected support/config/profile files.
+Copied support is not assumed to be a git checkout. The privileged entry's
+service attestation is separate from the normal checkout activation check;
+both need actual qualification. Only an authorized operator installs sudoers.
+The ordinary example/source comparison above excludes the root exception;
+conditional candidate installation requires its own separate exact comparison
+and never becomes an undocumented extra root rule.
+
+The candidate leaves activation unchanged and has no qualified protected Fable
+receipt reconciler. Full automation remains NOT_READY until that separate
+implementation/audit/actual qualification. Builder-session reconcile cannot
+settle a Fable model request; no receipt deletion, new HEAD/plan/tool hash or
+workflow cancellation substitutes for terminal evidence. Typed failure/journal recovery is now a source candidate documented in
+`PROGRAM_FABLE_RECOVERY.md`; installed automatic recovery remains unqualified.
+
+
+Recovery source candidate update: `docs/PROGRAM_FABLE_RECOVERY.md` specifies the implemented protected admission journal and bounded terminal-failure reconciliation. Earlier statements that reconciliation is unimplemented describe the #46 checkpoint; it remains uninstalled/unqualified and grants no operator override for unproven UNKNOWN. Full host activation is still NOT_READY.

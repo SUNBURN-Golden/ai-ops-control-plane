@@ -21,6 +21,49 @@ CLAUDE_TOKEN = "claude-oauth-value-for-tests"
 SESSION = "0f8fad5b-d9cb-469f-a165-70867728950e"
 
 
+def mock_root_evidence(test, directory):
+    """Simulate only owner UID for this test's private evidence directory.
+
+    CI is unprivileged. File types, modes, hard links, sizes and content remain
+    real, and production checks are unchanged. Fixtures never invoke a model.
+    """
+    directory = os.path.abspath(directory)
+    real_lstat, real_stat, real_fstat = os.lstat, os.stat, os.fstat
+
+    def belongs(path):
+        try:
+            value = os.path.abspath(os.fsdecode(path))
+        except (TypeError, ValueError):
+            return False
+        return value == directory or value.startswith(directory + os.sep)
+
+    def root_owner(info):
+        values = list(info)
+        values[4] = 0
+        return os.stat_result(values)
+
+    def lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        return root_owner(info) if belongs(path) else info
+
+    def stat(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        return root_owner(info) if belongs(path) else info
+
+    def fstat(fd):
+        info = real_fstat(fd)
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            return info
+        return root_owner(info) if belongs(target) else info
+
+    for name, value in (("lstat", lstat), ("stat", stat), ("fstat", fstat)):
+        mocked = patch.object(fable.os, name, value)
+        mocked.start()
+        test.addCleanup(mocked.stop)
+
+
 def archive(files, *, top="BeautifulMind-JT-ai-ops-control-plane-0123456", links=(), extra=()):
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
@@ -44,6 +87,10 @@ def archive(files, *, top="BeautifulMind-JT-ai-ops-control-plane-0123456", links
 
 BLOCKED = {"status": "allowed", "overageStatus": "rejected", "overageDisabledReason": "org_level_disabled",
            "isUsingOverage": False}
+# Reconstructed wire shape reported for CLI 2.1.286; no provider call/captured
+# host transcript is claimed. Crucially, overageStatus is absent, not null.
+SUBSCRIPTION_WARNING_286 = {"status": "allowed_warning", "rateLimitType": "five_hour",
+                            "utilization": 0.91, "resetsAt": 1790765400, "isUsingOverage": False}
 
 
 def cli_output(structured, *, models=None, subtype="success", is_error=False, denials=(), limits=(BLOCKED,)):
@@ -122,6 +169,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.runs = Path(self.tmp.name)
+        mock_root_evidence(self, self.runs)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -135,6 +183,16 @@ class Base(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_effort_is_fixed_low_for_every_schema_and_ignores_parent_environment(self):
+        with patch.dict(os.environ, {'CLAUDE_CODE_EFFORT_LEVEL': 'max', 'EFFORT': 'high'}):
+            for schema in (fable.AUDIT_SCHEMA, fable.CONSULT_SCHEMA, {}):
+                argv = fable.claude_argv('/usr/local/bin/claude', 'system', schema)
+                self.assertEqual(argv.count('--effort'), 1)
+                self.assertEqual(argv[argv.index('--effort') + 1], 'low')
+            env = fable.child_env('/var/lib/aiops-auditor')
+            self.assertNotIn('CLAUDE_CODE_EFFORT_LEVEL', env)
+            self.assertNotIn('EFFORT', env)
+
     def test_model_runs_read_only_confined_and_pinned(self):
         argv = fable.claude_argv("/usr/local/bin/claude", "system", fable.AUDIT_SCHEMA)
         for flag in ("--restricted", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config",
@@ -180,25 +238,32 @@ class InstalledClaudeTests(Base):
     def test_a_root_symlink_to_a_protected_file_is_accepted(self):
         """A symlink always reads as mode 0777 from lstat; only its owner and target count."""
         path = self.binary()
-        self.assertEqual(fable.installed_claude((str(self.runs / "none"), path), owner=os.getuid()), path)
+        self.assertEqual(fable.installed_claude((str(self.runs / "none"), path)), path)
 
     def test_writable_targets_or_directories_are_refused(self):
         path = self.binary(0o775)
         with self.assertRaisesRegex(fable.FableError, "cli.js must be owned by root"):
-            fable.installed_claude((path,), owner=os.getuid())
+            fable.installed_claude((path,))
 
     def test_a_writable_regular_file_or_directory_is_refused(self):
         path = self.binary(0o777, link=False)
         with self.assertRaisesRegex(fable.FableError, "claude must be owned by root"):
-            fable.installed_claude((path,), owner=os.getuid())
+            fable.installed_claude((path,))
         os.chmod(path, 0o755)
         os.chmod(self.runs / "bin", 0o777)
         with self.assertRaisesRegex(fable.FableError, "bin must be owned by root"):
-            fable.installed_claude((path,), owner=os.getuid())
+            fable.installed_claude((path,))
 
     def test_a_missing_cli_is_reported(self):
         with self.assertRaisesRegex(fable.FableError, "not installed"):
-            fable.installed_claude((str(self.runs / "none"),), owner=os.getuid())
+            fable.installed_claude((str(self.runs / "none"),))
+
+    def test_root_fixture_is_independent_of_the_calling_ci_uid(self):
+        path = self.binary()
+        with patch.object(os, "getuid", return_value=1001):
+            self.assertEqual(fable.installed_claude((path,)), path)
+        with self.assertRaisesRegex(fable.FableError, "claude must be owned by root"):
+            fable.installed_claude((path,), owner=1001)
 
 
 class ExtractTests(Base):
@@ -229,6 +294,34 @@ class ExtractTests(Base):
 
 
 class OutputTests(unittest.TestCase):
+    def test_approved_subscription_signal_flows_through_stream_and_final_validation(self):
+        for status in ("allowed", "allowed_warning"):
+            info = {**SUBSCRIPTION_WARNING_286, "status": status}
+            raw = cli_output(verdict(), limits=(info,))
+            output, stop = fable.read_stream(io.BytesIO(raw))
+            self.assertFalse(stop)
+            self.assertEqual(output, raw)
+            data = fable.model_output(output)
+            self.assertEqual(data["overage"], {"status": status, "isUsingOverage": False})
+            self.assertNotIn("overageStatus", data["overage"])
+            ctx = type("Ctx", (), {"tool_sha256": "f" * 64})()
+            trailer = fable.run_trailer(ctx, data, "a" * 64, "fixture-run", "2.1.286 (Claude Code)")
+            self.assertIn("billing-disabled status was not reported", trailer)
+            self.assertNotIn("extra usage: blocked", trailer)
+
+    def test_subscription_exception_requires_exact_absence_boolean_and_status(self):
+        changes = [{"overageStatus": value} for value in (None, "", "unknown", "allowed", "allowed_warning")]
+        changes += [{"isUsingOverage": value} for value in (None, 0, "false", True)]
+        changes += [{"status": value} for value in (None, "rejected", "unknown", True)]
+        for change in changes:
+            info = {**SUBSCRIPTION_WARNING_286, **change}
+            with self.subTest(change=change):
+                self.assertIsNotNone(fable.overage_policy(info)[0])
+                _, stop = fable.read_stream(io.BytesIO(cli_output(verdict(), limits=(info,))))
+                self.assertIsInstance(stop, dict)
+                with self.assertRaises(fable.FableError):
+                    fable.model_output(cli_output(verdict(), limits=(info,)))
+
     def test_only_a_successful_fable_run_counts(self):
         good = fable.model_output(cli_output(verdict()))
         self.assertEqual(good["session_id"], SESSION)
@@ -249,7 +342,7 @@ class OutputTests(unittest.TestCase):
                 (cli_output(verdict(), limits=({**BLOCKED, "overageStatus": "allowed"},)), "OVERAGE_NOT_BLOCKED"),
                 (cli_output(verdict(), limits=(BLOCKED, {**BLOCKED, "isUsingOverage": True})), "OVERAGE_NOT_BLOCKED"),
                 (cli_output(verdict(), limits=({k: v for k, v in BLOCKED.items() if k != "isUsingOverage"},)),
-                 "OVERAGE_NOT_BLOCKED"),
+                 "OVERAGE_UNVERIFIED"),
                 (b"\n".join(cli_output(verdict()).split(b"\n")[:2]) + b"\n", "no result")):
             with self.subTest(reason=reason), self.assertRaisesRegex(fable.FableError, reason):
                 fable.model_output(raw)
@@ -475,7 +568,7 @@ class ConsultTests(Base):
 
 
 class PreflightTests(Base):
-    def reply(self, *, nonce=None, outside=False, denied=True, leak=False):
+    def reply(self, *, nonce=None, outside=False, denied=True, leak=False, limits=(BLOCKED,)):
         def inspect(work):
             self.nonce = (work / "note.txt").read_text().strip()
             self.outside = (work.parent / "outside.txt").read_text().strip()
@@ -485,11 +578,18 @@ class PreflightTests(Base):
             def __call__(inner, work, system, schema, prompt):
                 inspect(work)
                 inner.output = cli_output({"nonce": nonce or self.nonce, "outside_read_ok": outside},
-                                          denials=denials)
+                                          denials=denials, limits=limits)
                 if leak:
                     inner.output += json.dumps({"type": "user", "text": self.outside}).encode() + b"\n"
                 return super().__call__(work, system, schema, prompt)
         return Runner()
+
+    def test_subscription_warning_pass_preserves_missing_billing_status(self):
+        result = fable.preflight(self.context(FakeGitHub(), self.reply(limits=(SUBSCRIPTION_WARNING_286,))),
+                                 "2.1.286 (Claude Code)")
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["extra_usage"], {"status": "allowed_warning", "isUsingOverage": False})
+        self.assertNotIn("overageStatus", result["extra_usage"])
 
     def test_preflight_proves_an_inside_read_and_a_denied_outside_read(self):
         result = fable.preflight(self.context(FakeGitHub(), self.reply()), "2.1.285 (Claude Code)")

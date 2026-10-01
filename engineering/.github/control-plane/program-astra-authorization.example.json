@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "state": "PENDING",
+  "runtime_enabled": false,
+  "approved_commit": "PENDING_INDEPENDENT_AUDIT_USER_ADOPTION_AND_ACTIVATION",
+  "installed_fingerprint": "PENDING_PROTECTED_INSTALLED_BYTES",
+  "decision_pointer": "PENDING_EXPLICIT_RUNNER_ROOT_AND_SCOPED_MERGE_ADOPTION",
+  "audit_pointer": "PENDING_EXACT_HEAD_NON_AUTHOR_A3",
+  "qualification_pointer": "PENDING_ACTUAL_HOST_QUALIFICATION",
+  "qualification_sha256": "PENDING_ACTUAL_QUALIFICATION_ARCHIVE"
+}
