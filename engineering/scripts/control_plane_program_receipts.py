@@ -62,14 +62,22 @@ class Receipts:
         return (binding.get("repository"), binding.get("program"), binding.get("node"),
                 None if binding.get("program") and binding.get("node") else binding.get("issue"), action)
 
-    def _read(self, path):
+    def _read(self, path, *, temporary_links=()):
         try:
             self.trust(path)
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
             try:
                 info = os.fstat(fd)
                 self.trust(path, info=info)
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_RECORD:
+                aliases = 0
+                for scratch in temporary_links:
+                    if scratch.parent != path.parent or not re.fullmatch(r"\.tmp-[A-Za-z0-9_-]{1,64}", scratch.name):
+                        raise ReceiptError("invalid temporary journal alias")
+                    other = os.lstat(scratch)
+                    self.trust(scratch, info=other)
+                    if stat.S_ISREG(other.st_mode) and (other.st_dev, other.st_ino) == (info.st_dev, info.st_ino):
+                        aliases += 1
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 + aliases or info.st_size > MAX_RECORD:
                     raise ReceiptError("program journal must be a bounded regular file without hard links")
                 with os.fdopen(fd, "rb", closefd=False) as handle:
                     raw = handle.read(MAX_RECORD + 1)
@@ -353,12 +361,15 @@ class Receipts:
                 if not outcome or outcome["result"].get("status") not in ("ERROR", "UNKNOWN") or not failure.get("run"):
                     raise ReceiptError("unproven legacy or ambiguous request remains fenced")
                 evidence = verify(failure["run"])
+                never_attempted = (evidence.get("model_attempted") is False
+                                   and evidence.get("error_code") == "PRE_MODEL_FAILED"
+                                   and evidence.get("archive_state") == "SEALED")
                 if evidence != failure or evidence.get("program_binding") != admission["binding"] \
                         or evidence.get("terminal_evidence") != "VERIFIED" \
                         or evidence.get("process_terminated") is not True \
                         or evidence.get("publication_state") != "NOT_STARTED" \
                         or evidence.get("kind") != admission["action"] \
-                        or evidence.get("error_code") not in ("MODEL_RATE_LIMIT", "MODEL_EXECUTION_FAILED",
+                        or not never_attempted and evidence.get("error_code") not in ("MODEL_RATE_LIMIT", "MODEL_EXECUTION_FAILED",
                                                              "OVERAGE_NOT_BLOCKED", "OVERAGE_UNVERIFIED",
                                                              "WRAPPER_TIMEOUT", "STREAM_INVALID", "OUTPUT_LIMIT"):
                     raise ReceiptError("program failure evidence is ambiguous or bound to another request")

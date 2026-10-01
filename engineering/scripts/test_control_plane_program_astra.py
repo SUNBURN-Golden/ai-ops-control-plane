@@ -437,7 +437,8 @@ class ContextTests(unittest.TestCase):
         question = int(url.rsplit("-", 1)[-1])
         payload = {"repository": runtime.REPO, "issue": issue, "operation": "consult", "question": question,
                    "github_token": "token"}
-        ctx = SimpleNamespace(runs_dir=Path(self.r.temp.name), tool_sha256="a" * 64)
+        fable_tests.mock_root_evidence(self, Path(self.r.temp.name))
+        ctx = fable.Context(None, None, Path(self.r.temp.name), None, (), "a" * 64)
         calls = []
         def consult(_ctx, _repo, _issue, _question, **kwargs):
             calls.append(1)

@@ -50,6 +50,130 @@ class QuotaTests(unittest.TestCase):
         return {"status": "POSTED", "result": "PASS", "scope_result": "WITHIN_APPROVED_PLAN",
                 "program_binding": self.binding, "run": "retry-run", "comment_url": "https://github.com/result"}
 
+    def crash_after_claim(self):
+        key = self.quota_failure()
+        append = self.store._append
+        def crash(path, value):
+            if path.name == "preflight-start.json":
+                raise RuntimeError("power lost before preflight")
+            return append(path, value)
+        from unittest.mock import patch
+        with patch.object(self.store, "_append", crash), self.assertRaises(RuntimeError):
+            self.q.resume("audit", self.binding, self.invoke)
+        result = self.q.effective("audit", self.binding)
+        self.assertEqual(result["status"], "UNKNOWN")
+        return key, result
+
+    def test_operator_settles_claim_crash_append_only_without_second_wake(self):
+        key, result = self.crash_after_claim()
+        incident = result["quota_attempt"]
+        directory = self.q._path(incident)
+        before = {path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()}
+        original = self.store._path(key, "outcome").read_bytes()
+        for _ in range(2):
+            reconciled = self.q.operator_reconcile_ticket(incident, key, result["state_version"])
+            self.assertEqual(reconciled["status"], "RECONCILED_FAILED")
+        self.assertIsNone(self.q.unresolved("audit", self.binding))
+        self.assertEqual(self.q.decision_status(self.binding)["status"], "CLEAR")
+        self.assertEqual(self.q.resume("audit", self.binding, self.invoke)["status"], "BLOCKED_ERROR")
+        self.assertEqual((self.preflights, self.invocations), (0, 0))
+        self.assertEqual(self.store._path(key, "outcome").read_bytes(), original)
+        for name, content in before.items():
+            self.assertEqual((directory / name).read_bytes(), content)
+        fresh = {**self.binding, "head": "d" * 40}
+        self.assertEqual(self.q.effective("audit", fresh)["status"], "MISSING")
+
+    def test_claim_crash_operator_cas_selectors_and_locks_are_enforced(self):
+        key, result = self.crash_after_claim()
+        incident = result["quota_attempt"]
+        for other, version in (("0" * 64, result["state_version"]), (key, "0" * 64)):
+            with self.assertRaises(journal.ReceiptError):
+                self.q.operator_reconcile_ticket(incident, other, version)
+        with self.store.locked("model.lock"):
+            self.assertEqual(self.q.operator_reconcile_ticket(incident, key, result["state_version"])["status"], "BUSY")
+        self.assertIsNotNone(self.q.unresolved("audit", self.binding))
+
+    def test_claim_crash_missing_proof_attempt_marker_or_child_stays_fenced(self):
+        cases = ("missing", "false-type", "started", "child")
+        import json
+        for mode in cases:
+            with self.subTest(mode=mode):
+                # Isolate each admission from another task's UNKNOWN fence.
+                self.binding = {**self.binding, "node": mode}
+                key, result = self.crash_after_claim()
+                directory = self.q._path(result["quota_attempt"])
+                intent = directory / "preflight-intent.json"
+                if mode == "missing": intent.unlink()
+                elif mode == "false-type":
+                    value = json.loads(intent.read_bytes()); value["model_attempted"] = 0
+                    intent.write_text(json.dumps(value))
+                elif mode == "started": (directory / "preflight-start.json").write_text('{}')
+                else: self.q._child(next(t for t in self.q._tickets() if t["incident"] == result["quota_attempt"]), create=True)
+                with self.assertRaises(journal.ReceiptError):
+                    self.q.operator_reconcile_ticket(result["quota_attempt"], key, result["state_version"])
+                self.assertIsNotNone(self.q.unresolved("audit", self.binding))
+
+    def test_incident_temporary_files_do_not_block_other_program_scopes(self):
+        key, result = self.crash_after_claim()
+        directory = self.q._path(result["quota_attempt"])
+        (directory / ".tmp-leftover").write_text('{partial')
+        self.assertEqual(self.q.effective("audit", self.binding)["status"], "UNKNOWN")
+        fresh = {**self.binding, "node": "another"}
+        self.assertEqual(self.q.effective("audit", fresh)["status"], "MISSING")
+        self.assertIsNone(self.q.fair_blocked("audit", fresh))
+        self.assertEqual(self.store.execute("audit", fresh, lambda: {
+            "status": "POSTED", "program_binding": fresh})["status"], "POSTED")
+        self.assertTrue((directory / ".tmp-leftover").exists())
+        self.assertIsNotNone(self.q.unresolved("audit", self.binding))
+
+    def test_published_event_tmp_hardlink_is_ignored_without_deleting_either_record(self):
+        import os
+        key, result = self.crash_after_claim()
+        directory = self.q._path(result["quota_attempt"])
+        event = directory / 'ticket.json'; scratch = directory / '.tmp-published'
+        original = event.read_bytes(); os.link(event, scratch)
+        self.assertEqual(self.q.effective("audit", self.binding)["status"], "UNKNOWN")
+        self.assertEqual(event.read_bytes(), original)
+        self.assertEqual(scratch.read_bytes(), original)
+        outside = self.store.root / 'external-link'; os.link(event, outside)
+        with self.assertRaisesRegex(journal.ReceiptError, 'hard links'):
+            self.q.effective("audit", self.binding)
+
+    def test_root_entry_selects_childless_ticket_and_never_invokes_a_model(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import control_plane_program_astra as bridge
+        import control_plane_fable as fable
+        self.binding = {**self.binding, 'repository': 'BeautifulMind-JT/ZARI'}
+        key, result = self.crash_after_claim()
+        payload = {'repository': self.binding['repository'], 'admission': key,
+                   'expected_version': result['state_version'], 'quota_attempt': result['quota_attempt'],
+                   'github_token': 'test-only-token'}
+        ctx = SimpleNamespace(runs_dir=self.store.root.parent, tool_sha256=self.store.tool_sha)
+        with patch.object(bridge.os, 'geteuid', return_value=0), \
+                patch.dict(bridge.os.environ), patch.object(bridge.cp, 'load_config', return_value={'repository': payload['repository']}), \
+                patch.object(bridge, 'installed_fingerprint', return_value=self.store.tool_sha), \
+                patch.object(bridge, 'require_service_authorization'), patch.object(bridge, 'Receipts', return_value=self.store):
+            settled = bridge.operator_reconcile(ctx, fable, payload)
+        self.assertEqual(settled['status'], 'RECONCILED_FAILED')
+        self.assertEqual((self.preflights, self.invocations), (0, 0))
+        with patch.object(bridge.os, 'geteuid', return_value=91), self.assertRaises(bridge.BridgeError):
+            bridge.operator_reconcile(ctx, fable, payload)
+
+    def test_incomplete_ticket_with_only_temporary_file_admits_nothing(self):
+        directory = self.q.root / ("e" * 64); directory.mkdir()
+        (directory / ".tmp-write").write_text('{partial')
+        self.assertEqual(list(self.q._tickets()), [])
+        self.assertEqual(self.q.effective("audit", self.binding)["status"], "MISSING")
+
+    def test_temporary_symlink_or_directory_remains_invalid_not_evidence(self):
+        directory = self.q.root / ("e" * 64); directory.mkdir()
+        target = self.q.root / 'target'; target.write_text('untrusted')
+        scratch = directory / '.tmp-link'; scratch.symlink_to(target)
+        with self.assertRaises(journal.ReceiptError): list(self.q._tickets())
+        scratch.unlink(); scratch.mkdir()
+        with self.assertRaises(journal.ReceiptError): list(self.q._tickets())
+
     def test_one_retry_preserves_original_error_and_exact_program_binding(self):
         key = self.quota_failure()
         original = self.store._path(key, "outcome").read_bytes()

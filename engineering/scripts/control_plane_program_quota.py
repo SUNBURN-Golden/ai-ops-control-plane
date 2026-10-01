@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
+import stat
 import time
 
 import control_plane_program_receipts as journal
@@ -111,10 +113,10 @@ class Quota:
             ticket_path = path / "ticket.json"
             if not os.path.lexists(ticket_path):
                 # A crash after mkdir and before ticket creation admitted nothing.
-                if list(path.iterdir()):
+                if any(not self._temporary(child) for child in path.iterdir()):
                     raise journal.ReceiptError("quota ticket is incomplete")
                 continue
-            ticket = self.store._read(ticket_path)
+            ticket = self._record(ticket_path)
             fields = {"schema_version", "incident", "parent_admission", "parent_admission_sha256",
                       "parent_outcome_sha256", "parent_settlement_sha256", "action", "binding",
                       "tool_sha256", "reset_at_epoch_ms"}
@@ -133,16 +135,80 @@ class Quota:
                                                                "parent": ticket["parent_admission"],
                                                                "settlement": settlement}):
                 raise journal.ReceiptError("quota ticket parent binding is invalid")
-            allowed = {"ticket.json", "claim.json", "preflight.json", "terminal.json", "attempt"}
-            if any(child.name not in allowed for child in path.iterdir()):
+            allowed = {"ticket.json", "claim.json", "preflight.json", "terminal.json", "attempt",
+                       "preflight-intent.json", "preflight-start.json", "operator-settlement.json"}
+            if any(child.name not in allowed and not self._temporary(child) for child in path.iterdir()):
                 raise journal.ReceiptError("quota ticket has an unexpected event")
             yield ticket
+
+    def _temporary(self, path):
+        """Unpublished atomic-write scratch is not an event or a retry grant."""
+        if not re.fullmatch(r"\.tmp-[A-Za-z0-9_-]{1,64}", path.name):
+            return False
+        info = os.lstat(path)
+        self.store.trust(path, info=info)
+        # A crash between link publication and tmp unlink can leave nlink=2.
+        # Scratch is ignored as authority. The named event reader separately
+        # accounts for protected same-inode scratch aliases without deleting them.
+        if not stat.S_ISREG(info.st_mode) or info.st_size > journal.MAX_RECORD:
+            raise journal.ReceiptError("quota temporary file is not protected bounded scratch")
+        return True
+
+    def _record(self, path):
+        # An interrupted link()/unlink() publication leaves the named immutable
+        # event and a root-owned .tmp alias with the same inode. Accept only
+        # fully enumerated scratch aliases in this incident directory. An
+        # external hard link still fails the journal's descriptor check.
+        aliases = [child for child in path.parent.iterdir() if self._temporary(child)]
+        if len(aliases) > 64:
+            raise journal.ReceiptError("quota scratch inventory needs operator archival")
+        return self.store._read(path, temporary_links=aliases)
+
+    def _never_started_proof(self, ticket):
+        directory = self._path(ticket["incident"])
+        intent = self._record(directory / "preflight-intent.json")
+        expected = {"schema_version": 1, "incident": ticket["incident"],
+                    "ticket_sha256": journal.digest(ticket), "model_attempted": False}
+        if intent != expected or intent.get("model_attempted") is not False \
+                or type(intent.get("schema_version")) is not int or self._child(ticket) is not None \
+                or any(os.path.lexists(directory / name) for name in
+                       ("preflight-start.json", "preflight.json", "terminal.json")):
+            raise journal.ReceiptError("quota wake is not proven never attempted")
+        if not self._claimed(ticket):
+            raise journal.ReceiptError("quota wake has no consumed claim")
+        claim = self._record(directory / "claim.json")
+        proof = {"ticket": ticket, "claim": claim, "intent": intent}
+        return proof, journal.digest(proof)
+
+    def operator_reconcile_ticket(self, incident, admission, expected_version):
+        """Root entry's childless selector: append settlement, never another wake."""
+        matches = [ticket for ticket in self._tickets() if ticket["incident"] == incident
+                   and ticket["parent_admission"] == admission]
+        if len(matches) != 1:
+            raise journal.ReceiptError("operator quota parent selector is invalid")
+        ticket = matches[0]
+        scope = journal.digest(list(self.store.scope(ticket["action"], ticket["binding"])))
+        with self.store.locked(scope + ".scope.lock") as acquired:
+            if not acquired:
+                return {"status": "RUNNING"}
+            with self.store.locked("model.lock") as acquired:
+                if not acquired:
+                    return {"status": "BUSY"}
+                proof, version = self._never_started_proof(ticket)
+                if expected_version != version:
+                    raise journal.ReceiptError("operator quota state version is stale")
+                event = {"schema_version": 1, "incident": incident, "parent_admission": admission,
+                         "resolution": "CONSUMED_NO_CHILD", "model_attempted": False,
+                         "evidence_sha256": journal.digest(proof), "expected_version": version}
+                self.store._append(self._path(incident) / "operator-settlement.json", event)
+                return {"status": "RECONCILED_FAILED", "quota_attempt": incident,
+                        "parent_admission": admission, "state_version": version}
 
     def _claimed(self, ticket):
         path = self._path(ticket["incident"]) / "claim.json"
         if not os.path.lexists(path):
             return False
-        claim = self.store._read(path)
+        claim = self._record(path)
         expected = {"schema_version": 1, "incident": ticket["incident"],
                     "ticket_sha256": journal.digest(ticket),
                     "nonce": journal.digest({"incident": ticket["incident"], "wake": 1})}
@@ -163,10 +229,23 @@ class Quota:
         if not self._claimed(ticket):
             return None
         child = self._child(ticket)
+        operator_path = self._path(ticket["incident"]) / "operator-settlement.json"
+        if os.path.lexists(operator_path):
+            proof, version = self._never_started_proof(ticket)
+            event = self._record(operator_path)
+            if event.get("model_attempted") is not False or type(event.get("schema_version")) is not int \
+                    or event != {"schema_version": 1, "incident": ticket["incident"],
+                         "parent_admission": ticket["parent_admission"], "resolution": "CONSUMED_NO_CHILD",
+                         "model_attempted": False, "evidence_sha256": journal.digest(proof),
+                         "expected_version": version}:
+                raise journal.ReceiptError("operator quota settlement is invalid")
+            return {"status": "BLOCKED_ERROR", "resolution": "CONSUMED_NO_CHILD",
+                    "reason": "operator settled a sealed never-attempted quota wake; no retry",
+                    "quota_attempt": ticket["incident"], "parent_admission": ticket["parent_admission"]}
         terminal_path = self._path(ticket["incident"]) / "terminal.json"
         terminal = None
         if os.path.lexists(terminal_path):
-            terminal = self.store._read(terminal_path)
+            terminal = self._record(terminal_path)
             fields = {"schema_version", "incident", "status", "reason"}
             consumed_fields = fields | {"resolution", "preflight_sha256"}
             if set(terminal) not in (fields, consumed_fields) \
@@ -194,6 +273,12 @@ class Quota:
                 result = terminal
             else:
                 result = {"status": "UNKNOWN", "reason": "claimed quota wake has no durable terminal result"}
+                try:
+                    _, version = self._never_started_proof(ticket)
+                except journal.ReceiptError:
+                    pass
+                else:
+                    result["state_version"] = version
         elif result.get("status") == "RUNNING":
             result = {**result, "status": "UNKNOWN"}
         if result.get("status") == "POSTED":
@@ -201,7 +286,7 @@ class Quota:
         return {**result, "quota_attempt": ticket["incident"], "parent_admission": ticket["parent_admission"]}
 
     def _preflight_proof(self, ticket):
-        proof = self.store._read(self._path(ticket["incident"]) / "preflight.json")
+        proof = self._record(self._path(ticket["incident"]) / "preflight.json")
         if set(proof) != {"schema_version", "incident", "preflight_sha256"} \
                 or type(proof.get("schema_version")) is not int or proof["schema_version"] != 1 \
                 or proof.get("incident") != ticket["incident"] \
@@ -406,7 +491,14 @@ class Quota:
                 claim = {"schema_version": 1, "incident": ticket["incident"],
                          "ticket_sha256": journal.digest(ticket),
                          "nonce": journal.digest({"incident": ticket["incident"], "wake": 1})}
+                self.store._append(directory / "preflight-intent.json", {
+                    "schema_version": 1, "incident": ticket["incident"],
+                    "ticket_sha256": journal.digest(ticket), "model_attempted": False})
                 self.store._append(directory / "claim.json", claim)
+                # Absence of this durable marker proves a crash just after claim
+                # did not invoke preflight. After it, ambiguity remains fenced.
+                self.store._append(directory / "preflight-start.json", {
+                    "schema_version": 1, "incident": ticket["incident"], "model_attempted": True})
                 try:
                     preflight = self.fresh_preflight()
                 except Exception as exc:

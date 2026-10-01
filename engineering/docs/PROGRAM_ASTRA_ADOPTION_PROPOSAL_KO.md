@@ -6,7 +6,7 @@
 
 - 결정자: User 박준태.
 - 결정 원문: 「대표님 결정(2026-10-01): Fable #46 감사의 질문에 **A, Option C 채택**. 결정 기록과 위치를 PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md에 남긴다. 설치와 활성화는 아래 수정과 #47 재감사 뒤에 한다.」
-- 결정 출처: 2026-10-01 User의 「수정 요청 3 (중앙 #47, Fable #46 감사 F1~F3)」 직접 지시. 이 파일의 본 절이 저장소 내 결정 기록 위치다. 이 기록을 담은 #47 커밋의 파일/절 포인터로 확인하며, 별도의 감사 PASS나 실제 host qualification이 있었다고 주장하지 않는다.
+- 결정 출처 및 durable pointer: [대표님 결정 원문 (2026-10-01)](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/47#issuecomment-5927605393). 원문은 A / Option C 채택에 위임 노드의 Fable PASS 후 자동 병합과 runner의 고정 root 명령 1개 예외가 포함됨을 명시한다. 계약 변경 YES·RELEASE·user_merge는 제외하며, 권한 사용은 설치·qualification·activation 뒤다. PA-1 bridge 설치 전에는 프로그램 모드를 켜지 않고 일반 재개도 이 bridge에 의존함을 수용한다. 이 절은 「수정 요청 3」의 직접 지시와 해당 원문 댓글을 연결하는 저장소 내 결정 기록이며, 감사 PASS나 실제 host qualification을 대신하지 않는다.
 - 채택 범위: A 및 제한된 Option C의 정책 선택. 승인된 ordinary task 범위의 고정 감사·상담과 제한된 실행/병합 위임이며, 아래의 고정 root bridge 예외도 해당 경계 안에서만 적용한다. 계약 변경·RELEASE·User-only·승인 범위 밖의 판단은 계속 User 경로다.
 - 선행 수정: F1은 protected receipt의 `contract_change == "NO"`를 요구하고 YES/누락을 USER_REQUIRED로 유지한다. F2는 설치 전 운영 경로인 M5 Slack 상담 요청을 보존한다. F3는 runner-root 예외를 일반 설치용 sudoers에서 분리하여 별도 채택 후보 파일로 둔다. F4~F9는 이 요청의 수정 범위 밖이다.
 - 배포 조건: F1~F3 반영 → **중앙 #47 최종 exact HEAD 독립 재감사** → 승인된 버전의 설치와 실제 host qualification/보호된 service authorization → 별도 활성화. 이 절은 재감사 결과·설치 완료·qualification 증거·활성화 record를 대신하지 않는다. 현재는 어느 작업도 실행하지 않았다.
@@ -24,7 +24,7 @@ RELEASE는 A3 정규화 전에 자동 병합 위임을 거부하며 source gate�
 
 runner는 오직 `sudo -n /opt/aiops/bin/aiops-fable program` 고정 root bridge를 호출하는 후보 예외만 갖는다. bounded JSON stdin, 등록된 repository/profile, canonical host task/plan/writer/PR/head, 제한된 operation과 protected current activation/adoption/fingerprint를 확인한다. shell/임의 Python/임의 argv/환경 보존/root ledger reconcile/자격증명 읽기 권한을 주지 않는다. builder에는 이 예외가 없다.
 
-원래 runner root 실행 금지의 예외에 대한 정책 선택은 위 PA-1 절에 기록했다. **이 절의 커밋된 포인터, #47 최종 exact-HEAD 재감사, 실제 설치·qualification·protected authorization이 모두 필요**하다. 그 전에는 `.github/control-plane/sudoers-aiops-program-astra.candidate`의 예외를 설치하거나 자동 경로를 사용하지 않는다. 일반 설치용 sudoers 예시에는 이 runner-root 규칙을 넣지 않는다. 계정/서비스 설치는 실행하지 않았으며 기존 M5 운영자 경로를 유지한다.
+원래 runner root 실행 금지의 예외에 대한 정책 선택은 위 PA-1 절에 기록했다. **[대표님 원문 durable pointer](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/47#issuecomment-5927605393), 이 절의 커밋된 기록, #47 최종 exact-HEAD 재감사, 실제 설치·qualification·protected authorization이 모두 필요**하다. 그 전에는 `.github/control-plane/sudoers-aiops-program-astra.candidate`의 예외를 설치하거나 자동 경로를 사용하지 않는다. 일반 설치용 sudoers 예시에는 이 runner-root 규칙을 넣지 않는다. 계정/서비스 설치는 실행하지 않았으며 기존 M5 운영자 경로를 유지한다.
 
 ## 설치 후에도 별도인 서비스 admission
 

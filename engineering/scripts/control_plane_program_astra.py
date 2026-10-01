@@ -200,6 +200,14 @@ def operator_reconcile(ctx, fable, payload):
         quota = quota_runtime.Quota(store, lambda run: fable.verify_failure_evidence(ctx, run),
                                    lambda: (_ for _ in ()).throw(BridgeError("operator entry never runs a model")),
                                    lambda *_: None)
+        # A parent selector names only a claimed, childless, never-started wake.
+        # Child selectors retain the existing terminal-run verifier below.
+        parent = store.admission(payload["admission"]) if os.path.lexists(
+            store._path(payload["admission"], "admission")) else None
+        if parent is not None:
+            if parent["binding"].get("repository") != cfg["repository"]:
+                raise BridgeError("reconciliation admission targets another repository")
+            return quota.operator_reconcile_ticket(incident, payload["admission"], payload["expected_version"])
         store = quota.operator_store(incident, payload["admission"])
     admission = store.admission(payload["admission"])
     if admission["binding"].get("repository") != cfg["repository"]:
@@ -441,6 +449,9 @@ def run(ctx, fable, payload):
             return fable.consult(ctx, repository, issue_number, binding["question"], ref=binding["source"], again=True,
                                  program_context={"binding": binding, "node": node,
                                                   "approval_pointer": plan["approval_pointer"]})
+    request = invoke
+    def invoke():
+        return ctx.program_invoke(action, binding, issue_number, request)
     if operation == "quota-resume":
         return quota.resume(action, binding, invoke)
     unresolved = quota.unresolved(action, binding)

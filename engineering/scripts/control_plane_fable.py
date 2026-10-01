@@ -309,7 +309,7 @@ def failure_of(raw, *, version="", execution=None, observed_at_epoch_ms=None):
                 or any(event.get("type") == "result" for event in events)):
             return failure
         event = events[index]
-        lines = [line for line in raw.splitlines() if line.strip()]
+        lines = output_lines(raw)
         code, _ = overage_policy(event.get("rate_limit_info"))
         if (event.get("type") != "rate_limit_event"
                 or code not in ("OVERAGE_NOT_BLOCKED", "OVERAGE_UNVERIFIED")
@@ -324,7 +324,7 @@ def failure_of(raw, *, version="", execution=None, observed_at_epoch_ms=None):
         failure["error_code"] = "RESULT_INVALID"
         return failure
     index, result = results[0]
-    raw_lines = [line for line in raw.splitlines() if line.strip()]
+    raw_lines = output_lines(raw)
     failure["raw_result_sha256"] = sha256_bytes(raw_lines[index])
     status = result.get("api_error_status")
     if type(status) is int and 100 <= status <= 599:
@@ -535,9 +535,14 @@ def overage_violation(info):
     return overage_policy(info)[1]
 
 
+def output_lines(raw):
+    """JSONL uses byte LF only; Unicode separators belong to JSON strings."""
+    return [line.rstrip(b"\r") for line in raw.split(b"\n") if line.strip()]
+
+
 def events_of(raw):
     try:
-        events = [strict_json(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
+        events = [strict_json(line.decode("utf-8")) for line in output_lines(raw)]
     except (ValueError, UnicodeDecodeError, RecursionError):
         raise FableError("model output is not JSON lines") from None
     if not all(isinstance(event, dict) for event in events):
@@ -778,7 +783,7 @@ class Runner:
             env=child_env(self.home), cwd="/", capture_output=True, text=True, timeout=600, check=False,
             user=self.uid, group=self.gid, extra_groups=[])
         if completed.returncode or completed.stdout.strip() or completed.stderr.strip():
-            return (completed.stdout.strip() or completed.stderr.strip() or str(work)).splitlines()[0][:300]
+            return (completed.stdout.strip() or completed.stderr.strip() or str(work)).split("\n")[0][:300]
         return None
 
     def __call__(self, work, system, schema, prompt):
@@ -945,6 +950,27 @@ def verify_failure_evidence(ctx, run_id):
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
         raise FableError("failure run is not protected")
     record = protected_json(run / "failure-evidence.json", 65536)
+    if record.get("error_code") == "PRE_MODEL_FAILED":
+        metadata = protected_json(run / "request-intent.json", 65536)
+        expected = {"schema_version": 1, "run": run_id, "kind": metadata.get("kind"),
+                    "program_binding": metadata.get("program_binding"), "tool_sha256": ctx.tool_sha256,
+                    "model_attempted": False, "publication_state": "NOT_STARTED"}
+        forbidden = ("model-invoke-intent.json", "model-attempt.json", "claude-output.jsonl",
+                     "publish-intent.json", "publish-response.json", "comment.md", "run.json")
+        unsigned = {key: value for key, value in record.items() if key != "evidence_sha256"}
+        if metadata != expected or metadata.get("model_attempted") is not False \
+                or record.get("model_attempted") is not False \
+                or type(metadata.get("schema_version")) is not int \
+                or type(record.get("schema_version")) is not int \
+                or metadata["kind"] not in ("audit", "consult") \
+                or record != {"schema": FAILURE_SCHEMA, **expected, "error_code": "PRE_MODEL_FAILED",
+                              "terminal_evidence": "VERIFIED", "process_terminated": True,
+                              "archive_state": "SEALED", "intent_sha256": sha256_bytes(canonical_bytes(metadata)),
+                              "evidence_sha256": sha256_bytes(canonical_bytes(unsigned))} \
+                or any(os.path.lexists(run / name) for name in forbidden):
+            raise FableError("pre-model evidence is not a sealed never-attempted request")
+        check_secrets(canonical_bytes(record).decode(), ctx.secret_values)
+        return record
     metadata = protected_json(run / "model-attempt.json", 65536)
     if (not isinstance(record, dict) or record.get("schema") != FAILURE_SCHEMA
             or type(record.get("schema_version")) is not int or record["schema_version"] != 1
@@ -995,6 +1021,32 @@ class Context:
         self.secret_values, self.tool_sha256 = secret_values, tool_sha256
         self.claude_version, self.last_failure = "", None
         self._runs = {}
+        self._program_request = None
+
+    def program_invoke(self, kind, binding, number, invoke):
+        """Seal intent before GitHub/archive work; only a never-started failure settles."""
+        if self._program_request is not None:
+            raise FableError("nested program request is forbidden")
+        run_id, run = self.new_run(kind, binding["repository"], number)
+        metadata = {"schema_version": 1, "run": run_id, "kind": kind, "program_binding": binding,
+                    "tool_sha256": self.tool_sha256, "model_attempted": False,
+                    "publication_state": "NOT_STARTED"}
+        sealed_file(run / "request-intent.json", canonical_bytes(metadata))
+        self._program_request = run
+        try:
+            return invoke()
+        except Exception as exc:
+            if not os.path.lexists(run / "model-invoke-intent.json"):
+                failure = {"schema": FAILURE_SCHEMA, **metadata, "error_code": "PRE_MODEL_FAILED",
+                           "terminal_evidence": "VERIFIED", "process_terminated": True,
+                           "archive_state": "SEALED", "intent_sha256": sha256_bytes(canonical_bytes(metadata))}
+                failure["evidence_sha256"] = sha256_bytes(canonical_bytes(failure))
+                sealed_file(run / "failure-evidence.json", canonical_bytes(failure))
+                raise FableError("PRE_MODEL_FAILED: " + str(exc),
+                                 failure=failure) from None
+            raise
+        finally:
+            self._program_request = None
 
     def new_run(self, kind, repository, number):
         run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + secrets.token_hex(4)
@@ -1021,6 +1073,11 @@ class Context:
         check_secrets(canonical_bytes(metadata).decode(), self.secret_values)
         sealed_file(run / "model-attempt.json", canonical_bytes(metadata))
         self.last_failure = None
+        if self._program_request is not None:
+            # This durable transition must precede the runner even if it raises.
+            sealed_file(self._program_request / "model-invoke-intent.json",
+                        canonical_bytes({"schema_version": 1, "model_attempted": True,
+                                         "model_run": metadata["run"]}))
         try:
             code, out, err = self.runner(run / "work", system, schema, prompt)
             execution = getattr(self.runner, "last_execution", {})

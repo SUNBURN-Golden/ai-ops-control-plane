@@ -782,9 +782,12 @@ read the host ledger, the plan at the host-recorded `plan_commit`, and live PR
 state. The control record is a projection.
 
 Writer (`operation=start`):
-- `depends_on` nodes must be DONE (their pinned delivery PR merged at the
-  delivered head); otherwise `WAITING_ON_DEPENDENCIES`; program nodes are PR
-  deliverables only;
+- `depends_on` nodes must have `delivery_completion(...).status == DONE`;
+  merge at the pinned delivered head is necessary but is not sufficient for a
+  profile requiring post-merge verification. `MERGED_POST_VERIFY` waits for
+  exact merge-commit CI/locked-blob evidence; `POST_MERGE_FAILED` holds the
+  successor and requires a corrective task. Otherwise return
+  `WAITING_ON_DEPENDENCIES`; program nodes are PR deliverables only;
 - the host plan commit advances only right before the envelope is rewritten;
 - a record in SUBMITTING or UNKNOWN whose request the host has fenced
   (FAILED_PRESTART or RECONCILED) resumes as attempt + 1;
@@ -804,8 +807,10 @@ Session release (`operation=reap`):
   list, thaw);
 - an adapter's FAILED_PRESTART frees the slot only after the host sees the
   lane empty; otherwise the launch is UNKNOWN and the slot is kept;
-- `start` returns DONE, and never redispatches, once the pinned delivery PR is
-  merged at its delivered head;
+- `start` returns the `delivery_completion` result for a merged pinned delivery
+  and never redispatches it: `DONE` only after its completion predicate passes,
+  `MERGED_POST_VERIFY` while required post-merge evidence is pending, or
+  `POST_MERGE_FAILED` when that verification fails. Merge alone is not DONE;
 - the control record shows `RELEASED`; ownership is unchanged;
 - UNKNOWN or SUBMITTING stays operator-only (§9).
 

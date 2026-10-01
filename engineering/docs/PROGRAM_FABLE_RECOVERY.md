@@ -48,7 +48,8 @@ UNKNOWN without that evidence stays fenced, including legacy unproven failures.
 
 ## Protective stop and fixed-command account lease
 
-User approved fix-request item 9 on 2026-10-01: an otherwise valid
+User approved fix-request item 9 on 2026-10-01. Durable decision pointer:
+[대표님 원문 — 수정 요청 9번 승인](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/47#issuecomment-5927605393). An otherwise valid
 `rate_limit_event.rate_limit_info` may omit `overageStatus` only when `status` is
 exactly `allowed` or `allowed_warning` and `isUsingOverage` is the boolean `false`.
 The realtime guard, terminal output validation and ordinary preflight share that
@@ -233,3 +234,46 @@ host may resume admissions against the migrated state.
 The external completion/evidence/query and DAG-proposal work in CP-E04–08 remains
 separate. A failure recovery candidate alone does not make all 98 product nodes
 implemented, externally qualified, accepted or released.
+
+
+## Never-attempted operator reconciliation (Fable #47 F4)
+
+An ordinary program admission seals `request-intent.json` before GitHub/archive
+work and seals `model-invoke-intent.json` **before** calling the runner. An error
+with no attempt marker can produce a protected `PRE_MODEL_FAILED` envelope with
+exact bool `model_attempted=false`. The verifier rechecks the intent, exact
+binding/tool/run/digests, all protected files and absence of attempt/publication
+markers. HEAD_MOVED, GitHub transport and source archive failures may qualify;
+missing/unreadable evidence, an attempted runner or ambiguous publication never
+qualifies merely because an exception was raised. Legacy unproved ERROR/UNKNOWN
+remains fenced. An archive-sealing failure creates no fabricated proof.
+
+Only the separate root-only `aiops-fable program-reconcile` entry may consume
+this proof. Use the admission ID and `state_version` reported by the receipt;
+the journal appends its settlement without rewriting admission/outcome, granting
+PASS or retrying the same binding. The coordinator has no reconciliation
+operation. Repeated root calls with the same version are idempotent; stale
+versions, another repository/binding, missing service authorization and held
+scope/model locks refuse settlement.
+
+For a crash just after quota `claim.json`, the protected ticket already contains
+`preflight-intent.json` with `model_attempted=false`. `preflight-start.json` is
+sealed before the fresh preflight callback. A claimed ticket without that start
+marker, a child, a preflight result or a terminal event reports UNKNOWN with a
+`state_version` bound to ticket/claim/intent. The operator submits that version,
+`quota_attempt=<incident id>` and `admission=<parent admission id>` to the same
+root-only entry (all selectors are opaque IDs, never paths). It verifies the
+sealed never-started proof under both locks and appends
+`operator-settlement.json` with `CONSUMED_NO_CHILD`. The claim remains consumed:
+no second automatic wake, preflight or model run is granted. A child admission
+continues to use the existing run-evidence verifier; a claimed legacy ticket
+without the new proof, or any preflight-start/child ambiguity, remains fenced.
+
+Private root-owned bounded regular `.tmp-` files inside a quota incident are
+unpublished scratch, never journal events. They are retained and ignored. If an
+interrupted atomic link publication leaves both the named event and its `.tmp-`
+alias, only same-directory protected scratch aliases explaining every descriptor
+hard link are accepted; an external hard link, symlink, foreign owner or writable
+scratch is refused. This creates no ticket/admission/claim and releases no
+UNKNOWN fence. A directory containing only unpublished scratch has admitted
+nothing and does not block unrelated program scopes.

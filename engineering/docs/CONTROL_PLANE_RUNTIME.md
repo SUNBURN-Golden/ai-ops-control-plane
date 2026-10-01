@@ -327,9 +327,21 @@ sudo env GH_TOKEN="$(gh auth token)" /opt/aiops/bin/aiops-fable consult \
   훅·MCP·CLAUDE.md·저장소 설정이 없다. 환경 변수는 HOME, PATH, LANG, Claude 토큰, 자동 업데이트·비필수 통신 끄기뿐이다.
   `--fallback-model`은 쓰지 않고, 거절 시 자동 모델 전환도 끈다(`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`).
   Fable을 쓸 수 없거나 거절하면 실패하고 기다린다.
-- **추가 과금 차단:** CLI 출력(stream-json)의 `rate_limit_event`가 `overageStatus: "rejected"`, `isUsingOverage: false`여야 한다.
-  초과 사용(extra usage)이 막혀 있다는 뜻이다. 차단되지 않았다는 명시적 값이 나오면 그 즉시 실행을 끊고 아무것도 올리지 않는다
-  (`OVERAGE_NOT_BLOCKED`). 값이 없거나 형식을 확인할 수 없어도 즉시 끊는다(`OVERAGE_UNVERIFIED`).
+- **추가 과금 신호 검사:** `overage_policy`는 CLI 출력(stream-json)의 `rate_limit_event`를 아래 표와 동일하게 검사한다.
+
+  <!-- FABLE_OVERAGE_POLICY_V1 -->
+  | overageStatus | status | isUsingOverage | 처리 | 의미 |
+  |---|---|---|---|---|
+  | `rejected` | 무관 | 정확히 bool `false` | CONTINUE | 추가 사용 차단 신호 |
+  | 키 없음 | `allowed` 또는 `allowed_warning` | 정확히 bool `false` | CONTINUE | 승인된 구독 실행 신호; 과금 차단 확인 아님; quota 재시도 없음 |
+  | 그 밖의 모든 조합 | 무관 | 무관 | STOP | OVERAGE_NOT_BLOCKED 또는 OVERAGE_UNVERIFIED |
+  <!-- /FABLE_OVERAGE_POLICY_V1 -->
+
+  `overageStatus` 키 없음은 null과 다르다. `isUsingOverage`가 true이거나 `overageStatus`가
+  allowed/allowed_warning이면 `OVERAGE_NOT_BLOCKED`, 그 밖의 불명·누락·잘못된 타입은
+  `OVERAGE_UNVERIFIED`로 즉시 끊고 아무것도 올리지 않는다. 표의 두 CONTINUE 경우 외에는 모두 중단한다.
+  승인된 구독 실행 신호에서는 누락 값을 rejected로 합성하지 않으며, "과금 차단 확인"이라고 주장하지 않는다.
+  이 신호로는 quota 재시도 admission을 만들지 않는다.
   첫 요청 뒤에야 신호가 오므로, 초과 사용이 켜진 계정이라도 한 실행에서 새는 양은 첫 요청 하나로 제한된다.
   확실히 0원으로 하려면 claude.ai 설정 > 사용량(Usage)에서 추가 사용량(usage credits)과 자동 충전을 끈다.
   `ANTHROPIC_API_KEY`는 모델 환경에 넘기지 않으므로 API 종량 과금 경로도 없다.
