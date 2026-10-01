@@ -1,0 +1,30 @@
+{
+  "schema": "AIOPS_INSPECT_CONFIG_V1",
+  "stage": "DRY",
+  "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
+  "targets": [
+    {"repository": "BeautifulMind-JT/kix-protocol", "prefix": "KIXP"},
+    {"repository": "BeautifulMind-JT/kix-commerce-apps", "prefix": "KIXC"},
+    {"repository": "BeautifulMind-JT/ZARI", "prefix": "ZARI"},
+    {"repository": "BeautifulMind-JT/film-unit-mv-studio", "prefix": "FILM"},
+    {"repository": "BeautifulMind-JT/maeum-gyeol", "prefix": "MAEU"}
+  ],
+  "ledger_issue": 0,
+  "test_ledger_issue": 0,
+  "slack": {
+    "team_id": "T00000000",
+    "bot_user_id": "U00000000",
+    "channel_id": "C00000000",
+    "test_channel_id": "C00000001"
+  },
+  "user_login": "BeautifulMind-JT",
+  "host_helper": "/opt/astra/bin/astra-host-control",
+  "ledger_account": "aiops-inspect-ledger",
+  "render_account": "aiops-plot",
+  "tick_minute": 17,
+  "daily_hour_kst": 9,
+  "deadman_hours": 3,
+  "contract_pairs": [],
+  "test_path_regex": "(^|/)(tests?|__tests__|spec)/|(_test|[.]test|[.]spec)[.]",
+  "thresholds": {}
+}

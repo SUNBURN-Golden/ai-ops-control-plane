@@ -1,0 +1,22 @@
+# /etc/sudoers.d/aiops-inspector  (root:root 0440; the file name must contain no dot)
+# AIOPS program inspector (User decision M7, docs/INSPECTOR.md): three host-ledger reads.
+# Arguments are anchored POSIX regular expressions (sudo >= 1.9.10) that mirror the
+# helper's own validators and control_plane_inspect_host.py's argv builders exactly.
+# No ':', '#', ',' or '=' is used inside a rule. Everything is literal; nothing to replace.
+#
+# THIS FILE IS THE REAL ALLOWLIST. The helper's authorize_identity
+# (scripts/control_plane_host.py) refuses only builder lane UIDs and the control UID,
+# and the runner only for operator-only commands. Any other sudo-authenticated caller,
+# including aiops-inspect-ledger, passes it for EVERY verb (reap, reconcile, init,
+# migrate, materialize-*, preflight). So only these three lines keep the inspector to
+# reads. The inspector never calls the helper as root: the root tool drops to
+# aiops-inspect-ledger (no extra groups, clean environment, no stdin) before sudo -n,
+# so SUDO_UID is that account. Validate with: visudo -cf /etc/sudoers.d/aiops-inspector
+# and check that sudo -l -U aiops-inspect-ledger lists exactly these three commands.
+
+Cmnd_Alias AIOPS_INSPECT_READ = \
+    /opt/astra/bin/astra-host-control ^status --lanes$, \
+    /opt/astra/bin/astra-host-control ^task-status --repository [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+ --task [A-Z0-9][A-Z0-9._-]*$, \
+    /opt/astra/bin/astra-host-control ^materialize-status --program [A-Za-z0-9][A-Za-z0-9._-]* --node [A-Za-z0-9][A-Za-z0-9._-]*$
+
+aiops-inspect-ledger ALL=(astra-control) NOPASSWD: AIOPS_INSPECT_READ

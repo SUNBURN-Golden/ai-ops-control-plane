@@ -457,11 +457,92 @@ def effective_floor(plan_floor: str, verdicts: List[tuple]) -> str:
     return max([plan_floor] + [verdict["required"] for _, verdict in verdicts], key=AUDIT_FLOORS.index)
 
 
-def merged_delivery(api: cp.GithubApi, pin: Optional[Dict[str, Any]]) -> bool:
-    if pin is None:
+# --------------------------------------------------------------------------- completion (User decision M7)
+
+# How far one plan node has come, computed in one place for the runtime and the read-only inspector.
+COMPLETION_STAGES = ("PLANNED", "MATERIALIZING", "NOT_STARTED", "IN_PROGRESS", "DELIVERED", "DONE")
+# Deployment and real-use verification have no central record yet; nothing may claim them.
+POST_MERGE_NOT_RECORDED = "NOT_RECORDED"
+
+
+def delivery_merged(pin: Optional[Dict[str, Any]], pr: Optional[Dict[str, Any]]) -> bool:
+    """The one completion test (User decision M7): the host-pinned DELIVERY PR is merged at the delivered head."""
+    if not isinstance(pin, dict) or not isinstance(pr, dict):
         return False
-    pr = api._request("GET", f"/pulls/{pin['pr']}")
-    return pr.get("merged") is True and (pr.get("head") or {}).get("sha") == pin["head"]
+    # CONTRACT NOTE: a pin without a string head never matches (the old code raised KeyError; a missing
+    # head must not equal a PR with no head sha either).
+    head = pin.get("head")
+    pr_head = pr.get("head") or {}
+    return (pr.get("merged") is True and isinstance(head, str) and bool(head)
+            and isinstance(pr_head, dict) and pr_head.get("sha") == head)
+
+
+def _required_names(required: Any) -> Optional[List[str]]:
+    """The declared required check names, or None when not configured or malformed (as merge_check reads them)."""
+    if required is None or isinstance(required, (str, bytes, dict)):
+        return None
+    try:
+        names = list(required)
+    except TypeError:
+        return None
+    if not names or not all(isinstance(name, str) and name.strip() for name in names):
+        return None
+    return names
+
+
+def required_checks_state(required: Iterable[str], runs: List[Dict[str, Any]]) -> str:
+    """Post-merge required checks on one commit, with merge_check's rule (latest run per name must be
+    completed+success). Returns "NOT_CONFIGURED" | "PASS" | "FAIL" | "PENDING"."""
+    names = _required_names(required)
+    if names is None:
+        return "NOT_CONFIGURED"
+    latest = latest_check_runs([run for run in (runs if isinstance(runs, list) else []) if isinstance(run, dict)])
+    failed = pending = False
+    for name in names:
+        named = [run for run in latest if run.get("name") == name]
+        if not named:
+            pending = True
+        for run in named:
+            if run.get("status") != "completed":
+                pending = True
+            elif run.get("conclusion") != "success":
+                failed = True
+    return "FAIL" if failed else ("PENDING" if pending else "PASS")
+
+
+def node_completion(mstatus: Optional[Dict[str, Any]], repository: str, rows: Optional[List[Dict[str, Any]]],
+                    delivery_pr: Optional[Dict[str, Any]], required: Iterable[str] = (),
+                    merge_runs: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """How far one plan node has come. DONE here is exactly dependency_done."""
+    pin = None
+    if not isinstance(mstatus, dict) or mstatus.get("status") == "NOT_FOUND":
+        stage = "PLANNED"
+    elif mstatus.get("status") != "CREATED" or mstatus.get("repository") != repository:
+        stage = "MATERIALIZING"
+    else:
+        writer = current_writer([row for row in (rows or []) if isinstance(row, dict)])
+        pin = pin_of(writer, "DELIVERY")
+        if pin is not None and delivery_merged(pin, delivery_pr):
+            stage = "DONE"
+        elif pin is not None:
+            stage = "DELIVERED"
+        elif writer is not None:
+            stage = "IN_PROGRESS"
+        else:
+            stage = "NOT_STARTED"
+    names = _required_names(required)
+    if stage == "DONE" and merge_runs is not None:
+        merge_checks = required_checks_state(names or (), merge_runs)
+    else:
+        # CONTRACT NOTE: malformed required names read as NOT_CONFIGURED here too (the contract's
+        # `not list(required)` covers only the empty list), so both branches agree with required_checks_state.
+        merge_checks = "NOT_CONFIGURED" if names is None else "N/A"
+    return {"stage": stage, "done": stage == "DONE", "delivery": dict(pin) if pin is not None else None,
+            "merge_checks": merge_checks, "deployed": POST_MERGE_NOT_RECORDED, "verified": POST_MERGE_NOT_RECORDED}
+
+
+def merged_delivery(api: cp.GithubApi, pin: Optional[Dict[str, Any]]) -> bool:
+    return pin is not None and delivery_merged(pin, api._request("GET", f"/pulls/{pin['pr']}"))
 
 
 def task_context(api: cp.GithubApi, cfg: Dict[str, Any], issue_number: int):
@@ -503,8 +584,10 @@ def dependency_done(api: cp.GithubApi, cfg: Dict[str, Any], plan: Dict[str, Any]
     status = host(["materialize-status", "--program", plan["program"], "--node", node_id])
     if status.get("status") != "CREATED" or status.get("repository") != cfg["repository"]:
         return False
-    return merged_delivery(api, pin_of(current_writer(task_rows(cfg, task_id_for(plan["program"], node_id))),
-                                       "DELIVERY"))
+    rows = task_rows(cfg, task_id_for(plan["program"], node_id))
+    pin = pin_of(current_writer(rows), "DELIVERY")
+    pr = api._request("GET", f"/pulls/{pin['pr']}") if pin is not None else None
+    return node_completion(status, cfg["repository"], rows, pr)["done"]
 
 
 def pending_dependencies(api: cp.GithubApi, cfg: Dict[str, Any], plan: Dict[str, Any],

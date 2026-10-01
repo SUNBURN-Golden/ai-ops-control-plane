@@ -5,6 +5,11 @@
 > ChatGPT receiver below is retired and must not be configured. The sender remains a
 > notification path only; a Slack message never starts or replaces an `aiops-fable` run.
 
+> **User decision M7 (2026-09-30):** the read-only program inspector (`aiops-inspect`,
+> `docs/INSPECTOR.md`) is not an Astra receiver. It reads no Slack, claims nothing, uses no
+> flow-gateway credential or ChatGPT Slack app, and posts only to its own channel and its
+> ledger issue.
+
 Slack carries requests and notifications. GitHub records the authoritative task,
 decision, exact SHA and audit. Grok Bot is not required to ask Astra or relay its
 answer. No shared browser session, raw Slack firehose or standing LLM routine.

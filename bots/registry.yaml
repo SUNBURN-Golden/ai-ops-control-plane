@@ -331,3 +331,16 @@ bots:
     last_audited: "2026-09-17"
     onedrive: READ_ONLY
     approval_level: L1
+
+  - bot_id: "aiops-inspector"
+    name: "감리"
+    parent: 품질지식
+    role: PROGRAM_INSPECTOR
+    domain: QA
+    status: CREATED_NOT_VALIDATED
+    audit: 정상
+    last_audited: "2026-09-30"
+    sot: [github]
+    approval_level: L0-L1-advisory
+    onedrive: READ_ONLY
+    notes: "Advisory only, never a gate (User decision M7). Stage 1 is machine-only; model stages need their own PRs."
