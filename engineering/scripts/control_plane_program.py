@@ -228,6 +228,12 @@ def load_plan(api: cp.GithubApi, cfg: Dict[str, Any], plan_commit: str) -> Dict[
         plan = json.loads(base64.b64decode(content["content"]).decode("utf-8"))
     except (KeyError, TypeError, ValueError) as exc:
         raise ProgramError(f"{PLAN_PATH} at {plan_commit} is unreadable") from exc
+    if isinstance(plan, dict) and "registration_scope" in plan:
+        # This marker identifies an expanded candidate requiring full-scope
+        # approval. Schema v1 has no adopted reader for its manifest. Neither an
+        # edited state string nor an inherited approval pointer can activate it.
+        raise ProgramError("program registration_scope is a candidate; full-scope registration reader "
+                           "is not adopted; do not materialize or dispatch")
     if isinstance(plan, dict) and "PENDING" in str(plan.get("approval_pointer", "")).upper():
         raise ProgramError("program scope/start approval is pending; do not dispatch")
     return validate_plan(plan, cfg)

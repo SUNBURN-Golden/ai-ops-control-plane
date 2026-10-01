@@ -87,6 +87,17 @@ alone never proves the failed delivery ready for dependants. Cached same-tree
 main-workflow shortcuts need their named authoritative verification evidence;
 the current reader holds when it cannot establish that evidence.
 
+## Expanded product registration boundary
+
+Expanded product candidates bind the complete plan and pending catalogues in a
+review manifest and retain PENDING approval. Their explicit `registration_scope`
+marker is rejected by the active loader regardless of its value; changing its
+text to APPROVED or substituting an inherited approval pointer grants nothing.
+The complete-scope approval reader and actual protected authority remain separate
+adoption/qualification work. Removing that marker is a consequential approved
+registration-policy change; this source guard does not claim to prevent privileged
+tampering through the existing shared GitHub credential.
+
 ## One quota wake through the existing heartbeat
 
 The candidate `quota-readiness` query runs no model. `quota-resume` accepts the
