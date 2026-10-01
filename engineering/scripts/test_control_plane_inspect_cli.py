@@ -261,6 +261,9 @@ class FakeSlack:
             return 200, dict(extra or {}), json.dumps(dict(obj, ok=True)).encode()
         if name == "auth.test":
             return ok({"team_id": TEAM, "user_id": BOT}, {"X-OAuth-Scopes": self.scopes})
+        if name == "chat.postMessage" and getattr(self, "refuse_cards", False) \
+                and params.get("text", "").startswith("AIOPS_INSPECT_V1 card"):
+            return 200, {}, json.dumps({"ok": False, "error": "not_in_channel"}).encode()
         if name == "chat.postMessage":
             self.ts += 1
             return ok({"ts": f"{self.ts}.000100", "channel": params.get("channel")})
@@ -536,6 +539,48 @@ class EndToEndTests(Base):
             self.assertRegex(name, pub.PNG_NAME_RE)
         uploads = [c for c in self.slack.calls if c["name"] == "files.getUploadURLExternal"]
         self.assertEqual(sorted(c["params"]["filename"] for c in uploads), sorted(self.render.names))
+
+    def test_stage_switch_posts_a_full_report_to_the_new_target(self) -> None:
+        # DRY: the ledger comment is posted but the card is refused; then the User switches to LIVE (the
+        # ledger issue number is kept so the fake world serves it; the channel and stage change).
+        self.slack.refuse_cards = True
+        first = self.tick()
+        self.assertTrue(first["published"])
+        self.assertEqual(self.journals()[-1]["comment"]["state"], pub.POSTED)
+
+        def t1_at(hour: int) -> Dict[str, Any]:
+            self.clock.t = NOW + timedelta(hours=hour)
+            self.world.now = self.clock.t
+            self.store.write("recheck", dict(self.store.read("recheck"), t1_dirty=True))
+            return self.tick()
+        for hour in range(1, 4):              # settle in DRY: no more changes, the card stays refused
+            settled = t1_at(hour)
+        self.assertEqual((settled["changes"], settled["published"]), (0, False))
+        self.slack.refuse_cards = False
+        self.write_config(config(stage="LIVE", ledger_issue=LEDGER, test_ledger_issue=77))
+        posts, before = self.world.counts("POST"), len(self.slack.calls)
+        for hour in range(4, 7):
+            self.clock.t = NOW + timedelta(hours=hour)
+            self.world.now = self.clock.t
+            self.store.write("recheck", dict(self.store.read("recheck"), t1_dirty=True))
+            self.tick()
+        # The new target gets one full current-state report (comment and card), not the old card.
+        self.assertEqual(self.world.counts("POST"), posts + 1)
+        cards = [c for c in self.slack.calls[before:] if c["name"] == "chat.postMessage"
+                 and c["params"].get("text", "").startswith("AIOPS_INSPECT_V1 card")]
+        self.assertEqual([c["params"]["channel"] for c in cards], [CHANNEL])
+        self.assertIn("LIVE", cards[0]["params"]["text"])
+        self.assertNotIn(TEST_CHANNEL, [c["params"].get("channel") for c in self.slack.calls[before:]
+                                        if c["name"] == "chat.postMessage"])
+        # And back to DRY: the test target gets a fresh report too, although it had older ones.
+        self.write_config(config())
+        posts, before = self.world.counts("POST"), len(self.slack.calls)
+        for hour in range(7, 9):
+            t1_at(hour)
+        self.assertEqual(self.world.counts("POST"), posts + 1)
+        cards = [c for c in self.slack.calls[before:] if c["name"] == "chat.postMessage"
+                 and c["params"].get("text", "").startswith("AIOPS_INSPECT_V1 card")]
+        self.assertEqual([c["params"]["channel"] for c in cards], [TEST_CHANNEL])
 
     def test_tampered_png_is_not_published(self) -> None:
         self.render.tamper = True

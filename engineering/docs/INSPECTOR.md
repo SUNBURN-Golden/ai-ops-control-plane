@@ -437,8 +437,8 @@ ACK는 1단계에 없다. 발견 사항은 `ack: null`이다. 표시용 ACK는 2
 - GitHub UNKNOWN: 다음 점검들의 `reconcile_unknown()`이 실행 시작 이후의 원장 댓글을 읽는다. 본문 sha256이 journal과 같은 댓글이 보이면 `GH_POSTED`로 바꾼다.
 - 24시간 지나도 보이지 않으면 `GH_ABANDONED_UNKNOWN`. 표시만 하고 다시 보내지 않는다.
 - Slack UNKNOWN: 감리는 Slack을 읽지 않으므로 확인할 수 없다. 하트비트에 "게시 미확인 <m>"으로 보인다.
-  장애 경보 예약(`chat.scheduleMessage`)의 결과를 모를 때도 24시간 동안 "게시 미확인"에 센다.
-- 단계·대상 전환: journal은 준비할 때의 단계(DRY/LIVE), Slack 채널, 원장 이슈를 적는다. 셋 중 하나라도 지금 설정과 다르면 그 journal은 보내지 않고 남은 단계를 SUPERSEDED(`TARGET_CHANGED`)로 둔다. 알리지 못한 변화는 다음 T1이 지금 대상으로 다시 싣는다.
+  장애 경보 예약(`chat.scheduleMessage`)의 결과를 모를 때도 시도한 때부터 24시간 동안 "게시 미확인"에 센다. 예약 시각이 지나 발송 감지에서 빠져도 이 계수는 남는다.
+- 단계·대상 전환: journal은 준비할 때의 단계(DRY/LIVE), Slack 채널, 원장 이슈를 적는다. 셋 중 하나라도 지금 설정과 다르면 그 journal은 보내지 않고 남은 단계를 SUPERSEDED(`TARGET_CHANGED`)로 둔다. 알리지 못한 변화는 다음 T1이 지금 대상으로 다시 싣는다. 전환 뒤 지금 대상에 살아 있는 보고(원장 댓글이나 카드가 게시됐거나, 불명이거나, 재시도 중)가 없으면 다음 T1은 변화가 없어도 전체 현재 상태 보고를 새로 올린다. 전환 전에 같은 대상에 남은 옛 보고는 세지 않는다.
 - 알리지 못한 변화: `findings.json`은 journal을 준비할 때 넘어간다. 그래서 그 journal의 변화와 직전 판정을 `findings.json`의 `unannounced`에 함께 적는다.
   - 그 journal의 원장 댓글이 한 번도 보내지지 않았으면(FAILED, SUPERSEDED, 또는 새 게시가 덮을 PENDING·REFUSED) 다음 T1이 그 변화를 다시 싣는다.
   - FAILED만으로도 다음 T1은 게시한다. Slack은 여전히 GitHub가 POSTED나 UNKNOWN이 된 뒤에만 올린다.

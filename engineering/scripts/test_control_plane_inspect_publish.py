@@ -897,6 +897,18 @@ class TestDeadman(Base):
         out = self.publisher().deadman(NOW + timedelta(hours=1))
         self.assertEqual(out["scheduled"], "POSTED")  # the next tick schedules new text, not a resend
 
+    def test_unknown_schedule_stays_counted_for_24_hours_through_hourly_ticks(self):
+        self.slack_t.push("chat.scheduleMessage", InspectError("NET_UNKNOWN"))
+        self.publisher().deadman(NOW)
+        counts = []
+        for hour in range(1, 26):              # ordinary hourly ticks, past the 3-hour post time
+            at = NOW + timedelta(hours=hour)
+            publisher = self.publisher()
+            publisher.deadman(at)
+            counts.append(publisher.unknown_count(at))
+        self.assertEqual(counts[:23], [1] * 23)
+        self.assertEqual(counts[24], 0)
+
     def test_cancel(self):
         self.publisher().deadman(NOW)
         cid = self.store.read("deadman")["current"]["id"]

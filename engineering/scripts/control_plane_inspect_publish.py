@@ -1045,7 +1045,22 @@ class Publisher:
         entry.setdefault("log", []).append({"step": step, "at": core.iso(now)})
 
     def first_run(self) -> bool:
-        return not self.journal_runs()
+        """True when no live report exists for the CURRENT target (stage, Slack channel, ledger issue).
+
+        A journal counts while its comment or card was delivered, is unknown, or is still being retried;
+        journals of another target (before a DRY/LIVE switch) or whose comment and card both ended
+        SUPERSEDED, SKIPPED or FAILED do not, so the next T1 posts a full current-state report there."""
+        dead = (SUPERSEDED, SKIPPED, FAILED)
+        entries = [e for e in (self.load(run) for run in self.journal_runs()) if e is not None]
+        # Only reports made after the last switch count: a report left on this target before a switch
+        # away and back is stale, so switching back (LIVE -> DRY -> LIVE) also gets a fresh report.
+        switched = max([_seq(e) for e in entries if self._target_changed(e)] or [0])
+        for entry in entries:
+            if self._target_changed(entry) or _seq(entry) <= switched:
+                continue
+            if _dict(entry.get("comment")).get("state") not in dead or _dict(entry.get("card")).get("state") not in dead:
+                return False
+        return True
 
     # -- prepare
 
@@ -1537,6 +1552,11 @@ class Publisher:
             if st["current"] in fired:
                 st["current"] = None
             st["pending_delete"] = [i for i in st["pending_delete"] if i not in fired]
+            # A schedule whose outcome was never known stays unknown after its post time: keep counting it
+            # in 게시 미확인 for 24 h from the attempt (slack_unknown), separately from fired detection.
+            for item in st["unknown"]:
+                if item in fired:
+                    self._note_unknown("deadman_schedule", _time(item.get("at")) or now)
             st["unknown"] = [i for i in st["unknown"] if i not in fired]
             # CONTRACT NOTE: the gap runs from the last recorded tick (not the fired message's own tick),
             # and a possibly-scheduled UNKNOWN message that may have fired also gets a RECOVERED line.
