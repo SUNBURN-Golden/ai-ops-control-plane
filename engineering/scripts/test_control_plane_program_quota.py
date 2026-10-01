@@ -443,7 +443,8 @@ class QuotaTests(unittest.TestCase):
         later = {**self.binding, "node": "later", "issue": 2}
         self.quota_failure(later, reset=1500000)
         self.assertEqual(self.q.resume("audit", later, self.invoke)["status"], "QUEUED")
-        self.assertIsNotNone(self.q.fair_blocked("audit", {**self.binding, "node": "fresh"}))
+        self.assertIsNone(self.q.fair_blocked("audit", {**self.binding, "node": "fresh"}))
+        self.assertIsNotNone(self.q.fair_blocked("consult", {**self.binding, "head": "d" * 40}))
         self.q.resume("audit", self.binding, self.invoke)
         self.assertEqual(self.q.readiness("audit", later)["status"], "DUE")
 
@@ -489,6 +490,47 @@ class QuotaTests(unittest.TestCase):
         self.assertIsNone(self.q.unresolved("audit", self.binding))
         self.assertEqual(self.q.resume("audit", self.binding, failure)["status"], "ERROR")
         self.assertEqual((self.preflights, self.invocations), (1, 1))
+
+    def test_root_entry_reconciles_failed_child_with_same_parent_admission_id(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import control_plane_program_astra as bridge
+        import control_plane_fable as fable
+        self.binding = {**self.binding, 'repository': 'BeautifulMind-JT/ZARI'}
+        parent_key = self.quota_failure()
+        def failure():
+            self.invocations += 1
+            raise Failure(next(iter(self.evidence.values())))
+        first = self.q.resume('audit', self.binding, failure)
+        self.assertEqual(first['admission'], parent_key)
+        parent_before = self.store._path(parent_key, 'outcome').read_bytes()
+        payload = {'repository': self.binding['repository'], 'admission': first['admission'],
+                   'expected_version': first['state_version'], 'quota_attempt': first['quota_attempt'],
+                   'github_token': 'test-only-token'}
+        ctx = SimpleNamespace(runs_dir=self.store.root.parent, tool_sha256=self.store.tool_sha)
+        with patch.object(bridge.os, 'geteuid', return_value=0), patch.dict(bridge.os.environ), \
+                patch.object(bridge.cp, 'load_config', return_value={'repository': payload['repository']}), \
+                patch.object(bridge, 'installed_fingerprint', return_value=self.store.tool_sha), \
+                patch.object(bridge, 'require_service_authorization'), \
+                patch.object(bridge, 'Receipts', return_value=self.store), \
+                patch.object(fable, 'verify_failure_evidence', side_effect=lambda ctx, run: self.evidence[run]):
+            settled = bridge.operator_reconcile(ctx, fable, payload)
+        self.assertEqual(settled['status'], 'RECONCILED_FAILED')
+        self.assertEqual(self.store._path(parent_key, 'outcome').read_bytes(), parent_before)
+        self.assertIsNone(self.q.unresolved('audit', self.binding))
+        self.assertEqual(self.q.decision_status(self.binding)['status'], 'CLEAR')
+        self.assertEqual(self.q.resume('audit', self.binding, failure)['status'], 'ERROR')
+        self.assertEqual((self.preflights, self.invocations), (1, 1))
+
+    def test_due_ticket_only_yields_fresh_admission_in_the_same_task(self):
+        self.quota_failure()
+        for action in ('audit', 'consult'):
+            with self.subTest(action=action):
+                self.assertIsNotNone(self.q.fair_blocked(action, {**self.binding, 'head': 'd' * 40}))
+                for changes in ({'repository': 'other/repo'}, {'program': 'other'}, {'node': 'other', 'issue': 2}):
+                    fresh = {**self.binding, **changes}
+                    self.assertIsNone(self.q.fair_blocked(action, fresh))
+                    self.assertEqual(self.q.effective(action, fresh)['status'], 'MISSING')
 
     def test_operator_selectors_cannot_supply_paths_or_unrelated_child(self):
         self.quota_failure(); result = self.q.resume("audit", self.binding, self.invoke)

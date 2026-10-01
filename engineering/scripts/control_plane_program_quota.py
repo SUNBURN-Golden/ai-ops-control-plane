@@ -419,8 +419,15 @@ class Quota:
         return sorted(queue, key=lambda ticket: (ticket["reset_at_epoch_ms"], ticket["parent_admission"]))
 
     def fair_blocked(self, action, binding):
-        """Ordinary fresh admission must yield to a due protected retry ticket."""
-        queue = self._queue(self._now())
+        """Fresh admission yields only to a due retry for the same task.
+
+        Audit and consult share the task fence; unrelated products/nodes do
+        not wait for somebody else's quota-resume. Model serialization and
+        the quota-resume queue order remain unchanged.
+        """
+        scope = self.store.scope(action, binding)[:-1]
+        queue = [ticket for ticket in self._queue(self._now())
+                 if self.store.scope(ticket["action"], ticket["binding"])[:-1] == scope]
         return queue[0]["incident"] if queue else None
 
     def readiness(self, action, binding):

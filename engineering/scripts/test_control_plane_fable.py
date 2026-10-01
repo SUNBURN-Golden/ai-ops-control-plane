@@ -183,6 +183,16 @@ class Base(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_effort_is_fixed_low_for_every_schema_and_ignores_parent_environment(self):
+        with patch.dict(os.environ, {'CLAUDE_CODE_EFFORT_LEVEL': 'max', 'EFFORT': 'high'}):
+            for schema in (fable.AUDIT_SCHEMA, fable.CONSULT_SCHEMA, {}):
+                argv = fable.claude_argv('/usr/local/bin/claude', 'system', schema)
+                self.assertEqual(argv.count('--effort'), 1)
+                self.assertEqual(argv[argv.index('--effort') + 1], 'low')
+            env = fable.child_env('/var/lib/aiops-auditor')
+            self.assertNotIn('CLAUDE_CODE_EFFORT_LEVEL', env)
+            self.assertNotIn('EFFORT', env)
+
     def test_model_runs_read_only_confined_and_pinned(self):
         argv = fable.claude_argv("/usr/local/bin/claude", "system", fable.AUDIT_SCHEMA)
         for flag in ("--restricted", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config",

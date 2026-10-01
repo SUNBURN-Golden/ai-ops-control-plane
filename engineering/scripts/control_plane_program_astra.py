@@ -204,7 +204,10 @@ def operator_reconcile(ctx, fable, payload):
         # Child selectors retain the existing terminal-run verifier below.
         parent = store.admission(payload["admission"]) if os.path.lexists(
             store._path(payload["admission"], "admission")) else None
-        if parent is not None:
+        # Parent and child keys intentionally preserve the same binding/hash.
+        # The presence of an attempt journal selects the child, even when its
+        # key is also present in the parent journal. Never fall back on errors.
+        if parent is not None and not os.path.lexists(quota._path(incident) / "attempt"):
             if parent["binding"].get("repository") != cfg["repository"]:
                 raise BridgeError("reconciliation admission targets another repository")
             return quota.operator_reconcile_ticket(incident, payload["admission"], payload["expected_version"])

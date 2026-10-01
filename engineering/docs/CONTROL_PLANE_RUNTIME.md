@@ -296,6 +296,15 @@ User 결정 M5(2026-09-30)에 따라 Astra 역할은 Claude Fable(`claude-fable-
 그록봇 컴퓨터에서 고정 도구 `scripts/control_plane_fable.py`(설치 이름 `aiops-fable`)로만 실행한다.
 운영자(그록봇)는 요청이 적은 인자 그대로 실행하고, 도구가 올린 결과를 그대로 전한다.
 
+**실행 강도 고정 (User, 2026-10-01):** `control_plane_fable.py`의 `EFFORT = "low"`를
+모든 preflight/audit/consult/program 호출의 공통 `claude_argv`가 `--effort low`로 사용한다.
+호출 인자나 환경 변수로 강도를 바꾸지 않는다. 모델·과금 guard·동시 실행 잠금은 그대로다.
+설치본을 현장에서 편집하지 않는다. 승인된 exact commit의
+`engineering/scripts/control_plane_fable.py`를 `/opt/aiops/bin/aiops-fable`로 바이트 그대로
+설치하고 `cmp`와 양쪽 SHA256 일치를 확인한다. 지원 모듈/정책도 같은 승인 commit을
+사용하고 protected fingerprint/qualification을 다시 결합한다. hash 불일치는 HOLD다.
+이 문단은 실제 호스트 설치 완료 기록이 아니며 후보 HEAD의 독립 감사와 설치 경계를 유지한다.
+
 설치 배치:
 
 | 경로 | 소유와 모드 | 내용 |

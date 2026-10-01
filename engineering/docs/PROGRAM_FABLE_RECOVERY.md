@@ -277,3 +277,15 @@ hard link are accepted; an external hard link, symlink, foreign owner or writabl
 scratch is refused. This creates no ticket/admission/claim and releases no
 UNKNOWN fence. A directory containing only unpublished scratch has admitted
 nothing and does not block unrelated program scopes.
+
+### 수정 요청 5: source candidate selector / quota fairness
+
+quota child와 parent는 같은 binding 및 tool hash로 admission key가 같을 수 있다.
+root `program-reconcile`은 incident의 `attempt` journal이 있으면 child 검증/CAS 정산을
+선택한다. attempt가 없을 때만 기존 childless parent 증거 검증 경로를 사용한다.
+불명/잘못된 attempt를 parent 경로로 fallback하지 않는다. 원본 ERROR·claim 소비는
+보존하며 PASS·두 번째 자동 retry를 만들지 않는다.
+
+새 audit/consult가 due retry에 양보하는 범위는 같은 repository/program/node(legacy는
+issue fallback)다. 다른 제품·작업은 그 ticket의 quota-resume를 기다리지 않는다.
+account-model 잠금과 quota-resume ticket 간 순서·UNKNOWN fence는 유지한다.

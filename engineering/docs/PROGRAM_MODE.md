@@ -8,8 +8,8 @@
 host qualification/보호된 service authorization 전에는 기존 M5 운영이 적용된다.
 현재 리뷰의 contract-change YES, 원래 RELEASE gate, `user_merge=true`,
 범위 밖 결정·화면/작품 승인·추가 과금은 receipt PASS와 무관하게 User
-권한이다. 보호된 Fable reconcile은 아직 구현·qualification되지 않아 전체
-자동 실행은 NOT_READY다. CI와 preflight 성공은 이 채택 조건을 대신하지 않는다.
+권한이다. 보호된 Fable reconcile은 소스 후보로 구현됐지만 미설치·실호스트 미검증이므로
+전체 자동 실행은 NOT_READY다. CI와 preflight 성공은 이 채택 조건을 대신하지 않는다.
 
 v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. v2는 v1(`52ad415`) 재검토에서 남은 F4(불명 생성 요청)와 구현 확인 항목 2개를 반영하고, 호스트 조사 결과(§15)를 더했다. 대응표는 §14에 있다.
 
@@ -86,7 +86,7 @@ service authorization 뒤에만 운영하며, 그 전에는 M5 경로를 유지�
 - contract-change YES, 원래 RELEASE, User-only/risk/release 권한은 위임에서
   제외한다. A3 승격은 RELEASE 예약을 덮어쓰지 않는다.
 - ERROR/UNKNOWN을 새 계획이나 HEAD로 우회하지 않는다. 별도 protected Fable
-  reconcile 구현·실호스트 qualification 전에는 전체 rollout NOT_READY다.
+  reconcile은 소스 후보로 구현됐지만 미설치·실호스트 미검증이며, qualification 전에는 전체 rollout NOT_READY다.
 
 이 항목은 PA-1의 별도 정책 결정이며 기존 M1/M4/M5와 원본 감사 결과를
 덮어쓰지 않는다. 자세한 source/adoption 후보는 PROGRAM_ASTRA_AUTOMATION에 있다.
@@ -620,7 +620,7 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 - 긴 감사가 runner/동시성 슬롯을 점유할 수 있고 workflow 취소가 root 실행
   종료를 증명하지 않는다. protected admission과 operator 확인으로 막으며
   단순히 새 이벤트나 새 HEAD로 재실행하지 않는다.
-- 보호된 Fable receipt reconcile이 아직 없다. 전체 자동 실행은 NOT_READY다.
+- 보호된 Fable receipt reconcile은 소스 후보로 구현됐지만 미설치·실호스트 미검증이다. 전체 자동 실행은 NOT_READY다.
   미래 execution-evolution 설계의 존재나 로컬 fake 검사를 구현으로 세지 않는다.
 
 - **단일 토큰:** 역할 간 GitHub 신원이 분리되지 않는다. 리뷰어의 읽기 전용도 강제되지 않는다(§4).

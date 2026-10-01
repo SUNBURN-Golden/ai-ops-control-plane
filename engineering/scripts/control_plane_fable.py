@@ -36,7 +36,9 @@ import urllib.error
 import urllib.request
 
 MODEL = "claude-fable-5-1"
-EFFORT = "max"
+# User decision 2026-10-01: every Fable invocation is fixed to low.
+# No caller/env override; this setting is part of the installed source hash.
+EFFORT = "low"
 MAX_TURNS = 300
 TIMEOUT_SECONDS = 3 * 3600
 AUDITOR_USER = "aiops-auditor"
