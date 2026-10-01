@@ -41,7 +41,7 @@ pointers.
 | CHEAP_WORKER | Explicitly authorized mechanical work | Become a second writer on a substantive task |
 | COORDINATOR | Program mode only (Claude Sonnet): follow `docs/COORDINATOR_PLAYBOOK.md`; call fixed operations (materialize, start, review, reap, merge-check, merge); route questions; post progress | Write or review code; judge design; choose a lane (the mechanical layer computes it); create task issues directly; touch the host; merge other than through `operation=merge` (User decision M1) |
 | OPUS | Program mode only (Claude Opus): first answerer for DECISION_REQUIRED; may approve a *small design exception* (`docs/PROGRAM_MODE.md` §5) | Author code in the task it rules on; audit a design it drafted; approve anything outside the small-exception definition |
-| INSPECTOR | Advisory only (User decision M7, `docs/INSPECTOR.md`): the fixed host tool `aiops-inspect` reports program-mode progress to the User in its own Slack channel and the "AIOPS Program Health" issue. Any change to `scripts/control_plane_inspect*.py`, the inspector sudoers example or the installed inspector files needs a Fable A3 audit at the exact head and a User merge; grokbot installs only digests listed from a User-merged commit | Merge; dispatch; choose a lane; create or label tasks; comment on task issues or PRs; feed or satisfy any gate; instruct any role; hold a merge or dispatch credential; use paid usage or any model before its stage PR; run any mutating host command |
+| INSPECTOR | Advisory only (User decision M7, `docs/INSPECTOR.md`): the fixed host tool `aiops-inspect` reports program-mode progress to the User in its own Slack channel and the "AIOPS Program Health" issue. Any change to `scripts/control_plane_inspect*.py`, the inspector sudoers example, the normative sections of `docs/INSPECTOR.md` (§3–§11, §14) or the installed inspector files needs a Fable A3 audit at the exact head and a User merge; grokbot installs only digests listed from a User-merged commit | Merge; dispatch; choose a lane; create or label tasks; comment on task issues or PRs; feed or satisfy any gate; instruct any role; hold a merge or dispatch credential; use paid usage or any model before its stage PR; run any mutating host command |
 | MECHANICAL_LAYER | Actor validation, task serialization, builder dispatch, durable control record, event dedupe, gate aggregation, lane selection in the fixed order | Perform semantic engineering or architecture judgment |
 | SLACK | Command/status/decision cockpit | Persistent source of technical truth |
 | GITHUB | Persistent source of truth and durable control-record projection | Be treated as an atomic lock merely because comments exist |
@@ -112,9 +112,12 @@ Grok may:
 - run `aiops-fable audit` or `aiops-fable consult` with exactly the arguments a
   request names, and relay the result the tool posts, literally (User decision M5).
   Running the tool is not code review by Grok: Grok reads no diff and forms no verdict;
-- install `aiops-inspect`, start it after a host restart, and run its fixed `preflight`,
-  `status`, `start`, `stop` and `resume` commands on the User's instruction (User decision M7).
-  Grok never runs, relays, reads or summarizes inspector ticks or findings;
+- install `aiops-inspect` (accounts, files, digests, sudoers, secrets and `/etc/aiops/inspect.json`
+  exactly as `docs/INSPECTOR.md` §12 specifies), change that config or remove the tool only as a
+  User comment in this repository specifies, start it after a host restart, and run its fixed
+  `preflight`, `status`, `start`, `stop` and `resume` commands on the User's instruction, plus
+  `probe` once during installation acceptance (counts and hashes only, `docs/INSPECTOR.md` §13.1)
+  (User decision M7). Grok never runs, relays, reads or summarizes inspector ticks or findings;
 - post one short status or receipt;
 - end the session.
 

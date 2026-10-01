@@ -56,6 +56,9 @@ COMMENT_LIMIT = gh.MAX_BODY_CHARS  # 60,000 chars
 COMMENT_MARK = "<!-- aiops-inspect -->"
 JOURNAL_SCHEMA = "AIOPS_INSPECT_PUBLISH_V1"
 MAX_ATTEMPTS = 3          # CONTRACT NOTE: "retried at most 3 times" read as at most 3 attempts in total.
+# Detail suffix of a REFUSED write whose connection was never opened (NET_DOWN). Both the Slack client
+# below and GitHubLedgerWriter._write end the detail with it. Such a refusal is not a write attempt.
+NOT_CONNECTED = "connection not opened"
 UNKNOWN_WINDOW = timedelta(hours=24)
 RECONCILE_MARGIN = timedelta(minutes=5)
 JOURNAL_KEEP = timedelta(days=30)
@@ -237,7 +240,7 @@ def evidence_ref_gh(evidence: Dict[str, Any]) -> str:
             return core.gh_ref(repo, "ref", ref)
     except InspectError:
         pass
-    return core.gh_text(evidence_label(evidence), 120)
+    return _g(evidence_label(evidence), 120)
 
 
 # ---------------------------------------------------------------------------- Slack transport and client
@@ -360,7 +363,7 @@ class SlackClient:
             status, rheaders, content = self._transport("POST", url, headers, body, timeout)
         except InspectError as exc:
             if exc.reason == "NET_DOWN":
-                raise SlackError("SLACK_REFUSED", REFUSED, None, "connection not opened") from None
+                raise SlackError("SLACK_REFUSED", REFUSED, None, NOT_CONNECTED) from None
             raise SlackError("SLACK_UNKNOWN", UNKNOWN, None, exc.reason) from None
         except Exception as exc:  # noqa: BLE001 - any other transport failure may have sent the request
             raise SlackError("SLACK_UNKNOWN", UNKNOWN, None, type(exc).__name__) from None
@@ -487,7 +490,10 @@ class SlackClient:
                 info, _ = self._call("files.getUploadURLExternal", {"filename": name, "length": str(len(data))})
             except SlackError as exc:
                 # Nothing is visible before completeUploadExternal, so any failure here is REFUSED.
-                raise SlackError("SLACK_REFUSED", REFUSED, exc.slack_error, "getUploadURLExternal failed") from None
+                # A connection that was never opened keeps its NOT_CONNECTED suffix (not an attempt).
+                detail = f"getUploadURLExternal: {NOT_CONNECTED}" if exc.detail.endswith(NOT_CONNECTED) \
+                    else "getUploadURLExternal failed"
+                raise SlackError("SLACK_REFUSED", REFUSED, exc.slack_error, detail) from None
             url, file_id = info.get("upload_url"), info.get("file_id")
             if not upload_url_ok(url) or not isinstance(file_id, str) or not SLACK_ID_RE.fullmatch(file_id):
                 raise SlackError("SLACK_REFUSED", REFUSED, None, "upload URL not on files.slack.com")
@@ -628,8 +634,24 @@ def header_lines(report: Dict[str, Any]) -> List[str]:
             f"advisory=true gate=none model=none tool={report['tool_sha256'][:12]} verdicts={','.join(verdicts)}"]
 
 
+# gh_text escapes "_", so the whole-body redact_output pass can no longer see token shapes such as
+# ghp_... or github_pat_... once a value is escaped: _g redacts shapes in the raw value first and
+# remembers the distinct shapes it redacted (Publisher._out_gh counts them as output shape hits).
+# Every live secret also has a known shape, so _g checks the publisher's live values (_GH_LIVE, set by
+# Publisher._out_gh) BEFORE the shape pass: a live hit raises SECRET_LIVE instead of being counted as a shape.
+_GH_SHAPES_SEEN: set = set()
+_GH_LIVE: Tuple[str, ...] = ()
+
+
 def _g(text: Any, limit: int = 200) -> str:
-    return core.gh_text(text, limit)
+    """``gh_text`` of ``text`` with live secrets refused and token shapes redacted before escaping."""
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    clean, hits = core.redact(text, _GH_LIVE)
+    if hits["live"]:
+        raise InspectError("SECRET_LIVE", "output contained a live secret; nothing was posted")
+    _GH_SHAPES_SEEN.update(core.sha256_hex(m.group(0).encode("utf-8")) for m in core.TOKEN_SHAPES.finditer(text))
+    return core.gh_text(clean, limit)
 
 
 def _product_table(report: Dict[str, Any]) -> List[str]:
@@ -955,6 +977,20 @@ class Publisher:
         self.shape_hits += hits
         return clean
 
+    def _out_gh(self, render: Callable[[], Any], count: bool = True) -> Any:
+        """Run a GitHub rendering with this publisher's live values (``_g`` raises SECRET_LIVE on one)
+        and count the distinct token shapes ``_g`` redacted in it (``count=False`` for a re-render)."""
+        global _GH_LIVE
+        _GH_SHAPES_SEEN.clear()
+        _GH_LIVE = self.live
+        try:
+            return render()
+        finally:
+            _GH_LIVE = ()
+            if count:
+                self.shape_hits += len(_GH_SHAPES_SEEN)
+            _GH_SHAPES_SEEN.clear()
+
     def slack_ready(self) -> bool:
         """auth.test once per Publisher. SLACK_SCOPE propagates (kill switch); other failures -> False."""
         if self.slack is None:
@@ -1021,10 +1057,14 @@ class Publisher:
             findings_state = _dict(report.get("findings_state"))
         if self.load(run) is not None or self.store.path(self._name(run)).exists():
             raise InspectError("JOURNAL_EXISTS", "a journal for this run already exists")
-        comment = self._out(render_comment(report))
+        # CONTRACT NOTE: journals are ordered by this sequence number, not by the time-based run id, so a
+        # backward clock step can never make advance() supersede the report prepared last.
+        seq = 1 + max([_seq(self.load(name)) for name in self.journal_runs()] or [0])
+        comment = self._out(self._out_gh(lambda: render_comment(report)))
         if len(comment) > COMMENT_LIMIT:
-            comment = self._out(render_comment(report, COMMENT_LIMIT - (len(comment) - COMMENT_LIMIT) - 200))
-        body, table_sha = render_issue_body(report["stage"], now, run, findings_state)
+            comment = self._out(self._out_gh(
+                lambda: render_comment(report, COMMENT_LIMIT - (len(comment) - COMMENT_LIMIT) - 200), count=False))
+        body, table_sha = self._out_gh(lambda: render_issue_body(report["stage"], now, run, findings_state))
         body = self._out(body)
         last_body = _dict(self.store.read("ledger_body", {}))
         body_state = UNCHANGED if last_body.get("table_sha256") == table_sha and \
@@ -1033,7 +1073,7 @@ class Publisher:
         replies = [_step(finding=r["finding"], text=self._out(r["text"]), sha256=None, ts=None)
                    for r in render_replies(report)]
         entry = {
-            "schema": JOURNAL_SCHEMA, "run": run, "started_at": core.iso(now), "stage": report["stage"],
+            "schema": JOURNAL_SCHEMA, "run": run, "seq": seq, "started_at": core.iso(now), "stage": report["stage"],
             "channel": self.channel, "ledger_issue": report.get("ledger_issue"),
             "comment": _step(body=comment, sha256=_sha(comment), id=None, url=None),
             "issue_body": _step(body=body if body_state == PENDING else None, sha256=_sha(body),
@@ -1070,6 +1110,13 @@ class Publisher:
             step["error"] = exc.reason if not getattr(exc, "slack_error", None) else f"{exc.reason}:{exc.slack_error}"
             if outcome == UNKNOWN:
                 step["state"], step["unknown_at"] = UNKNOWN, core.iso(now)
+            elif exc.detail.endswith(NOT_CONNECTED):
+                # CONTRACT NOTE: a connection that was never opened sent nothing and reached no server, so
+                # it does not use up one of the 3 attempts; otherwise a ~2 h network outage would turn the
+                # comment FAILED and drop the card and replies of that change for good. Newer journals
+                # still supersede it and prune() removes it after 30 days.
+                step["state"], step["attempts"] = REFUSED, previous[1]
+                step["not_connected"] = (_int(step.get("not_connected")) or 0) + 1
             else:
                 step["state"] = FAILED if step["attempts"] >= MAX_ATTEMPTS else REFUSED
             self._save(entry)
@@ -1086,19 +1133,24 @@ class Publisher:
         runs = self.journal_runs()
         if not runs:
             return {"run": None}
-        for run in runs[:-1]:
-            entry = self.load(run)
-            if entry is None:
+        entries = {run: self.load(run) for run in runs}
+        readable = sorted((r for r in runs if entries[r] is not None), key=lambda r: (_seq(entries[r]), r))
+        # The newest is the highest sequence number; an unreadable journal whose run id sorts last still
+        # blocks advancing, as before (it cannot be ordered).
+        newest = readable[-1] if readable and entries[runs[-1]] is not None else None
+        for run in readable:
+            if run == newest:
                 continue
+            entry = entries[run]
             changed = False
             for step in _all_steps(entry):
                 if step["state"] in RETRYABLE:
                     step["state"], changed = SUPERSEDED, True
             if changed:
                 self._save(entry)
-        entry = self.load(runs[-1])
-        if entry is None:
+        if newest is None:
             return {"run": runs[-1], "state": "JOURNAL_UNREADABLE"}
+        entry = entries[newest]
         self._recover_sending(entry, now)
         self._advance_github(entry, now)
         self._advance_slack(entry, now)
@@ -1290,6 +1342,7 @@ class Publisher:
                   token_expiry: Optional[Dict[str, Optional[datetime]]] = None,
                   halted_at: Optional[datetime] = None) -> Dict[str, Any]:
         """Edit the one heartbeat message of the channel (create it once; message_not_found -> new)."""
+        self._recover_heartbeat_create(now)
         if open_counts is None:
             open_counts = self._open_counts()
         text = self._out(heartbeat_text(
@@ -1315,6 +1368,9 @@ class Publisher:
                     state[self.channel] = entry
                     self.store.write("heartbeat", state)
                     return {"heartbeat": exc.outcome, "error": exc.slack_error or exc.reason, "text": text}
+        # A kill after Slack took the message but before its ts is stored reads as an UNKNOWN create next tick.
+        state[self.channel] = dict(entry, creating_at=core.iso(now))
+        self.store.write("heartbeat", state)
         try:
             posted = self.slack.post_message(self.channel, text)
         except SlackError as exc:
@@ -1323,11 +1379,25 @@ class Publisher:
             state[self.channel] = {"ts": None, "last": exc.outcome, "error": exc.slack_error or exc.reason,
                                    "tried_at": core.iso(now)}
             self.store.write("heartbeat", state)
+            if exc.outcome == UNKNOWN:
+                self._note_unknown("heartbeat", now)
             return {"heartbeat": exc.outcome, "error": exc.slack_error or exc.reason, "text": text}
         state[self.channel] = {"ts": posted["ts"], "created_at": core.iso(now), "updated_at": core.iso(now),
                                "last": POSTED, "status": status, "replaced": ts}
         self.store.write("heartbeat", state)
         return {"heartbeat": "CREATED", "ts": posted["ts"], "text": text}
+
+    def _recover_heartbeat_create(self, now: datetime) -> None:
+        """A create that was cut off (``creating_at`` left behind) is an UNKNOWN create (게시 미확인)."""
+        state = _dict(self.store.read("heartbeat", {}))
+        entry = _dict(state.get(self.channel))
+        if not entry.get("creating_at"):
+            return
+        at = _time(entry.get("creating_at")) or core.utc(now)
+        state[self.channel] = {"ts": None, "last": UNKNOWN, "error": "CRASH_WHILE_SENDING",
+                               "tried_at": core.iso(at), "replaced": entry.get("ts") or entry.get("replaced")}
+        self.store.write("heartbeat", state)
+        self._note_unknown("heartbeat", at)
 
     def _open_counts(self) -> Dict[str, int]:
         try:
@@ -1358,6 +1428,7 @@ class Publisher:
 
     def daily(self, now: datetime, open_counts: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
         """Post the daily line at the first tick at or after daily_hour_kst each KST day."""
+        self._recover_daily(now)
         if not self.daily_due(now):
             return {"daily": "NOT_DUE"}
         if not self.slack_ready():
@@ -1370,12 +1441,19 @@ class Publisher:
         text = self._out(daily_text(now, _int(counters.get("ticks_ok")) or 0, _int(counters.get("ticks")) or 0,
                                     _int(counters.get("cards")) or 0, open_counts.get("open", 0),
                                     self.unknown_count(now)))
+        # Persisted first: a kill after Slack took the line reads as UNKNOWN next tick, never as "not sent".
+        state["sending"] = {"day": day, "at": core.iso(now), "attempts": attempts + 1, "counters": dict(counters)}
+        self.store.write("daily", state)
+        not_connected = False
         try:
             self.slack.post_message(self.channel, text)
             outcome = POSTED
         except SlackError as exc:
             outcome = exc.outcome
-        attempts += 1
+            not_connected = outcome == REFUSED and exc.detail.endswith(NOT_CONNECTED)
+        state.pop("sending", None)
+        if not not_connected:  # a connection that was never opened is not an attempt (§9.2)
+            attempts += 1
         if outcome == REFUSED and attempts < MAX_ATTEMPTS:
             state.update(attempt_day=day, attempts=attempts)
             self.store.write("daily", state)
@@ -1387,6 +1465,25 @@ class Publisher:
                  "counters": {}, "attempt_day": day, "attempts": attempts}
         self.store.write("daily", state)
         return {"daily": outcome, "text": text}
+
+    def _recover_daily(self, now: datetime) -> None:
+        """Close the day of a daily line that was cut off while sending (UNKNOWN, never resent)."""
+        state = _dict(self.store.read("daily", {}))
+        sending = state.get("sending")
+        if sending is None:
+            return
+        sending = _dict(sending)
+        day = sending.get("day") if isinstance(sending.get("day"), str) else core.kst_day(now)
+        # Ticks counted after the cut-off line stay for the next line.
+        sent = _dict(sending.get("counters"))
+        counters = {}
+        for key, value in _dict(state.get("counters")).items():
+            left = (_int(value) or 0) - (_int(sent.get(key)) or 0)
+            if left > 0:
+                counters[key] = left
+        self.store.write("daily", {"last_day": day, "last_outcome": UNKNOWN, "counters": counters,
+                                   "attempt_day": day, "attempts": _int(sending.get("attempts")) or 1})
+        self._note_unknown("daily", _time(sending.get("at")) or core.utc(now))
 
     # -- dead-man
 
@@ -1425,16 +1522,28 @@ class Publisher:
                 st["recover"] = {"since": st.get("last_tick") or fired[0].get("last_tick"), "attempts": 0}
         self.store.write("deadman", st)
         # 2. the RECOVERED line (REFUSED retried on later ticks, at most 3 attempts; UNKNOWN never resent).
+        if st.get("recover") and st["recover"].get("sending"):
+            # A RECOVERED line cut off while sending is UNKNOWN and never resent.
+            self._note_unknown("recovered", _time(st["recover"]["sending"]) or now)
+            st["recover"] = None
+            out["recovered"] = UNKNOWN
+            self.store.write("deadman", st)
         if st.get("recover"):
             since = _time(st["recover"].get("since"))
             gap = int(max(0.0, (now - since).total_seconds()) // 3600) if since else hours
             text = self._out(recovered_text(gap))
+            st["recover"]["sending"] = core.iso(now)
+            self.store.write("deadman", st)  # a kill after Slack took the line reads as UNKNOWN next tick
+            not_connected = False
             try:
                 self.slack.post_message(self.channel, text)
                 outcome = POSTED
             except SlackError as exc:
                 outcome = exc.outcome
-            st["recover"]["attempts"] = (_int(st["recover"].get("attempts")) or 0) + 1
+                not_connected = outcome == REFUSED and exc.detail.endswith(NOT_CONNECTED)
+            st["recover"]["sending"] = None
+            if not not_connected:  # a connection that was never opened is not an attempt (§9.2)
+                st["recover"]["attempts"] = (_int(st["recover"].get("attempts")) or 0) + 1
             if outcome == UNKNOWN:
                 self._note_unknown("recovered", now)
             if outcome != REFUSED or st["recover"]["attempts"] >= MAX_ATTEMPTS:
@@ -1524,6 +1633,11 @@ def overall_state(entry: Dict[str, Any]) -> str:
         return "GH_BODY_UNKNOWN"
     return {POSTED: "GH_POSTED", UNKNOWN: "GH_UNKNOWN", ABANDONED: "GH_ABANDONED_UNKNOWN",
             FAILED: "GH_FAILED", REFUSED: "GH_REFUSED", SENDING: "GH_SENDING"}.get(comment["state"], "PREPARED")
+
+
+def _seq(entry: Optional[Dict[str, Any]]) -> int:
+    """The journal's sequence number (0 when missing or unreadable)."""
+    return (_int(_dict(entry).get("seq")) or 0) if isinstance(entry, dict) else 0
 
 
 def _all_steps(entry: Dict[str, Any]) -> List[Dict[str, Any]]:

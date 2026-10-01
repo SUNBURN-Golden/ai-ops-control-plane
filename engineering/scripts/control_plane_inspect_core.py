@@ -144,11 +144,33 @@ def _unique_pairs(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+MAX_JSON_DEPTH = 64
+
+
+def _check_depth(obj: Any) -> None:
+    """Raise ValueError when containers nest deeper than MAX_JSON_DEPTH (iterative, no recursion)."""
+    stack = [(obj, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, (dict, list)):
+            if depth > MAX_JSON_DEPTH:
+                raise ValueError("JSON nested too deeply")
+            children = node.values() if isinstance(node, dict) else node
+            stack.extend((child, depth + 1) for child in children if isinstance(child, (dict, list)))
+
+
 def loads_strict(data: Union[bytes, str]) -> Any:
-    """Parse JSON refusing duplicate keys and NaN/Infinity; raises ValueError."""
+    """Parse JSON refusing duplicate keys, NaN/Infinity and deep nesting; raises ValueError."""
+    # CONTRACT NOTE: nesting deeper than MAX_JSON_DEPTH is bad JSON (ValueError), so hostile content
+    # (e.g. a plan file) can never raise RecursionError here or in a later recursive walk (deepcopy).
     if isinstance(data, bytes):
         data = data.decode("utf-8")
-    return json.loads(data, object_pairs_hook=_unique_pairs, parse_constant=_reject_constant)
+    try:
+        obj = json.loads(data, object_pairs_hook=_unique_pairs, parse_constant=_reject_constant)
+    except RecursionError:
+        raise ValueError("JSON nested too deeply") from None
+    _check_depth(obj)
+    return obj
 
 
 # ---------------------------------------------------------------------------- time
@@ -1004,15 +1026,18 @@ def gh_text(text: Any, limit: int = 200) -> str:
     """Plain, inert text for GitHub Markdown (one line, no markup, mentions, references or links).
 
     Escapes ``\\ ` * _ [ ] ( ) # | < > ! ~ &``, collapses newlines and tabs, puts U+200B after
-    ``@`` and ``#`` and inside ``://`` and ``www.``, neutralises markers and caps the length.
+    ``@`` and ``#``, inside ``://`` and ``www.`` and after ``GH`` in ``GH-<n>``, neutralises markers
+    and caps the length.
     """
     # CONTRACT NOTE: `&` is escaped too (entities such as &#64; would otherwise render as `@`), and
-    # U+200B also follows `#` and breaks URLs, so no issue reference or cross-reference event can form.
+    # U+200B also follows `#`, breaks URLs and splits `GH-<n>` autolinks, so no issue reference or
+    # cross-reference event can form.
     if not isinstance(text, str):
         text = "" if text is None else str(text)
     base = strip_markers("".join(_plain_units(text)))
     base = re.sub(r"(?i)(://)", ":" + ZWSP + "//", base)
     base = re.sub(r"(?i)\b(www)\.", r"\1" + ZWSP + ".", base)
+    base = re.sub(r"(?i)(?<![A-Za-z0-9])(GH)-(?=\d)", r"\1" + ZWSP + "-", base)
     units: List[str] = []
     for ch in base:
         if ch == "@" or ch == "#":

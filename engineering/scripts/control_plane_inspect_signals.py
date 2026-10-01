@@ -897,6 +897,15 @@ def _idle_hit(point: Dict[str, Any]) -> bool:
     return point.get("idle", 0) > 0 and point.get("waiting", 0) > 0
 
 
+def idle_waiting_hit(facts: Dict[str, Any], now: datetime) -> bool:
+    """Whether one facts snapshot is an idle-while-waiting point (S7). The facts module uses it to
+    schedule the next T1 while such a run is still too short to count."""
+    products = {repo: Product(repo, data) for repo, data in _dict(facts.get("products")).items()
+                if isinstance(repo, str) and REPO_RE.fullmatch(repo) and isinstance(data, dict)}
+    point = idle_point(facts, products, core.utc(now))
+    return point is not None and _idle_hit(point)
+
+
 def _idle_run(series: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The trailing run of consecutive idle-while-waiting points (newest last)."""
     run: List[Dict[str, Any]] = []
@@ -946,9 +955,13 @@ def signal_s7(facts: Dict[str, Any], products: Dict[str, Product], th: Dict[str,
             issue = product.issue(node_id)
             if issue.get("state") == "closed" or CLEANUP_LABEL not in _labels(issue):
                 continue
-            # CONTRACT NOTE: blocked_since is the earliest add time over all current blocking labels, so
-            # the cleanup age may be overstated when another blocking label came first.
-            since = _time(product.node(node_id).get("blocked_since"))
+            # CONTRACT NOTE: the age is that of needs-lane-cleanup itself (facts label_since), not
+            # blocked_since (the earliest of all blocking labels); facts without label_since fall back
+            # to blocked_since.
+            node = product.node(node_id)
+            label_since = node.get("label_since")
+            since = _time(label_since.get(CLEANUP_LABEL) if isinstance(label_since, dict)
+                          else node.get("blocked_since"))
             hours = _hours(now, since)
             if hours is not None and hours > th["cleanup_watch_h"]:
                 task = product.task_id(node_id)
@@ -1253,6 +1266,52 @@ def update_findings(state: Optional[Dict[str, Any]], evaluation: Dict[str, Any],
     out["updated_at"] = stamp
     changes.sort(key=lambda c: (CHANGE_STATES.index(c["change"]), c["id"]))
     return out, changes
+
+
+def unannounced_record(run: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """What a prepared journal announces: its changes and the verdicts the User saw before it.
+
+    Kept in findings.json as ``unannounced``; carry_unannounced() reads it back when that journal's
+    ledger comment was never sent.
+    """
+    changes = [{"id": c.get("id"), "key": c.get("key"), "change": c.get("change")}
+               for c in result.get("changes") or [] if isinstance(c, dict)]
+    return {"run": run, "changes": changes, "previous_verdicts": dict(result.get("previous_verdicts") or {})}
+
+
+def carry_unannounced(result: Dict[str, Any], record: Any) -> int:
+    """Re-announce the changes of a journal whose ledger comment was never sent (FAILED, or superseded).
+
+    A carried change is shown again only when the finding still is what the change said and this tick
+    has no newer change for it; the verdict arrows start from what the User saw before. Returns how many
+    changes were carried.
+    """
+    if not isinstance(record, dict):
+        return 0
+    findings = result["state"]["findings"]
+    changes = result["changes"]
+    have = {c.get("key") for c in changes}
+    carried = 0
+    for item in record.get("changes") or []:
+        if not isinstance(item, dict):
+            continue
+        key, change = item.get("key"), item.get("change")
+        if not isinstance(key, str) or change not in CHANGE_STATES or key in have:
+            continue
+        finding = findings.get(key)
+        if not isinstance(finding, dict) or finding.get("tick_change"):
+            continue
+        if (change == "RESOLVED") != (finding.get("state") == "RESOLVED"):
+            continue
+        finding.update(state=change, tick_change=change)
+        changes.append({"id": finding["id"], "key": key, "change": change, "severity": finding.get("severity")})
+        have.add(key)
+        carried += 1
+    changes.sort(key=lambda c: (CHANGE_STATES.index(c["change"]), c["id"]))
+    previous = record.get("previous_verdicts")
+    if isinstance(previous, dict) and previous:
+        result["previous_verdicts"] = result["state"]["previous_verdicts"] = dict(previous)
+    return carried
 
 
 def ordered_findings(state: Dict[str, Any]) -> List[Dict[str, Any]]:

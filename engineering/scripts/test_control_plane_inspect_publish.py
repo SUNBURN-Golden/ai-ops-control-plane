@@ -665,7 +665,8 @@ class TestJournal(Base):
         self.assertEqual(publisher.advance(NOW)["comment"], "UNKNOWN")
 
     def test_refused_is_retried_at_most_three_times(self):
-        self.gh_t.push("POST", resp({"message": "no"}, 422), InspectError("NET_DOWN"), resp({"message": "no"}, 403))
+        self.gh_t.push("POST", resp({"message": "no"}, 422), resp({"message": "expired"}, 401),
+                       resp({"message": "no"}, 403))
         publisher = self.publisher()
         publisher.prepare(make_report(), NOW)
         states = [publisher.advance(NOW + timedelta(hours=h))["comment"] for h in range(5)]
@@ -782,6 +783,21 @@ class TestJournal(Base):
             publisher.prepare(make_report(run=self.run_id(6), result=leaky), NOW)
         self.assertEqual(ctx.exception.reason, "SECRET_LIVE")
         self.assertFalse(self.store.path(f"publish/{self.run_id(6)}").exists())
+
+    def test_prepare_refuses_live_secret_in_github_only_text(self):
+        # An OPEN finding has no Slack reply, so only the GitHub comment/issue body carry its detail:
+        # _g's shape redaction must not hide the live token from the SECRET_LIVE check (§3.6).
+        leaky = make_result([finding(1, change=None, state="OPEN", detail="token " + GH_TOKEN)])
+        report = make_report(run=self.run_id(7), result=leaky)
+        self.assertEqual(pub.render_replies(report), [])
+        publisher = self.publisher()
+        with self.assertRaises(InspectError) as ctx:
+            publisher.prepare(report, NOW)
+        self.assertEqual(ctx.exception.reason, "SECRET_LIVE")
+        self.assertFalse(self.store.path(f"publish/{self.run_id(7)}").exists())
+        self.assertEqual(pub._GH_LIVE, ())
+        # Outside a Publisher, _g still redacts shapes (nothing live is known there).
+        self.assertNotIn("A1b2C3d4E5", pub._g("token " + GH_TOKEN))
 
     def test_missing_or_tampered_chart_is_skipped(self):
         pngs, render = self.pngs()
@@ -975,6 +991,164 @@ class TestDaily(Base):
         self.assertEqual(publisher.daily(self.MORNING)["daily"], "UNKNOWN")
         self.assertEqual(publisher.daily(self.MORNING + timedelta(hours=1))["daily"], "NOT_DUE")
         self.assertEqual(publisher.unknown_count(self.MORNING + timedelta(hours=1)), 1)
+
+
+# ---------------------------------------------------------------------------- review fixes
+
+class Killed(BaseException):
+    """Simulates the tick being SIGKILLed right after a Slack call reached Slack."""
+
+
+TOKEN_SHAPED = ("ghp_" + "Z9y8" * 8, "github_pat_" + "Q8w7" * 8)
+
+
+class TestReviewFixes(Base):
+    MORNING = datetime(2026, 10, 1, 0, 17, tzinfo=timezone.utc)  # 09:17 KST
+
+    def run_id(self, hour=5):
+        return f"20261001T{hour:02d}1700Z-0a1b2c3d-tick"
+
+    def kill_on_post(self):
+        def on_call(name, params):
+            if name == "chat.postMessage":
+                self.slack_t.on_call = None
+                self.slack_t.calls[-1]["killed"] = True
+                raise Killed()
+        self.slack_t.on_call = on_call
+
+    # finding 1: token shapes are redacted before gh_text escapes "_"
+    def test_github_fields_redact_underscore_token_shapes(self):
+        ghp, pat = TOKEN_SHAPED
+        bad = finding(1, detail=f"leak {ghp} and {pat}", title=f"t {ghp}", subject=f"node:{pat}")
+        result = make_result([bad, finding(2, change=None, state="OPEN", detail=f"x {pat}")])
+        report = make_report(result=result)
+        for text in (pub.render_comment(report), pub.render_issue_body("DRY", NOW, report["run"], result["state"])[0]):
+            plain = text.replace("\\", "")
+            for token in (ghp, pat):
+                self.assertNotIn(token, plain)
+                self.assertNotIn(token[10:], plain)
+            self.assertIn("redacted sha256=", text)
+        self.assertIn("\\[redacted sha256=", pub._g(ghp))
+        publisher = self.publisher()
+        entry = publisher.prepare(report, NOW)
+        self.assertNotIn(pat[12:], entry["comment"]["body"].replace("\\", ""))
+        self.assertNotIn(ghp[4:], entry["issue_body"]["body"].replace("\\", ""))
+        self.assertGreater(publisher.shape_hits, 0)
+
+    # finding 2: a connection that was never opened is not a write attempt
+    def test_net_down_does_not_use_up_attempts(self):
+        for _ in range(5):
+            self.gh_t.push("POST", InspectError("NET_DOWN"))
+        publisher = self.publisher()
+        publisher.prepare(make_report(), NOW)
+        states = [self.publisher().advance(NOW + timedelta(hours=h))["comment"] for h in range(6)]
+        self.assertEqual(states, ["REFUSED"] * 5 + ["POSTED"])
+        journal = publisher.load(self.run_id())
+        self.assertEqual(journal["comment"]["attempts"], 1)
+        self.assertEqual(journal["card"]["state"], "POSTED")
+        self.assertEqual(journal["replies"][0]["state"], "POSTED")
+
+    def test_slack_net_down_does_not_use_up_attempts(self):
+        for _ in range(4):
+            self.slack_t.push("chat.postMessage", InspectError("NET_DOWN"))
+        publisher = self.publisher()
+        publisher.prepare(make_report(), NOW)
+        states = [self.publisher().advance(NOW + timedelta(hours=h))["card"] for h in range(5)]
+        self.assertEqual(states, ["REFUSED"] * 4 + ["POSTED"])
+
+    def test_net_down_is_not_an_attempt_for_daily_recovered_and_uploads(self):
+        publisher = self.publisher()
+        publisher.count_tick(True)
+        for _ in range(4):
+            self.slack_t.push("chat.postMessage", InspectError("NET_DOWN"))
+        outs = [self.publisher().daily(self.MORNING + timedelta(hours=h), open_counts={"open": 0})["daily"]
+                for h in range(5)]
+        self.assertEqual(outs, ["REFUSED"] * 4 + ["POSTED"])
+        self.assertEqual(self.store.read("daily")["last_outcome"], "POSTED")
+        # RECOVERED: four lines never connected, then the fifth is posted once
+        self.publisher().deadman(NOW)
+        later = NOW + timedelta(hours=4, minutes=30)
+        for _ in range(4):
+            self.slack_t.push("chat.postMessage", InspectError("NET_DOWN"))
+        outs = [self.publisher().deadman(later + timedelta(hours=h))["recovered"] for h in range(5)]
+        self.assertEqual(outs, ["REFUSED"] * 4 + ["POSTED"])
+        # an upload URL request that never connected keeps the suffix, so the card step does not count it
+        client = self.publisher().slack
+        client.verify()
+        self.slack_t.push("files.getUploadURLExternal", InspectError("NET_DOWN"))
+        with self.assertRaises(pub.SlackError) as ctx:
+            client.upload_files(TEST_CHANNEL, "1000.000100", [{"name": "c1_ladder.png", "data": b"\x89PNGx"}])
+        self.assertEqual(ctx.exception.outcome, "REFUSED")
+        self.assertTrue(ctx.exception.detail.endswith(pub.NOT_CONNECTED))
+
+    # finding 3: daily line, RECOVERED line and heartbeat creation persist a marker before sending
+    def test_daily_killed_after_send_is_not_reposted(self):
+        publisher = self.publisher()
+        publisher.count_tick(True)
+        self.kill_on_post()
+        with self.assertRaises(Killed):
+            publisher.daily(self.MORNING, open_counts={"open": 0})
+        publisher = self.publisher()
+        publisher.count_tick(True)
+        out = publisher.daily(self.MORNING + timedelta(hours=1), open_counts={"open": 0})
+        self.assertEqual(out["daily"], "NOT_DUE")
+        self.assertEqual(self.slack_t.names().count("chat.postMessage"), 1)
+        self.assertEqual(self.store.read("daily")["last_outcome"], "UNKNOWN")
+        self.assertEqual(publisher.unknown_count(self.MORNING + timedelta(hours=1)), 1)
+        # The tick counted after the lost line is kept for the next day's line.
+        out = publisher.daily(self.MORNING + timedelta(days=1), open_counts={"open": 0})
+        self.assertIn("점검 1/1", out["text"])
+
+    def test_recovered_killed_after_send_is_not_reposted(self):
+        self.publisher().deadman(NOW)
+        later = NOW + timedelta(hours=4, minutes=30)
+        self.kill_on_post()
+        with self.assertRaises(Killed):
+            self.publisher().deadman(later)
+        out = self.publisher().deadman(later + timedelta(hours=1))
+        self.assertEqual(out["recovered"], "UNKNOWN")
+        self.assertEqual(self.slack_t.names().count("chat.postMessage"), 1)
+        self.assertIsNone(self.store.read("deadman")["recover"])
+        self.assertEqual(self.publisher().unknown_count(later + timedelta(hours=1)), 1)
+        self.publisher().deadman(later + timedelta(hours=2))
+        self.assertEqual(self.slack_t.names().count("chat.postMessage"), 1)
+
+    def test_heartbeat_create_killed_after_send_reads_as_unknown(self):
+        self.kill_on_post()
+        with self.assertRaises(Killed):
+            self.publisher().heartbeat(NOW, open_counts={"open": 0, "at_risk": 0})
+        self.assertTrue(self.store.read("heartbeat")[TEST_CHANNEL].get("creating_at"))
+        out = self.publisher().heartbeat(NOW + timedelta(hours=1), open_counts={"open": 0, "at_risk": 0})
+        # CONTRACT NOTE (publish.heartbeat): the new text differs, so creating again is not a resend; the
+        # possibly-created message is shown as 게시 미확인.
+        self.assertEqual(out["heartbeat"], "CREATED")
+        self.assertIn("게시 미확인 1", out["text"])
+        entry = self.store.read("heartbeat")[TEST_CHANNEL]
+        self.assertNotIn("creating_at", entry)
+
+    # finding 4: journal order does not follow the wall clock
+    def test_backward_clock_step_does_not_supersede_the_newest_journal(self):
+        self.gh_t.push("POST", resp({"message": "no"}, 422))
+        publisher = self.publisher()
+        publisher.prepare(make_report(run=self.run_id(6)), NOW + timedelta(hours=1))
+        publisher.advance(NOW + timedelta(hours=1))
+        # The clock stepped back: the newer report gets an earlier run id.
+        publisher = self.publisher()
+        publisher.prepare(make_report(run=self.run_id(5)), NOW)
+        out = publisher.advance(NOW)
+        self.assertEqual(out["run"], self.run_id(5))
+        self.assertEqual(out["state"], "SLACK_POSTED")
+        self.assertEqual(publisher.load(self.run_id(6))["comment"]["state"], "SUPERSEDED")
+        out = self.publisher().advance(NOW + timedelta(hours=1))
+        self.assertEqual(out["run"], self.run_id(5))
+        self.assertEqual(len([c for c in self.gh_t.calls if c["method"] == "POST"]), 2)
+
+    # a GH-<n> shorthand in a subject or detail never forms an issue autolink
+    def test_gh_shorthand_never_autolinks(self):
+        bad = finding(1, subject="node:GH-12", detail="노드 GH-12: 마지막 완료 뒤 3일이 지났다.")
+        comment = pub.render_comment(make_report(result=make_result([bad])))
+        self.assertIn("12", comment)
+        self.assertIsNone(re.search(r"(?i)(?<![A-Za-z0-9])GH-\d", comment))
 
 
 if __name__ == "__main__":

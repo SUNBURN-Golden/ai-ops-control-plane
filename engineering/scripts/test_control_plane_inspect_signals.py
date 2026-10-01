@@ -558,6 +558,19 @@ class SignalTests(unittest.TestCase):
         s7 = evaluate(f)["ctrl"]["signals"]["S7"]
         self.assertEqual((s7["level"], s7["unknown"]), ("UNKNOWN", True))
 
+    def test_s7_cleanup_age_is_the_cleanup_labels_own_age(self) -> None:
+        # needs-user 3 days ago, needs-lane-cleanup 1 hour ago: blocked_since is 3 days, cleanup is 1 hour.
+        f = facts()
+        n4 = f["products"][ZARI]["nodes"]["N4"]
+        n4["issue"]["labels"] = ["needs-lane-cleanup", "needs-user"]
+        n4["blocked_since"] = iso(ago(hours=72))
+        n4["label_since"] = {"needs-user": iso(ago(hours=72)), "needs-lane-cleanup": iso(ago(hours=1))}
+        self.assertNotIn("task:ZARI-N4", subjects(evaluate(f)["ctrl"]["signals"]["S7"]))
+        n4["label_since"]["needs-lane-cleanup"] = iso(ago(hours=25))
+        cleanup = next(c for c in evaluate(f)["ctrl"]["signals"]["S7"]["candidates"]
+                       if c["subject_key"] == "task:ZARI-N4")
+        self.assertIn(core.fmt_kst(ago(hours=25)), cleanup["detail_ko"])
+
     def test_s7_idle_while_waiting_needs_consecutive_snapshots_spanning_an_hour(self) -> None:
         state = sig.new_state()
         f = facts()  # GLM idle, 2 active of 4; ZARI N5 is waiting (PLANNED, no deps)
@@ -874,6 +887,42 @@ class LifecycleTests(unittest.TestCase):
         counts = sig.open_counts(state)
         self.assertEqual(counts["open"], len(state["findings"]))
         self.assertGreater(counts["at_risk"], 0)
+
+
+class CarryUnannouncedTests(unittest.TestCase):
+    @staticmethod
+    def result() -> Dict[str, Any]:
+        def rec(fid: str, key: str, state: str, change: Optional[str] = None) -> Dict[str, Any]:
+            return {"id": fid, "key": key, "state": state, "tick_change": change, "severity": "WATCH"}
+        findings = {"a": rec("INS-ZARI-0001", "a", "OPEN"), "b": rec("INS-ZARI-0002", "b", "RESOLVED"),
+                    "c": rec("INS-ZARI-0003", "c", "OPEN"), "d": rec("INS-ZARI-0004", "d", "WORSENED", "WORSENED")}
+        state = {"findings": findings, "previous_verdicts": {"ZARI": "WATCH"}, "verdicts": {"ZARI": "WATCH"}}
+        return {"state": state, "changes": [{"id": "INS-ZARI-0004", "key": "d", "change": "WORSENED",
+                                             "severity": "WATCH"}],
+                "verdicts": {"ZARI": "WATCH"}, "previous_verdicts": {"ZARI": "WATCH"}}
+
+    def test_carries_only_what_still_holds(self) -> None:
+        result = self.result()
+        record = {"run": "r", "previous_verdicts": {"ZARI": "ON_TRACK"},
+                  "changes": [{"id": "INS-ZARI-0001", "key": "a", "change": "NEW"},        # still open -> carried
+                              {"id": "INS-ZARI-0002", "key": "b", "change": "NEW"},        # resolved since
+                              {"id": "INS-ZARI-0003", "key": "c", "change": "RESOLVED"},   # open again
+                              {"id": "INS-ZARI-0004", "key": "d", "change": "NEW"},        # newer change wins
+                              {"id": "INS-ZARI-0009", "key": "z", "change": "NEW"},        # gone
+                              {"key": "a", "change": "BOGUS"}, "junk"]}
+        self.assertEqual(sig.carry_unannounced(result, record), 1)
+        self.assertEqual([(c["id"], c["change"]) for c in result["changes"]],
+                         [("INS-ZARI-0001", "NEW"), ("INS-ZARI-0004", "WORSENED")])
+        self.assertEqual(result["state"]["findings"]["a"]["tick_change"], "NEW")
+        self.assertEqual(result["previous_verdicts"], {"ZARI": "ON_TRACK"})
+        self.assertEqual(result["state"]["previous_verdicts"], {"ZARI": "ON_TRACK"})
+        self.assertEqual(sig.carry_unannounced(self.result(), None), 0)
+
+    def test_record_round_trip(self) -> None:
+        result = self.result()
+        record = sig.unannounced_record("run1", result)
+        self.assertEqual(record, {"run": "run1", "previous_verdicts": {"ZARI": "WATCH"},
+                                  "changes": [{"id": "INS-ZARI-0004", "key": "d", "change": "WORSENED"}]})
 
 
 class ChartDataTests(unittest.TestCase):

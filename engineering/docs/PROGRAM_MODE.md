@@ -352,7 +352,7 @@ adapter의 `status.json`은 참고용이다.
 - 기록이 `SUBMITTING`이나 `UNKNOWN`이어도 host가 그 요청을 `FAILED_PRESTART`나 `RECONCILED`로 막아 둔 상태라면, `start`는 새 attempt로 재개한다.
 - **의존 노드**
   - `start`와 merge-check은 `depends_on` 노드가 DONE인지 기계적으로 확인한다.
-  - DONE은 그 노드에 고정된 전달 PR이 전달된 head 그대로 병합된 경우다. PR이 없는 노드는 이슈가 completed로 닫힌 경우다.
+  - DONE은 중앙 함수 `control_plane_program.node_completion`이 정한다: 그 노드에 고정된 전달 PR이 전달된 head 그대로 병합된 경우뿐이다. PR이 없는 노드는 이슈가 completed로 닫혀도 DONE이 아니다(`COORDINATOR_PLAYBOOK.md` §3 행 1b, 운영자 확인).
 
 **host `reap --launch-request-id <id> --evidence <URL> [--pin-stdin]`** (서명 줄은 stdin의 `{"pin": "<line>"}`)
 - runner가 sudo로 호출할 수 있는 새 명령이다. 인수 형식은 status와 같이 제한한다.
@@ -614,7 +614,7 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
   - **대체 모델 없음:** Fable을 쓸 수 없으면 감사는 기다린다. 다른 모델로 바꾸지 않는다(`AGENTS.md` §12). 거절 시 자동 전환도 끄고, 결과에 다른 모델이 섞이면 올리지 않는다.
   - **추가 과금:** 도구는 Claude가 "초과 사용 막힘"이라고 알릴 때만 실행을 이어 간다. 계정의 추가 사용량(usage credits)과 자동 충전은 User가 claude.ai 설정에서 끈다. 이것이 꺼져 있어야 현장 소장 Routine을 설정한다.
 - **감리 (M7):** User가 감수한다(2026-09-30).
-  - **감리 전용 자격 증명:** 읽기 토큰, 원장 기록 토큰, Slack 봇 토큰이 root 소유 파일(0600)로 호스트에 있다. 새면 읽기와 원장 이슈 댓글, 감리 채널 게시가 가능하다. 발송·병합 권한은 없다.
+  - **감리 전용 자격 증명:** 읽기 토큰, 원장 기록 토큰, Slack 봇 토큰이 root 소유 파일(0600)로 호스트에 있다. 새면 여섯 저장소 읽기, 이 저장소 모든 이슈의 댓글과 수정, 봇 이름으로 봇이 들어간 채널과 워크스페이스 구성원의 앱 DM에 게시, 봇 자신의 글 수정·삭제가 가능하다. 발송·병합 권한은 없다.
   - **GitHub 글 기반 신호는 위조될 수 있다(M4 단일 토큰):** 라벨, 이슈 닫힘 이유, 댓글은 같은 토큰으로 바꿀 수 있다. 이런 신호는 "GitHub 글 기준"으로 표시하고 주의(WATCH)까지만 올린다.
   - **감리가 틀리거나 멈출 수 있다:** 자문일 뿐 게이트가 아니므로 제품 진행은 막지 않는다. 멈추면 하트비트와 장애 경보(dead-man)로 User에게 보인다.
   - **읽기 권한의 경계는 sudoers 파일이다:** helper는 빌더·control·runner가 아닌 호출자를 모든 동사에 허용한다. 감리 계정을 읽기 3개로 묶는 것은 `sudoers-aiops-inspector.example`이다.

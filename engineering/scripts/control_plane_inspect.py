@@ -72,6 +72,9 @@ RENDER_LIMITS = (("RLIMIT_CPU", 60), ("RLIMIT_AS", 1536 << 20), ("RLIMIT_FSIZE",
                  ("RLIMIT_NOFILE", 64), ("RLIMIT_NPROC", 32))
 RENDER_OUTPUT_CAP = 64 * 1024
 STOP_WAIT_SECONDS = 30
+# lock_held() probes (start, status, stop) take daemon.lock for an instant; the daemon retries briefly.
+DAEMON_LOCK_TRIES = 10
+DAEMON_LOCK_RETRY_SECONDS = 0.1
 START_WAIT_SECONDS = 10
 WAIT_CHUNK_SECONDS = 2.0
 ERROR_WINDOW = timedelta(hours=24)
@@ -357,31 +360,56 @@ def read_children(ctx: Ctx) -> Dict[str, Any]:
             "render": [r for r in _list(data.get("render")) if isinstance(r, dict) and _int(r.get("pgid"))]}
 
 
-def note_render_child(ctx: Ctx, pgid: Optional[int]) -> None:
-    """The tick records (or clears) its render child's process group so the daemon can stop it.
+def _proc_stat(ctx: Ctx, pid: int) -> Optional[List[str]]:
+    """``/proc/<pid>/stat`` fields after the command name (index 2 = pgrp, 19 = start time)."""
+    try:
+        raw = (Path(ctx.deps.proc_root) / str(pid) / "stat").read_bytes().decode("utf-8", "replace")
+        return raw[raw.rindex(")") + 2:].split()
+    except (OSError, ValueError):
+        return None
+
+
+def _proc_start(ctx: Ctx, pid: int) -> Optional[str]:
+    fields = _proc_stat(ctx, pid)
+    return fields[19] if fields is not None and len(fields) > 19 and fields[19].isdigit() else None
+
+
+def note_render_child(ctx: Ctx, pgid: Optional[int], uid: Optional[int] = None,
+                      start: Optional[str] = None) -> None:
+    """The tick records (or clears) its render child's process group, uid and start time so the daemon
+    can stop exactly that process instance.
 
     Best effort: the tick itself always waits for (and on timeout kills) its own render child.
     """
     try:
         data = read_children(ctx)
-        data["render"] = [] if pgid is None else [{"pgid": pgid, "run": ctx.run_id, "at": core.iso(ctx.now())}]
+        data["render"] = [] if pgid is None else [{"pgid": pgid, "uid": uid, "start": start, "run": ctx.run_id,
+                                                   "at": core.iso(ctx.now())}]
         ctx.store.write("children", data)
     except (InspectError, OSError):
         pass
 
 
-def group_is_ours(ctx: Ctx, pgid: Any, marker: str) -> bool:
-    """True only for a live process-group leader whose command line holds ``marker``."""
+def group_is_ours(ctx: Ctx, pgid: Any, marker: str, uid: Any, start: Any) -> bool:
+    """True only for the recorded process instance: a live process-group leader started at ``start``
+    (``/proc/<pid>/stat`` field 22), running as ``uid`` (real and effective, never root), whose command
+    line holds ``marker``. A recycled pid fails the start-time or uid check and is never signalled."""
     if isinstance(pgid, bool) or not isinstance(pgid, int) or pgid <= 1 or pgid == os.getpid():
         return False
-    base = Path(ctx.deps.proc_root) / str(pgid)
-    try:
-        raw = (base / "stat").read_bytes().decode("utf-8", "replace")
-        fields = raw[raw.rindex(")") + 2:].split()
-        cmdline = (base / "cmdline").read_bytes().split(b"\0")
-    except (OSError, ValueError):
+    if _int(uid) is None or uid <= 0 or not isinstance(start, str) or not start.isdigit():
         return False
-    if len(fields) < 3 or fields[2] != str(pgid):
+    base = Path(ctx.deps.proc_root) / str(pgid)
+    fields = _proc_stat(ctx, pgid)
+    try:
+        status = (base / "status").read_text("utf-8", "replace")
+        cmdline = (base / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    if fields is None or len(fields) < 20 or fields[2] != str(pgid) or fields[19] != start:
+        return False
+    uid_line = next((line for line in status.splitlines() if line.startswith("Uid:")), "")
+    uids = uid_line.split()[1:]
+    if len(uids) < 2 or uids[0] != str(uid) or uids[1] != str(uid):
         return False
     return any(marker.encode() in part for part in cmdline)
 
@@ -416,7 +444,8 @@ def launch_render(ctx: Ctx, data_path: Path, out_dir: Path, account: str,
                                 stdout=fd, stderr=subprocess.DEVNULL, user=entry.pw_uid, group=entry.pw_gid,
                                 extra_groups=[], umask=0o077, start_new_session=True, close_fds=True,
                                 preexec_fn=_render_limits)
-        note_render_child(ctx, proc.pid)
+        # Popen returns after the exec: the child already runs as the render account.
+        note_render_child(ctx, proc.pid, entry.pw_uid, _proc_start(ctx, proc.pid))
         try:
             try:
                 proc.wait(timeout=RENDER_WALL_SECONDS)
@@ -542,6 +571,14 @@ def _journal_views(publisher: pub.Publisher) -> Tuple[List[int], Dict[str, str]]
     return ids, journal
 
 
+def _comment_state(publisher: pub.Publisher, run: Any) -> Optional[str]:
+    """The ledger comment state of one journal, or None when it is missing or unreadable."""
+    if not isinstance(run, str) or not core.RUN_ID_RE.fullmatch(run):
+        return None
+    entry = publisher.load(run)
+    return _dict(entry.get("comment")).get("state") if entry is not None else None
+
+
 def _tokens(ctx: Ctx, reader: Optional[gh.GitHubReader], writer: Optional[gh.GitHubLedgerWriter]) -> Dict[str, Any]:
     """Last known token expiry per kind (persisted so status can show it without network)."""
     known = _dict(_safe_read(ctx.store, "tokens", {}))
@@ -592,6 +629,18 @@ class Tick:
         self.reader: Optional[gh.GitHubReader] = None
         self.writer: Optional[gh.GitHubLedgerWriter] = None
         self.publisher: Optional[pub.Publisher] = None
+        # True between commit_t1 (recheck clean) and the findings.json write of the same snapshot.
+        self.unsaved_t1 = False
+
+    def redirty_t1(self) -> None:
+        """T1 was committed clean but its findings were never saved: collect again next tick, so that a
+        newer journal supersedes any journal prepared here and the changes are not held back until the
+        recheck time (or posted twice once stale findings are recomputed). Best effort."""
+        try:
+            recheck = _dict(self.store.read(facts.ST_RECHECK, {}))
+            self.store.write(facts.ST_RECHECK, dict(recheck, t1_dirty=True))
+        except (InspectError, OSError):
+            pass
 
     def run(self) -> Dict[str, Any]:
         ctx, now = self.ctx, self.now
@@ -619,6 +668,8 @@ class Tick:
             engage_kill(ctx, exc, now)
         except Exception as exc:  # noqa: BLE001 - the heartbeat and dead-man still run
             problem = InspectError("INTERNAL", type(exc).__name__)
+        if problem is not None and self.unsaved_t1:
+            self.redirty_t1()
         self.finish(config, problem)
         if problem is not None:
             raise problem
@@ -659,6 +710,7 @@ class Tick:
         try:
             doc = facts.collect(self.reader, host, config, store, now, budgets, probe_result=probe,
                                 ledger_ids=ledger_ids, live_values=ctx.live)
+            self.unsaved_t1 = True  # commit_t1 marks recheck dirty first, so a failure inside it is covered too
             committed = facts.commit_t1(store, doc, now, config)
         except InspectError as exc:
             if exc.reason == "SECRET_LIVE":
@@ -673,10 +725,23 @@ class Tick:
         # 5. signals, findings lifecycle, chart data
         result = sig.run(doc, config, now, state=store.read("findings", None), snapshot=snapshot,
                          journal=journal, history=store.read_jsonl("history"))
+        # CONTRACT NOTE: findings.json moves on when a journal is prepared, so the changes of the journal it
+        # records (`unannounced`) are carried into this one when that journal's ledger comment was never sent:
+        # FAILED or SUPERSEDED (a FAILED comment alone makes this T1 publish), or PENDING/REFUSED when this
+        # T1 publishes anyway (the new journal supersedes it). POSTED, UNKNOWN and ABANDONED are not carried.
+        carry = result["state"].pop("unannounced", None)
+        if isinstance(carry, dict):
+            sent = _comment_state(publisher, carry.get("run"))
+            if sent in (pub.FAILED, pub.SUPERSEDED) or (
+                    sent in pub.RETRYABLE and pub.publish_needed(result, publisher.first_run())):
+                out["carried"] = sig.carry_unannounced(result, carry)
         out["changes"] = len(result["changes"])
         # 6. render and publish through the journal
         if not pub.publish_needed(result, publisher.first_run()):
+            if carry is not None:
+                result["state"]["unannounced"] = carry   # the newest journal may still post, or fail
             store.write("findings", result["state"])
+            self.unsaved_t1 = False
             publisher.advance(now)
             return
         pngs, render_dir, render_status = render_charts(ctx, config, self.run_id, result["charts"])
@@ -686,10 +751,15 @@ class Tick:
                                   result=result, control_repository=config["control_repository"],
                                   ledger_issue=core.active_ledger_issue(config), pngs=pngs,
                                   render_dir=render_dir, render_status=render_status)
-        # CONTRACT NOTE: the journal is prepared BEFORE findings.json is written; a crash in between
-        # recomputes the same changes next tick and that newer journal supersedes this one (no double post).
+        # CONTRACT NOTE: the journal is prepared BEFORE findings.json is written. A failure in between (or
+        # anywhere after commit_t1) re-dirties recheck (redirty_t1), so the next tick runs T1 again, recomputes
+        # the same changes from the unchanged findings.json and its newer journal supersedes this one (no
+        # double post). A hard crash (SIGKILL) there is not covered: the next T1 comes with the next change
+        # or the recheck time.
         publisher.prepare(report, now)
+        result["state"]["unannounced"] = sig.unannounced_record(self.run_id, result)
         store.write("findings", result["state"])
+        self.unsaved_t1 = False
         # CONTRACT NOTE: the 3-minute publish budget is bounded by the per-request timeouts (GitHub 30 s,
         # Slack 20 s, upload 60 s) and the daemon's 45-minute cap; it is not a separate timer.
         adv = publisher.advance(now)
@@ -837,8 +907,9 @@ class Daemon:
                 pass
         for entry in read_children(self.ctx)["render"]:
             pgid = entry.get("pgid")
-            # A render group outlives a killed tick; signal it only while it is still a charts process.
-            if group_is_ours(self.ctx, pgid, "control_plane_inspect_charts"):
+            # A render group outlives a killed tick; signal it only while it is still the recorded charts
+            # process (same uid and start time), never a recycled pid.
+            if group_is_ours(self.ctx, pgid, "control_plane_inspect_charts", entry.get("uid"), entry.get("start")):
                 try:
                     self.ctx.deps.killpg(pgid, signal.SIGKILL)
                     killed.append(pgid)
@@ -856,7 +927,11 @@ class Daemon:
         ctx = self.ctx
         started = ctx.now()
         self.proc = self.spawn()
-        ctx.store.write("children", {"tick": {"pgid": self.proc.pid, "at": core.iso(started)}, "render": []})
+        try:
+            # Display and bookkeeping only: the child is supervised (45-minute cap) even when this fails.
+            ctx.store.write("children", {"tick": {"pgid": self.proc.pid, "at": core.iso(started)}, "render": []})
+        except (InspectError, OSError):
+            pass
         begin = ctx.deps.monotonic()
         outcome = "DONE"
         while True:
@@ -892,7 +967,24 @@ class Daemon:
         while not self.stopping and (max_ticks is None or self.ticks < max_ticks):
             if not self.wait_until(self.next_tick()):
                 break
-            self.run_tick()
+            try:
+                self.run_tick()
+            except Exception:  # noqa: BLE001 - e.g. fork EAGAIN, disk full: never ends the loop
+                self.recover()
+
+    def recover(self) -> None:
+        """After an unexpected error in one iteration: stop a tick child that would otherwise run on
+        unsupervised, record the error (best effort) and wait for the next tick minute."""
+        try:
+            if self.proc is not None:
+                self.kill_groups()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+        self.proc = None
+        try:
+            record_error(self.ctx, "DAEMON_LOOP", self.ctx.now())
+        except Exception:  # noqa: BLE001 - best effort
+            pass
 
 
 def read_pid(ctx: Ctx) -> Optional[int]:
@@ -909,8 +1001,12 @@ def read_pid(ctx: Ctx) -> Optional[int]:
 def cmd_daemon(ctx: Ctx) -> Dict[str, Any]:
     ctx.config()  # refuse to start on an invalid config
     lock = Lock(ctx.lock_path("daemon.lock"))
-    if not lock.acquire():
-        return {"status": "ALREADY_RUNNING", "pid": read_pid(ctx)}
+    for attempt in range(DAEMON_LOCK_TRIES):
+        if lock.acquire():
+            break
+        if attempt + 1 == DAEMON_LOCK_TRIES:
+            return {"status": "ALREADY_RUNNING", "pid": read_pid(ctx)}
+        ctx.deps.sleep(DAEMON_LOCK_RETRY_SECONDS)
     daemon = Daemon(ctx)
     try:
         _write_text(ctx.paths.state / "daemon.pid", f"{os.getpid()}\n")

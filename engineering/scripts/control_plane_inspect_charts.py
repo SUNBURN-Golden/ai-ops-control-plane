@@ -1054,6 +1054,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         result, code = {"status": "ERROR", "reason": "RENDER"}, 1
     finally:
         if own_cache:
+            os.environ.pop("MPLCONFIGDIR", None)
             shutil.rmtree(own_cache, ignore_errors=True)
     print(json.dumps(result, sort_keys=True, ensure_ascii=False))
     return code

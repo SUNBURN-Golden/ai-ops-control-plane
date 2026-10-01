@@ -529,6 +529,20 @@ class CanonTimeRunTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             core.loads_strict('{"a": NaN}')
 
+    def test_loads_strict_rejects_deep_nesting_as_value_error(self):
+        # Hostile JSON must surface as bad JSON (ValueError), never as RecursionError, both when the
+        # parser itself recurses too deep and when a later recursive walk (copy.deepcopy) would.
+        for depth in (2000, 500, core.MAX_JSON_DEPTH + 1):
+            for text in ("[" * depth + "]" * depth,
+                         '{"schema_version":1,"x":' + "[" * depth + "]" * depth + "}"):
+                with self.assertRaises(ValueError):
+                    core.loads_strict(text)
+                with self.assertRaises(ValueError):
+                    core.loads_strict(text.encode("utf-8"))
+        ok = "[" * (core.MAX_JSON_DEPTH - 1) + "{}" + "]" * (core.MAX_JSON_DEPTH - 1)
+        self.assertEqual(copy.deepcopy(core.loads_strict(ok)), json.loads(ok))
+        self.assertEqual(core.loads_strict('{"a":[{"b":[1,2]}],"c":"[[[["}'), {"a": [{"b": [1, 2]}], "c": "[[[["})
+
     def test_time(self):
         self.assertEqual(core.fmt_kst(NOW), "10/01 14:17 KST")
         self.assertEqual(core.kst_day(NOW), "2026-10-01")
@@ -678,6 +692,10 @@ class MarkdownTests(unittest.TestCase):
             out = core.gh_text(text)
             self.assertNotRegex(out, r"#\d")
             self.assertNotRegex(out, r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d")
+        # GH-<n> is a GitHub issue autolink too (a cross-reference event on issue n).
+        for text in ("GH-12", "see gh-7.", "node:GH-12", "노드 GH-12: x", "GH-12 and owner/repo#99", "(Gh-3)"):
+            self.assertNotRegex(core.gh_text(text), r"(?i)(?<![A-Za-z0-9])GH-\d")
+        self.assertEqual(core.gh_text("GHOST-1 ghx-2 node-GH"), "GHOST-1 ghx-2 node-GH")
         out = core.gh_text("https://github.com/BeautifulMind-JT/ZARI/issues/12")
         self.assertNotIn("https://github.com", out)
         self.assertNotIn("BeautifulMind-JT/ZARI@abc", core.gh_text("BeautifulMind-JT/ZARI@abcdef1"))

@@ -359,6 +359,23 @@ class CommandModeTests(unittest.TestCase):
             self.assertEqual((code, out["reason"]), (1, "OUT_DIR"))
             self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["d.json", "file"])
 
+    def test_main_restores_environment(self):
+        saved = os.environ.pop("MPLCONFIGDIR", None)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                data = Path(tmp, "d.json")
+                data.write_text('{"schema": "nope"}', encoding="utf-8")
+                self.run_main(["render", "--data", str(data), "--out", tmp])
+                self.assertIsNone(os.environ.get("MPLCONFIGDIR"))
+                os.environ["MPLCONFIGDIR"] = tmp  # a caller's own setting is left alone
+                self.run_main(["render", "--data", str(data), "--out", tmp])
+                self.assertEqual(os.environ.get("MPLCONFIGDIR"), tmp)
+                self.assertTrue(Path(tmp).is_dir())
+        finally:
+            os.environ.pop("MPLCONFIGDIR", None)
+            if saved is not None:
+                os.environ["MPLCONFIGDIR"] = saved
+
     @unittest.skipIf(HAS_MPL, "matplotlib is installed here")
     def test_missing_matplotlib_is_an_error_line(self):
         with tempfile.TemporaryDirectory() as tmp:

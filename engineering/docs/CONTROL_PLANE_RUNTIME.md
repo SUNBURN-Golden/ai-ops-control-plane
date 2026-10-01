@@ -322,7 +322,7 @@ User 결정 M7(2026-09-30)에 따라 그록봇 컴퓨터의 root 고정 도구 `
 - **발송 경로가 아니다:** 발송, 리뷰, 병합, 레인 선택을 하지 않고, 어떤 gate에도 들어가지 않는다.
 - **자체 자격 증명(예외):** 감리 전용 GitHub 읽기 토큰, 기록 토큰(이 저장소의 원장 이슈만), Slack 봇. 단일 토큰 결정의 감리 한정 예외이고(`AGENTS.md` §11), 발송·병합 자격 증명은 없다.
 - **host 읽기 3개:** 계정 `aiops-inspect-ledger`로 `status --lanes`, `task-status`, `materialize-status`만 부른다. 이 제한은 `.github/control-plane/sudoers-aiops-inspector.example`(설치 이름 `/etc/sudoers.d/aiops-inspector`)이 만든다. helper를 root로 부르지 않는다.
-- **변경 통제:** 감리 코드, 이 sudoers 예시, 설치된 감리 파일을 바꾸려면 정확한 head의 Fable A3 감사와 User 병합이 필요하다. 그록봇은 User가 병합한 커밋의 digest만 설치한다.
+- **변경 통제:** 감리 코드, 이 sudoers 예시, `docs/INSPECTOR.md`의 규범(§3~§11, §14), 설치된 감리 파일을 바꾸려면 정확한 head의 Fable A3 감사와 User 병합이 필요하다. 그록봇은 User가 병합한 커밋의 digest만 설치한다.
 - 규격과 설치 절차: `docs/INSPECTOR.md`.
 
 ## 활성화와 검증

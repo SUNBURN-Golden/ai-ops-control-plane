@@ -60,10 +60,15 @@ DIRECT_PUSH_PER_PAGE = 30
 RUNTIME_RUNS = 5
 MAX_LEDGER_IDS = 50
 MAX_TEXT = 300
+# Characters kept past a text's limit before redaction, so a token cut at the limit is still recognised
+# while the regex work stays bounded (TOKEN_SHAPES is quadratic on inputs such as "eyJ" repeated).
+REDACT_MARGIN = 4096
 REPO_META_TTL = timedelta(hours=24)
 WINDOW_7D = timedelta(days=7)
 WINDOW_14D = timedelta(days=14)
 RECHECK_MAX = timedelta(hours=24)
+# A recheck time this close to the last T1 is due at the very next tick.
+NEXT_TICK = timedelta(minutes=1)
 
 # Product collection groups (the vocabulary of control_plane_inspect_signals.SIGNAL_DEPS).
 PRODUCT_GROUPS = ("host", "plan", "pulls", "commits", "issues", "delivery", "comments", "files", "checks",
@@ -71,6 +76,12 @@ PRODUCT_GROUPS = ("host", "plan", "pulls", "commits", "issues", "delivery", "com
 # Errors that abort the whole T1 (previous facts stay, t1_dirty is set) instead of one group.
 ABORT_REASONS = frozenset({"GITHUB_BUDGET", "HOST_BUDGET", "T1_TIMEOUT", "GITHUB_RATE_LIMIT", "NET_DOWN",
                            "NET_UNKNOWN", "PATH_NOT_ALLOWED", "SECRET_GH_READ"})
+# Read failures (GitHub or host) that leave a group UNKNOWN: the T1 is still committed, but it stays
+# t1_dirty (collected again on the next tick) and counts toward DEGRADED(GITHUB_READ|HOST). Data facts
+# such as FILES_TRUNCATED, DELIVERY_PR_MISSING, CHECKS_FORBIDDEN or EVENTS_MISSING are steady and are not
+# listed here.
+READ_FAILURE_REASONS = frozenset({"GITHUB_5XX", "GITHUB_READ", "GITHUB_JSON", "GITHUB_NOT_FOUND", "MAX_RESPONSE",
+                                  "HOST_TIMEOUT", "HOST_UNAVAILABLE", "HOST_REFUSED", "HOST_ARGV", "HOST_OUTPUT"})
 # Host failures after which no further host call is attempted in this T1.
 HOST_DOWN_REASONS = frozenset({"HOST_TIMEOUT", "HOST_UNAVAILABLE"})
 # State names (control_plane_inspect_core.StateStore, without extension).
@@ -163,7 +174,10 @@ class _Redactor:
     def text(self, value: Any, limit: int = MAX_TEXT) -> Optional[str]:
         if not isinstance(value, str):
             return None
-        clean, hits = core.redact(value, self.live)
+        # CONTRACT NOTE: only the first limit + REDACT_MARGIN characters are redacted (and kept up to
+        # limit); a token that starts before the limit still shows enough of itself to match its shape,
+        # and a live value is matched by any 20-character window.
+        clean, hits = core.redact(value[:limit + REDACT_MARGIN], self.live)
         self.hits += hits["live"] + hits["shape"]
         return clean[:limit]
 
@@ -435,6 +449,7 @@ class _Run:
         self.gh_start = reader.calls
         self.host_calls = 0
         self.host_down: Optional[str] = None
+        self.read_errors: Set[str] = set()
         self.old_cache = {k: _dict(cache.get(k)) for k in ("plan", "files", "checks", "commit_pulls", "control")}
         self.cache: Dict[str, Dict[str, Any]] = {k: {} for k in self.old_cache}
 
@@ -451,20 +466,39 @@ class _Run:
         if self.github_calls() >= self.budgets.github_calls:
             raise InspectError("GITHUB_BUDGET", f"T1 exceeded {self.budgets.github_calls} GitHub requests")
 
+    def note(self, reason: Optional[str]) -> None:
+        """Remember a read failure of this T1 (see READ_FAILURE_REASONS)."""
+        if reason in READ_FAILURE_REASONS:
+            self.read_errors.add(reason)
+
+    def _read(self, path: str, params: Optional[Dict[str, Any]], forbidden: Optional[str] = None) -> Any:
+        """``forbidden``: the steady data reason a plain 403 (not a rate limit) on this path is raised as,
+        instead of a read failure (a read token without that permission gets it on every T1)."""
+        try:
+            return self.reader.get(path, params)
+        except InspectError as exc:
+            if forbidden and exc.reason == "GITHUB_READ" and exc.detail.endswith(" -> 403"):
+                raise InspectError(forbidden, exc.detail) from None
+            self.note(exc.reason)
+            raise
+
     def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         self._gh_budget()
-        return self.reader.get(path, params)
+        return self._read(path, params)
 
-    def pages(self, path: str, params: Dict[str, Any], max_pages: int, key: Optional[str] = None) -> Tuple[List[Any], bool]:
+    def pages(self, path: str, params: Dict[str, Any], max_pages: int, key: Optional[str] = None,
+              forbidden: Optional[str] = None) -> Tuple[List[Any], bool]:
         """Paginate page by page so the request budget is checked before every page."""
         items: List[Any] = []
         for page in range(1, max_pages + 1):
             self._gh_budget()
-            resp = self.reader.get(path, dict(params, page=page))
+            resp = self._read(path, dict(params, page=page), forbidden)
             if resp.status != 200:
+                self.note("GITHUB_READ")
                 raise InspectError("GITHUB_READ", f"GET {path} -> {resp.status} while paginating")
             data = resp.json.get(key) if key and isinstance(resp.json, dict) else resp.json
             if not isinstance(data, list):
+                self.note("GITHUB_JSON")
                 raise InspectError("GITHUB_JSON", f"GET {path}: page is not a list")
             items.extend(data)
             per_page = params.get("per_page", 30)
@@ -484,6 +518,7 @@ class _Run:
         except InspectError as exc:
             if exc.reason in HOST_DOWN_REASONS:
                 self.host_down = exc.reason
+            self.note(exc.reason)
             raise
 
     # -- caches by immutable SHA
@@ -561,6 +596,7 @@ def _collect_control(run: _Run, config: Dict[str, Any], main_sha: Optional[str],
     def runs() -> List[Dict[str, Any]]:
         resp = run.get(f"/repos/{ctrl}/actions/workflows/{RUNTIME_WORKFLOW}/runs", {"per_page": RUNTIME_RUNS})
         if resp.status != 200:
+            run.note("GITHUB_READ")
             raise InspectError("GITHUB_READ", "runtime workflow runs unavailable")
         out = []
         for item in _list(_dict(resp.json).get("workflow_runs"))[:RUNTIME_RUNS]:
@@ -583,6 +619,7 @@ def _plan_fact(run: _Run, repo: str, branch: str, project: Optional[str], now: d
     def latest() -> Optional[Dict[str, Any]]:
         resp = run.get(f"/repos/{repo}/commits", {"path": PLAN_PATH, "sha": branch, "per_page": 1})
         if resp.status != 200:
+            run.note("GITHUB_READ")
             raise InspectError("GITHUB_READ", "plan commits unavailable")
         items = _list(resp.json)
         if not items:
@@ -666,19 +703,34 @@ def _pr_files(run: _Run, repo: str, number: int, head: Optional[str]) -> List[Di
     return files
 
 
-def _check_runs(run: _Run, repo: str, sha: str) -> List[Dict[str, Any]]:
-    """Check runs at one commit, cached by SHA once every run is completed."""
+def _checks_final(required: Sequence[str], runs: List[Dict[str, Any]]) -> bool:
+    """Whether a run list can no longer change what it says: the required checks PASS, or, with no
+    required checks configured, every run is completed."""
+    state = cp_program.required_checks_state(required, runs)
+    if state == "NOT_CONFIGURED":
+        return bool(runs) and all(r.get("status") == "completed" for r in runs)
+    return state == "PASS"
+
+
+def _check_runs(run: _Run, repo: str, sha: str, required: Sequence[str] = ()) -> List[Dict[str, Any]]:
+    """Check runs at one commit, cached by SHA once final (see ``_checks_final``)."""
+    # CONTRACT NOTE: "cache by SHA once all completed" is narrowed to a final answer: a required check
+    # not created yet reads PENDING and a FAIL can be re-run, so only a PASS of the current required list
+    # is cached (and a cached list is reused only while it still PASSes that list).
     key = f"{repo}@{sha}"
     cached = run.cached("checks", key)
-    if isinstance(cached, list):
+    if isinstance(cached, list) and _checks_final(required, cached):
         return cached
+    run.cache["checks"].pop(key, None)
+    # A read token without the Checks permission (INSPECTOR.md §12.7) gets a plain 403 here on every
+    # T1: CHECKS_FORBIDDEN is a steady data fact ("checks" UNKNOWN), not a read failure.
     items, truncated = run.pages(f"/repos/{repo}/commits/{sha}/check-runs", {"per_page": 100}, MAX_CHECK_PAGES,
-                                 key="check_runs")
+                                 key="check_runs", forbidden="CHECKS_FORBIDDEN")
     if truncated:
         raise InspectError("CHECKS_TRUNCATED", "too many check runs")
     runs = sorted((r for r in (_reduce_run(x, run.red) for x in items) if r),
                   key=lambda r: (r["name"] or "", r["id"] or 0))
-    if runs and all(r["status"] == "completed" for r in runs):
+    if _checks_final(required, runs):
         run.keep("checks", key, runs)
     return runs
 
@@ -698,10 +750,15 @@ def _delivery_pr(run: _Run, repo: str, number: int) -> Optional[Dict[str, Any]]:
             "updated_at": _when(data.get("updated_at"))}
 
 
-def _blocked_since(run: _Run, repo: str, number: int, labels: Sequence[str]) -> Optional[str]:
-    """Earliest of the times each current blocking label was last added (issue events, 3 pages)."""
+def _blocked_since(run: _Run, repo: str, number: int, labels: Sequence[str]) -> Tuple[str, Dict[str, str]]:
+    """Earliest of the times each current blocking label was last added (issue events, 3 pages), and
+    those times per label (``label_since``; S7 reads the age of needs-lane-cleanup itself)."""
     current = [label for label in labels if label in BLOCKING_LABELS]
-    items, _ = run.pages(f"/repos/{repo}/issues/{number}/events", {"per_page": 100}, MAX_EVENT_PAGES)
+    items, truncated = run.pages(f"/repos/{repo}/issues/{number}/events", {"per_page": 100}, MAX_EVENT_PAGES)
+    if truncated:
+        # CONTRACT NOTE: events come oldest first; a list cut at 3 pages may miss the latest re-add of a
+        # label, so its age would be overstated: "events" is UNKNOWN instead.
+        raise InspectError("EVENTS_TRUNCATED", f"issue {number} has more than {MAX_EVENT_PAGES} pages of events")
     last_added: Dict[str, datetime] = {}
     for event in items:
         if not isinstance(event, dict) or event.get("event") != "labeled":
@@ -713,7 +770,7 @@ def _blocked_since(run: _Run, repo: str, number: int, labels: Sequence[str]) -> 
     if not last_added:
         # CONTRACT NOTE: a blocking label with no labeled event in 3 pages has an unknown age.
         raise InspectError("EVENTS_MISSING", "no labeled event for a current blocking label")
-    return core.iso(min(last_added.values()))
+    return core.iso(min(last_added.values())), {name: core.iso(when) for name, when in sorted(last_added.items())}
 
 
 def _node_issue(run: _Run, repo: str, number: Optional[int], t0_issues: Dict[int, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -733,8 +790,12 @@ def _node_issue(run: _Run, repo: str, number: Optional[int], t0_issues: Dict[int
 
 def _exceptions(run: _Run, repo: str, now: datetime) -> Dict[int, int]:
     """APPROVED_SMALL_EXCEPTION consult results per issue over the last 14 days (GH_TEXT, claimed)."""
-    items, _ = run.pages(f"/repos/{repo}/issues/comments",
-                         {"since": core.iso(now - WINDOW_14D), "per_page": 100}, MAX_EXCEPTION_PAGES)
+    items, truncated = run.pages(f"/repos/{repo}/issues/comments",
+                                 {"since": core.iso(now - WINDOW_14D), "per_page": 100}, MAX_EXCEPTION_PAGES)
+    if truncated:
+        # CONTRACT NOTE: comments come oldest first; a list cut at 5 pages misses the newest results, so
+        # the count is incomplete: "comments" is UNKNOWN instead of an undercount.
+        raise InspectError("EXCEPTIONS_TRUNCATED", f"more than {MAX_EXCEPTION_PAGES} pages of comments in 14 days")
     counts: Dict[int, int] = {}
     for comment in items:
         if not isinstance(comment, dict) or not isinstance(comment.get("body"), str):
@@ -866,6 +927,7 @@ def _collect_product(run: _Run, repo: str, prefix: str, info: Dict[str, Any], pr
         resp = run.get(f"/repos/{repo}/commits", {"sha": branch, "since": core.iso(now - WINDOW_7D),
                                                   "per_page": DIRECT_PUSH_PER_PAGE})
         if resp.status != 200:
+            run.note("GITHUB_READ")
             raise InspectError("GITHUB_READ", "default branch commits unavailable")
         out = []
         for item in _list(resp.json):
@@ -877,6 +939,7 @@ def _collect_product(run: _Run, repo: str, prefix: str, info: Dict[str, Any], pr
             if not isinstance(numbers, list):
                 listed = run.get(f"/repos/{repo}/commits/{sha}/pulls")
                 if listed.status != 200 or not isinstance(listed.json, list):
+                    run.note("GITHUB_READ")
                     raise InspectError("GITHUB_READ", "commit pulls unavailable")
                 numbers = sorted(n for n in (_pos_int(_dict(p).get("number")) for p in listed.json) if n)
                 run.keep("commit_pulls", key, numbers)
@@ -895,7 +958,7 @@ def _collect_node(run: _Run, repo: str, program: str, node_id: str, required: Li
     task_id = cp_program.task_id_for(program, node_id)
     node: Dict[str, Any] = {"task_id": task_id, "materialization": None, "rows": None, "delivery_pr": None,
                             "merge_runs": None, "delivery_files": None, "completion": None, "issue": None,
-                            "blocked_since": None, "exceptions_14d": 0}
+                            "blocked_since": None, "label_since": None, "exceptions_14d": 0}
     mstatus = _guard(unknown, "host", lambda: run.red.obj(run.host_call(run.host.materialize_status, program,
                                                                         node_id)))
     if mstatus is None:
@@ -931,7 +994,8 @@ def _collect_node(run: _Run, repo: str, program: str, node_id: str, required: Li
                 head = _dict(pr.get("head")).get("sha")
                 node["delivery_files"] = _guard(unknown, "files", lambda: _pr_files(run, repo, number, head))
                 if pr.get("merged") and pr.get("merge_commit_sha"):
-                    merge_runs = _guard(unknown, "checks", lambda: _check_runs(run, repo, pr["merge_commit_sha"]))
+                    merge_runs = _guard(unknown, "checks",
+                                        lambda: _check_runs(run, repo, pr["merge_commit_sha"], required))
                     node["merge_runs"] = merge_runs
     if complete:
         node["completion"] = cp_program.node_completion(mstatus, repo, rows, pr, required, merge_runs)
@@ -941,8 +1005,9 @@ def _collect_node(run: _Run, repo: str, program: str, node_id: str, required: Li
     node["issue"] = issue
     if issue and issue.get("state") == "open" and any(l in BLOCKING_LABELS for l in issue.get("labels") or []):
         # CONTRACT NOTE: events are read only for OPEN issues; a closed issue's labels block nothing.
-        node["blocked_since"] = _guard(unknown, "events",
-                                       lambda: _blocked_since(run, repo, issue["number"], issue["labels"]))
+        blocked = _guard(unknown, "events", lambda: _blocked_since(run, repo, issue["number"], issue["labels"]))
+        if blocked is not None:
+            node["blocked_since"], node["label_since"] = blocked
     return node
 
 
@@ -1001,6 +1066,11 @@ def collect(reader: Any, host: Any, config: Dict[str, Any], state: core.StateSto
     view = probe_result if isinstance(probe_result, dict) else _probe_view(state)
     ctrl = config["control_repository"]
     top_unknown: Set[str] = set()
+    # Read failures the probe already met (target, control branch, lane board) count for this T1 too.
+    run.note(view.get("lanes_error"))
+    run.note(_dict(view.get("control")).get("error"))
+    for info in _dict(view.get("targets")).values():
+        run.note(_dict(info).get("error"))
 
     ctrl_info = _dict(view.get("control"))
     main_sha = ctrl_info.get("main_sha")
@@ -1054,7 +1124,7 @@ def collect(reader: Any, host: Any, config: Dict[str, Any], state: core.StateSto
                              "unknown": sorted(top_unknown),
                              "stats": {"github_calls": run.github_calls(), "host_calls": run.host_calls,
                                        "seconds": round(max(0.0, budgets.clock() - run.started), 3),
-                                       "redactions": red.hits}}
+                                       "redactions": red.hits, "read_errors": sorted(run.read_errors)}}
     return facts
 
 
@@ -1127,6 +1197,10 @@ def _product_core(product: Dict[str, Any], now: datetime, buckets: Dict[str, Tup
             node["issue"] = _drop(node["issue"], ("updated_at",))
         blocked = node.pop("blocked_since", None)
         node["blocked_bucket"] = _bucket(_hours_since(now, blocked), buckets["blocked"])
+        label_since = node.pop("label_since", None)
+        if isinstance(label_since, dict):
+            node["label_buckets"] = {label: _bucket(_hours_since(now, when), buckets["blocked"])
+                                     for label, when in sorted(label_since.items())}
         completion = _dict(node.get("completion"))
         merged_at = _dict(node.get("delivery_pr")).get("merged_at")
         node["pending_checks_bucket"] = (_bucket(_hours_since(now, merged_at), buckets["pending"])
@@ -1211,9 +1285,17 @@ def next_recheck_at(facts: Dict[str, Any], now: datetime, config: Optional[Dict[
             if not isinstance(node, dict):
                 continue
             crossings(_dt(node.get("blocked_since")), buckets["blocked"])
+            for when in _dict(node.get("label_since")).values():
+                crossings(_dt(when), buckets["blocked"])
             completion = _dict(node.get("completion"))
             if completion.get("stage") == "DONE" and completion.get("merge_checks") == "PENDING":
-                crossings(_dt(_dict(node.get("delivery_pr")).get("merged_at")), buckets["pending"])
+                merged_at = _dt(_dict(node.get("delivery_pr")).get("merged_at"))
+                crossings(merged_at, buckets["pending"])
+                # CONTRACT NOTE: a check run finishing changes nothing the T0 probe reads, so while a DONE
+                # node's post-merge checks are PENDING (merged within 7 days) every tick runs T1;
+                # otherwise a FAIL would surface only at the 24 h crossing or the daily line.
+                if merged_at is None or now - merged_at <= WINDOW_7D:
+                    candidates.append(now + NEXT_TICK)
         crossings(_dt(_done_gap_base(product)), buckets["done_gap"])
         # CONTRACT NOTE: a merge or direct push leaving the 7-day window also changes the material facts.
         for item in _list(product.get("merged_7d")):
@@ -1262,6 +1344,32 @@ def _new_baseline(baseline: Dict[str, Any], facts: Dict[str, Any]) -> Dict[str, 
     return out
 
 
+def _idle_progress(previous: Any, facts: Dict[str, Any], now: datetime,
+                   config: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Optional[datetime]]:
+    """The idle-while-waiting run seen by committed T1s (``{"since", "points"}``) and, while that run is
+    still too short for S7 (idle_waiting_snapshots points spanning idle_waiting_min_span_h), the time
+    of the next T1 it needs. Idle lanes with ready nodes change nothing the probe reads."""
+    import control_plane_inspect_signals as signals  # lazy: signals never imports this module
+
+    if not signals.idle_waiting_hit(facts, now):
+        return None, None
+    th = _thresholds(config)
+    prev = _dict(previous)
+    since = _dt(prev.get("since"))
+    points = prev.get("points") if _is_int(prev.get("points")) and prev.get("points") > 0 else 0
+    if since is None or since > now:
+        since, points = now, 0
+    points += 1
+    span_due = since + timedelta(hours=th["idle_waiting_min_span_h"])
+    if points < th["idle_waiting_snapshots"] - 1:
+        due: Optional[datetime] = now + NEXT_TICK
+    elif points < th["idle_waiting_snapshots"] or now < span_due:
+        due = max(now + NEXT_TICK, span_due)
+    else:
+        due = None
+    return {"since": core.iso(since), "points": points}, due
+
+
 def commit_t1(state: core.StateStore, facts: Dict[str, Any], now: datetime,
               config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Write the atomic group after a successful T1 and return ``{"hashes", "next_recheck_at"}``.
@@ -1275,14 +1383,26 @@ def commit_t1(state: core.StateStore, facts: Dict[str, Any], now: datetime,
     hashes = hashes_of(facts, config)
     due = next_recheck_at(facts, now, config)
     previous = _recheck(state)
+    idle, idle_due = _idle_progress(previous.get("idle"), facts, now, config)
+    if idle_due is not None:
+        due = min(due, idle_due)
     state.write(ST_RECHECK, dict(previous, t1_dirty=True))
     state.stage(ST_FACTS, facts)
     state.stage(ST_HASHES, dict(hashes, at=core.iso(now)))
     state.stage(ST_BASELINE, _new_baseline(_dict(state.read(ST_BASELINE, None)), facts))
     state.commit_staged([ST_FACTS, ST_HASHES, ST_BASELINE] + list(T1_STAGED))
     state.append_jsonl(ST_HISTORY, history_row(facts, now))
-    state.stage(ST_RECHECK, {"next_recheck_at": core.iso(due), "t1_dirty": False, "last_t1": core.iso(now),
-                             "t1_failures": 0, "last_error": None})
+    record: Dict[str, Any] = {"next_recheck_at": core.iso(due), "t1_dirty": False, "last_t1": core.iso(now),
+                              "t1_failures": 0, "last_error": None, "idle": idle}
+    errors = sorted(r for r in _list(_dict(facts.get("stats")).get("read_errors")) if r in READ_FAILURE_REASONS)
+    if errors:
+        # CONTRACT NOTE: a T1 with read failures is committed (its groups are UNKNOWN, three-valued
+        # logic), but it stays dirty so the next tick collects again (the change that started it is
+        # not lost), and it counts as a failure toward DEGRADED like an aborted T1. A GitHub reason
+        # wins over a host reason for last_error.
+        failures = previous.get("t1_failures") if _is_int(previous.get("t1_failures")) else 0
+        record.update(t1_dirty=True, t1_failures=failures + 1, last_error=errors[0], last_failure=core.iso(now))
+    state.stage(ST_RECHECK, record)
     state.commit_staged([ST_RECHECK])
     return {"hashes": hashes, "next_recheck_at": core.iso(due)}
 

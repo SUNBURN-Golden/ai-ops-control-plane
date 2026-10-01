@@ -376,6 +376,19 @@ class WriterTests(unittest.TestCase):
                     self.assertReason(reason, getattr(w, method), "본문")
                     self.assertEqual(len(t.calls), 1)
 
+    def test_not_connected_detail_suffix_is_pinned(self):
+        # publish.NOT_CONNECTED matches on this suffix: a NET_DOWN refusal sent nothing and is no attempt.
+        import control_plane_inspect_publish as pub
+        self.assertEqual(pub.NOT_CONNECTED, "connection not opened")
+        for method in ("create_comment", "update_body"):
+            w, _ = self.writer(InspectError("NET_DOWN"))
+            err = self.assertReason("GITHUB_WRITE_REFUSED", getattr(w, method), "본문")
+            self.assertTrue(err.detail.endswith(pub.NOT_CONNECTED), err.detail)
+            for response in ((401, {}, b"{}"), (422, {}, b"{}")):
+                w, _ = self.writer(response)
+                err = self.assertReason("GITHUB_WRITE_REFUSED", getattr(w, method), "본문")
+                self.assertFalse(err.detail.endswith(pub.NOT_CONNECTED), err.detail)
+
     def test_create_comment_unreadable_2xx_is_unknown(self):
         for payload in (b"not json", b"[]", b'{"id": "9", "html_url": "u", "created_at": "t"}',
                         b'{"id": 0, "html_url": "u", "created_at": "t"}',

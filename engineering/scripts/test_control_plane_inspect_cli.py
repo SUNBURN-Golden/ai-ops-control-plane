@@ -187,6 +187,8 @@ class World:
             at = iso(self.now)
             comment = {"id": self.next_id, "body": text, "created_at": at, "updated_at": at, "visible": True,
                        "html_url": f"https://github.com/{CTRL}/issues/{LEDGER}#issuecomment-{self.next_id}"}
+            if self.post_mode == "REFUSED":   # e.g. an expired ledger PAT: nothing is created
+                return 401, {}, b'{"message":"Bad credentials"}'
             self.ledger.append(comment)
             if self.post_mode == "UNKNOWN_HIDDEN":
                 comment["visible"] = False
@@ -413,7 +415,7 @@ class EndToEndTests(Base):
         self.assertTrue(any("charts" in str(p) for p in (self.paths.runs / first["run"]).iterdir()))
 
         # Tick 2: nothing changed -> T1 skipped; only the heartbeat edit and the dead-man reschedule.
-        self.clock.t = NOW + timedelta(hours=1)
+        self.clock.t = NOW + timedelta(minutes=30)
         world.now = self.clock.t
         slack.calls.clear()
         before = (world.counts("POST"), world.counts("PATCH"))
@@ -467,6 +469,52 @@ class EndToEndTests(Base):
         for secret in SECRETS.values():
             self.assertNotIn(secret, everything)
 
+    def test_failed_ledger_comment_is_announced_by_the_next_t1(self) -> None:
+        world = self.world
+        self.tick()
+        # Tick 2: an orphan merge (NEW findings) while the ledger PAT is refused -> REFUSED, nothing sent.
+        self.clock.t = NOW + timedelta(hours=2)
+        world.now = self.clock.t
+        world.pulls.insert(0, {"number": 13, "state": "closed", "merged_at": iso(self.clock.t - timedelta(minutes=30)),
+                               "merge_commit_sha": sha("m13"), "head": {"sha": sha("h13")}, "base": {"ref": "main"},
+                               "updated_at": iso(self.clock.t - timedelta(minutes=30)), "title": "x"})
+        world.pull_files[13] = [{"filename": "src/orphan.py", "status": "added"}]
+        world.post_mode = "REFUSED"
+        second = self.tick()
+        self.assertEqual((second["t1"], second["published"]), ("DONE", True))
+        failed_run = second["run"]
+        changed = {c["id"] for c in self.store.read("findings")["unannounced"]["changes"]}
+        self.assertIn("INS-ZARI-0001", changed)
+        # Ticks 3-4: no change; the comment is retried and ends FAILED (3 attempts), so no card either.
+        for hours in (3, 4):
+            self.clock.t = NOW + timedelta(hours=hours)
+            world.now = self.clock.t
+            self.assertEqual(self.tick()["t1"], "SKIPPED")
+        failed = [j for j in self.journals() if j["run"] == failed_run][0]
+        self.assertEqual((failed["comment"]["state"], failed["card"]["state"]), (pub.FAILED, pub.SKIPPED))
+        self.assertEqual(world.counts("POST"), 4)
+        # Tick 5: the PAT works again; the next T1 has no new change but still announces the lost ones.
+        world.post_mode = None
+        self.clock.t = NOW + timedelta(hours=5)
+        world.now = self.clock.t
+        recheck = self.store.read("recheck")
+        self.store.write("recheck", dict(recheck, t1_dirty=True))
+        fifth = self.tick()
+        self.assertEqual((fifth["t1"], fifth["published"]), ("DONE", True))
+        self.assertEqual(fifth["carried"], len(changed))
+        newest = self.journals()[-1]
+        self.assertEqual((newest["run"], newest["comment"]["state"]), (fifth["run"], pub.POSTED))
+        self.assertIn("INS-ZARI-0001", world.ledger[-1]["body"])
+        self.assertIn("새 발견", world.ledger[-1]["body"])
+        self.assertEqual(self.store.read("findings")["unannounced"]["run"], fifth["run"])
+        # Tick 6: announced -> nothing is carried again.
+        self.clock.t = NOW + timedelta(hours=6)
+        world.now = self.clock.t
+        self.store.write("recheck", dict(self.store.read("recheck"), t1_dirty=True))
+        sixth = self.tick()
+        self.assertEqual((sixth["t1"], sixth["published"]), ("DONE", False))
+        self.assertNotIn("carried", sixth)
+
     def test_font_missing_posts_text_only(self) -> None:
         self.render.mode = "FONT_MISSING"
         result = self.tick()
@@ -496,6 +544,58 @@ class EndToEndTests(Base):
         self.assertTrue(self.store.read("recheck")["t1_dirty"])
         self.assertIsNone(core.kill_state(self.paths))  # handled failures never halt
         self.assertEqual(self.world.counts("POST"), 0)
+
+    def test_failure_after_t1_commit_reruns_t1_and_never_double_posts(self) -> None:
+        # The journal is prepared, then findings.json cannot be written (disk full): the next tick must
+        # collect again (t1_dirty) so its newer journal supersedes this one instead of posting it and then
+        # posting the same changes a second time when the stale findings are recomputed later.
+        orig_write = core.StateStore.write
+        failed = []
+
+        def write(store: core.StateStore, name: str, obj: Any) -> None:
+            if name == "findings" and not failed:
+                failed.append(name)
+                raise OSError(28, "No space left on device")
+            orig_write(store, name, obj)
+        core.StateStore.write = write  # type: ignore[assignment]
+        self.addCleanup(setattr, core.StateStore, "write", orig_write)
+        code, first, _ = self.cmd("tick")
+        self.assertEqual((code, first["reason"]), (1, "INTERNAL"))
+        self.assertEqual(failed, ["findings"])
+        self.assertTrue(self.store.read("recheck")["t1_dirty"])
+        self.assertIsNone(self.store.read("findings"))
+        self.assertEqual(self.world.counts("POST"), 0)
+        self.clock.t = NOW + timedelta(hours=1)
+        self.world.now = self.clock.t
+        second = self.tick()
+        self.assertEqual((second["t1"], second["t1_reason"], second["published"]), ("DONE", "DIRTY", True))
+        self.assertIsNotNone(self.store.read("findings"))
+        older, newest = self.journals()
+        self.assertEqual(older["comment"]["state"], pub.SUPERSEDED)
+        self.assertEqual(newest["comment"]["state"], pub.POSTED)
+        self.assertEqual(self.world.counts("POST"), 1)
+        self.clock.t = NOW + timedelta(hours=2)
+        self.world.now = self.clock.t
+        third = self.tick()
+        self.assertEqual((third["t1"], third["published"]), ("SKIPPED", False))
+        self.assertEqual(self.world.counts("POST"), 1)
+
+    def test_failure_before_t1_commit_or_after_findings_keeps_recheck(self) -> None:
+        self.tick()
+        recheck = self.store.read("recheck")
+        self.assertFalse(recheck["t1_dirty"])
+        # advance() failing after findings.json is written must not force another T1.
+        self.clock.t = NOW + timedelta(minutes=30)
+        self.world.now = self.clock.t
+        original = pub.Publisher.advance
+
+        def broken(publisher: pub.Publisher, now: datetime) -> Dict[str, Any]:
+            raise InspectError("CONFIG", "boom")
+        pub.Publisher.advance = broken  # type: ignore[assignment]
+        self.addCleanup(setattr, pub.Publisher, "advance", original)
+        code, result, _ = self.cmd("tick")
+        self.assertEqual((code, result["reason"]), (1, "CONFIG"))
+        self.assertEqual(self.store.read("recheck"), recheck)
 
 
 # ---------------------------------------------------------------------------- locks, kill switch, errors
@@ -762,6 +862,137 @@ class ProbeAndPreflightTests(Base):
         self.assertEqual(cli.launch_render(ctx, self.root / "d.json", self.root, "nobody-here")["reason"],
                          "RENDER_ACCOUNT")
 
+    def test_render_limits_match_the_contract(self) -> None:
+        self.assertEqual(dict(cli.RENDER_LIMITS), {"RLIMIT_CPU": 60, "RLIMIT_AS": 1536 << 20,
+                                                   "RLIMIT_FSIZE": 20 << 20, "RLIMIT_NOFILE": 64, "RLIMIT_NPROC": 32})
+        import resource
+        for name, _ in cli.RENDER_LIMITS:
+            self.assertTrue(hasattr(resource, name), name)
+
+    def test_launch_render_timeout_kills_its_own_group_and_clears_records(self) -> None:
+        ctx = cli.Ctx(self.root, self.deps)
+        out_dir = self.root / "render" / "run1"
+        out_dir.mkdir(parents=True)
+        data = out_dir / "charts.json"
+        data.write_text("{}")
+        proc_dir = self.root / "proc" / "4321"
+        proc_dir.mkdir(parents=True)
+        (proc_dir / "stat").write_text("4321 (python3) S 1 4321 4321 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 "
+                                       "987654 1000 100")
+        seen: Dict[str, Any] = {}
+        test = self
+
+        class Proc:
+            pid = 4321
+
+            def __init__(self) -> None:
+                self.waits = 0
+
+            def wait(self, timeout: Optional[float] = None) -> int:
+                self.waits += 1
+                if self.waits == 1:
+                    seen["children"] = cli.read_children(ctx)
+                    test.assertEqual(timeout, cli.RENDER_WALL_SECONDS)
+                    raise subprocess.TimeoutExpired("x", 120)
+                return -9
+
+        def popen(argv: List[str], **kwargs: Any) -> Any:
+            seen["argv"], seen["kwargs"] = argv, kwargs
+            return Proc()
+        original = cli.subprocess.Popen
+        cli.subprocess.Popen = popen  # type: ignore[assignment]
+        self.addCleanup(setattr, cli.subprocess, "Popen", original)
+        result = cli.launch_render(ctx, data, out_dir, "aiops-plot")
+        self.assertEqual(result, {"status": "ERROR", "reason": "RENDER_TIMEOUT"})
+        self.assertEqual(self.kills, [(-4321, signal.SIGKILL)])
+        self.assertEqual(cli.read_children(ctx)["render"], [])
+        self.assertFalse((out_dir.parent / f".{out_dir.name}.stdout").exists())
+        record = seen["children"]["render"]
+        self.assertEqual([(r["pgid"], r["uid"], r["start"]) for r in record], [(4321, 990, "987654")])
+        kwargs = seen["kwargs"]
+        for key, value in (("user", 990), ("group", 990), ("extra_groups", []), ("umask", 0o077),
+                           ("start_new_session", True), ("env", cli.CLEAN_ENV), ("close_fds", True),
+                           ("stdin", subprocess.DEVNULL), ("stderr", subprocess.DEVNULL),
+                           ("cwd", str(out_dir))):
+            self.assertEqual(kwargs[key], value, key)
+        self.assertIs(kwargs["preexec_fn"], cli._render_limits)
+        self.assertEqual(seen["argv"][1:4], ["-I", cli.CHARTS_PATH, "render"])
+
+    def installed_ctx(self, stats: Dict[Path, os.stat_result]) -> cli.Ctx:
+        ctx = cli.Ctx(self.root, self.deps, installed=True, check_manifest=False)
+        # Not root in CI: the root-owner checks of config and secrets are covered in the core tests.
+        ctx.config = lambda: core.load_config(ctx.paths.config, require_root_owner=False)  # type: ignore[assignment]
+
+        def secret(kind: str) -> str:
+            value = core.load_secret(ctx.paths.secret(kind), kind, require_root_owner=False)
+            if value not in ctx.live:
+                ctx.live.append(value)
+            return value
+        ctx.secret = secret  # type: ignore[assignment]
+        real = os.lstat
+
+        def lstat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            fake = stats.get(Path(path))
+            return fake if fake is not None else real(path, *args, **kwargs)
+        cli.os.lstat = lstat  # type: ignore[assignment]
+        self.addCleanup(setattr, cli.os, "lstat", real)
+        return ctx
+
+    @staticmethod
+    def fake_stat(mode: int, uid: int = 0, gid: int = 0) -> os.stat_result:
+        return os.stat_result((mode, 1, 1, 1, uid, gid, 0, 0, 0, 0))
+
+    def good_stats(self) -> Dict[Path, os.stat_result]:
+        import stat as st
+        p = self.paths
+        return {p.config: self.fake_stat(st.S_IFREG | 0o600), p.manifest: self.fake_stat(st.S_IFREG | 0o644),
+                p.state: self.fake_stat(st.S_IFDIR | 0o700), p.runs: self.fake_stat(st.S_IFDIR | 0o700),
+                p.lib: self.fake_stat(st.S_IFDIR | 0o755), p.tool_bin: self.fake_stat(st.S_IFREG | 0o755),
+                p.render: self.fake_stat(st.S_IFDIR | 0o750, gid=990)}
+
+    def test_preflight_checks_installed_paths(self) -> None:
+        import stat as st
+        stats = self.good_stats()
+        ctx = self.installed_ctx(stats)
+        self.render.mode = "OK"
+        result = cli.cmd_preflight(ctx)
+        paths = {c["name"]: c for c in result["checks"] if c["name"].startswith("path_")}
+        self.assertEqual(sorted(paths), ["path_config", "path_lib", "path_manifest", "path_render", "path_runs",
+                                         "path_state", "path_tool"])
+        self.assertTrue(all(c["ok"] and c["required"] for c in paths.values()), paths)
+        p = self.paths
+        for path, fake, name, reason in (
+                (p.render, self.fake_stat(st.S_IFDIR | 0o755, gid=990), "path_render", "PATH_MODE"),
+                (p.render, self.fake_stat(st.S_IFDIR | 0o750, gid=0), "path_render", "PATH_GROUP"),
+                (p.config, self.fake_stat(st.S_IFREG | 0o600, uid=1000), "path_config", "PATH_OWNER"),
+                (p.state, self.fake_stat(st.S_IFREG | 0o700), "path_state", "PATH_KIND"),
+                (p.tool_bin, self.fake_stat(st.S_IFLNK | 0o777), "path_tool", "PATH_KIND"),
+                (p.manifest, self.fake_stat(st.S_IFREG | 0o664), "path_manifest", "PATH_MODE")):
+            stats.clear()
+            stats.update(self.good_stats())
+            stats[path] = fake
+            result = cli.cmd_preflight(ctx)
+            check = [c for c in result["checks"] if c["name"] == name][0]
+            self.assertEqual((result["status"], check["ok"], check["detail"]), ("FAIL", False, reason), name)
+
+    def test_owner_mode_reasons(self) -> None:
+        import stat as st
+        target = self.root / "x"
+        stats = {target: self.fake_stat(st.S_IFDIR | 0o750, gid=990)}
+        self.installed_ctx(stats)
+        self.assertEqual(cli._owner_mode(target, 0o750, gid=990, directory=True), "OK")
+        self.assertEqual(cli._owner_mode(target, 0o750, directory=True), "OK")
+        for fake, kwargs, reason in ((self.fake_stat(st.S_IFDIR | 0o750), {"directory": False}, "PATH_KIND"),
+                                     (self.fake_stat(st.S_IFREG | 0o750), {"directory": True}, "PATH_KIND"),
+                                     (self.fake_stat(st.S_IFDIR | 0o750, uid=990), {"directory": True}, "PATH_OWNER"),
+                                     (self.fake_stat(st.S_IFDIR | 0o700, gid=990), {"directory": True}, "PATH_MODE"),
+                                     (self.fake_stat(st.S_IFDIR | 0o750, gid=0), {"directory": True, "gid": 990},
+                                      "PATH_GROUP")):
+            stats[target] = fake
+            with self.assertRaises(InspectError) as caught:
+                cli._owner_mode(target, 0o750, **kwargs)
+            self.assertEqual(caught.exception.reason, reason)
+
     @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "needs root to switch to an account")
     def test_launch_render_real_child_as_unprivileged_account(self) -> None:
         import pwd
@@ -780,9 +1011,14 @@ class ProbeAndPreflightTests(Base):
         os.chmod(str(data), 0o644)
         ctx = cli.Ctx(base, cli.Deps())
         result = cli.launch_render(ctx, data, out, "nobody")
-        self.assertIn(result.get("status"), ("OK", "FONT_MISSING", "ERROR"), result)
-        if result["status"] == "ERROR":
-            self.assertIn(result.get("reason"), ("MATPLOTLIB_MISSING", "RENDER", "IO", "OUT_DIR", "RENDER_OUTPUT"))
+        # Can the account import matplotlib at all? Then the child must render (or lack only the font).
+        has_mpl = subprocess.run([sys.executable, "-I", "-c", "import matplotlib"], cwd="/", env=dict(cli.CLEAN_ENV),
+                                 user=nobody.pw_uid, group=nobody.pw_gid, extra_groups=[],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120).returncode == 0
+        if has_mpl:
+            self.assertIn(result.get("status"), ("OK", "FONT_MISSING"), result)
+        else:
+            self.assertEqual(result, {"status": "ERROR", "reason": "MATPLOTLIB_MISSING"})
         self.assertEqual(cli.read_children(ctx)["render"], [])
 
 
@@ -830,6 +1066,103 @@ class DaemonTests(Base):
         daemon.spawn = tracking  # type: ignore[assignment]
         return daemon, spawned
 
+    def fake_group(self, pgid: int, cmd: bytes, group: int, uid: int = 990, start: str = "777") -> None:
+        base = self.root / "proc" / str(pgid)
+        base.mkdir(parents=True)
+        (base / "stat").write_text(f"{pgid} (python3) S 1 {group} {group} 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 "
+                                   f"{start} 1000 100")
+        (base / "status").write_text(f"Name:\tpython3\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+        (base / "cmdline").write_bytes(cmd)
+
+    def test_render_group_needs_recorded_uid_and_start_time(self) -> None:
+        # A recycled pid that is again a group leader naming the charts module (an operator's editor or grep)
+        # is never signalled: the uid and the start time recorded at spawn must both still match.
+        charts_cmd = b"python3\0-I\0/opt/aiops/inspect/lib/control_plane_inspect_charts.py\0render"
+        self.fake_group(6001, charts_cmd, 6001)
+        self.fake_group(6002, b"vim\0control_plane_inspect_charts.py", 6002, uid=0)
+        self.fake_group(6003, charts_cmd, 6003, start="888")
+        self.fake_group(6004, charts_cmd, 6004)
+        self.fake_group(6005, charts_cmd, 6005, uid=0)
+        ctx = cli.Ctx(self.root, self.deps)
+        records = [{"pgid": 6001, "uid": 990, "start": "777"}, {"pgid": 6002, "uid": 990, "start": "777"},
+                   {"pgid": 6003, "uid": 990, "start": "777"}, {"pgid": 6004},
+                   {"pgid": 6005, "uid": 0, "start": "777"}]
+        ctx.store.write("children", {"tick": None, "render": records})
+        daemon = cli.Daemon(ctx)
+        self.assertEqual(daemon.kill_groups(), [6001])
+        self.assertEqual(self.kills, [(-6001, signal.SIGKILL)])
+        status = self.root / "proc" / "6001" / "status"
+        status.write_text("Name:\tpython3\nUid:\t990\t0\t990\t990\n")  # effective uid differs
+        self.assertFalse(cli.group_is_ours(ctx, 6001, "control_plane_inspect_charts", 990, "777"))
+
+    def test_spawn_failure_does_not_end_the_loop(self) -> None:
+        daemon, spawned = self.daemon([(30.0, 0)])
+        tracking = daemon.spawn
+        failures = []
+
+        def flaky() -> Any:
+            if not failures:
+                failures.append(1)
+                raise OSError(11, "Resource temporarily unavailable")
+            return tracking()
+        daemon.spawn = flaky  # type: ignore[assignment]
+        daemon.loop(max_ticks=1)
+        self.assertEqual((daemon.ticks, len(spawned)), (1, 1))
+        self.assertEqual([r["reason"] for r in self.store.read_jsonl("errors")], ["DAEMON_LOOP"])
+
+    def test_children_write_failure_still_supervises_the_tick(self) -> None:
+        daemon, _ = self.daemon([(cli.TICK_CAP_SECONDS + 600.0, 0)])
+        orig_write = core.StateStore.write
+
+        def write(store: core.StateStore, name: str, obj: Any) -> None:
+            if name == "children":
+                raise OSError(28, "No space left on device")
+            orig_write(store, name, obj)
+        core.StateStore.write = write  # type: ignore[assignment]
+        self.addCleanup(setattr, core.StateStore, "write", orig_write)
+        outcome = daemon.run_tick()
+        self.assertEqual(outcome["outcome"], "OVERRUN")
+        self.assertEqual(self.kills, [(-self.current.pid, signal.SIGKILL)])
+
+    def test_supervision_error_kills_the_running_tick_and_loop_continues(self) -> None:
+        daemon, spawned = self.daemon([(10_000.0, 0), (5.0, 0)])
+        calls = []
+
+        def sleep(seconds: float) -> None:
+            if self.current is not None and not calls:
+                calls.append(1)
+                raise RuntimeError("clock broke")
+            self.clock.sleep(seconds)
+        self.deps.sleep = sleep
+        daemon.loop(max_ticks=1)
+        self.assertEqual(len(spawned), 2)
+        self.assertEqual(self.kills[0][1], signal.SIGKILL)
+        self.assertEqual([r["reason"] for r in self.store.read_jsonl("errors")], ["DAEMON_LOOP"])
+
+    def test_daemon_retries_lock_taken_by_a_probe(self) -> None:
+        ctx = cli.Ctx(self.root, self.deps)
+        probe = cli.Lock(ctx.lock_path("daemon.lock"))
+        self.assertTrue(probe.acquire())  # e.g. ``status`` or ``start`` probing at that very moment
+        slept = []
+
+        def sleep(seconds: float) -> None:
+            slept.append(seconds)
+            probe.release()
+        self.deps.sleep = sleep
+        original = cli.Daemon.loop
+        cli.Daemon.loop = lambda self_daemon, max_ticks=None: None  # type: ignore[assignment]
+        self.addCleanup(setattr, cli.Daemon, "loop", original)
+        self.assertEqual(cli.cmd_daemon(ctx)["status"], "STOPPED")
+        self.assertEqual(len(slept), 1)
+        # A daemon that really holds the lock is still refused after the short retry.
+        holder = cli.Lock(ctx.lock_path("daemon.lock"))
+        self.assertTrue(holder.acquire())
+        self.addCleanup(holder.release)
+        slept.clear()
+        self.deps.sleep = lambda seconds: slept.append(seconds)
+        self.assertEqual(cli.cmd_daemon(ctx)["status"], "ALREADY_RUNNING")
+        self.assertLessEqual(sum(slept), 1.5)
+
     def test_ticks_at_tick_minute_kst_and_failures_do_not_end_loop(self) -> None:
         self.clock.t = datetime(2026, 10, 1, 5, 20, tzinfo=timezone.utc)   # 14:20 KST
         daemon, spawned = self.daemon([(30.0, 1), (40.0, 0)])
@@ -855,9 +1188,7 @@ class DaemonTests(Base):
                                   5001),
                                  (5002, b"bash\0-c\0sleep 1", 5002),
                                  (5003, b"python3\0control_plane_inspect_charts.py", 1)):
-            (proc_dir / str(pgid)).mkdir(parents=True)
-            (proc_dir / str(pgid) / "stat").write_text(f"{pgid} (python3) S 1 {group} {group} 0")
-            (proc_dir / str(pgid) / "cmdline").write_bytes(cmd)
+            self.fake_group(pgid, cmd, group)
         original = daemon.spawn
 
         def spawn_and_record() -> Any:
@@ -869,7 +1200,7 @@ class DaemonTests(Base):
 
         def write(store: core.StateStore, name: str, obj: Any) -> None:
             if name == "children" and obj.get("tick"):
-                obj = dict(obj, render=[{"pgid": 5001}, {"pgid": 5002}, {"pgid": 5003}])
+                obj = dict(obj, render=[{"pgid": p, "uid": 990, "start": "777"} for p in (5001, 5002, 5003)])
             orig_write(store, name, obj)
         core.StateStore.write = write  # type: ignore[assignment]
         self.addCleanup(setattr, core.StateStore, "write", orig_write)

@@ -3,7 +3,7 @@
 상태: **1단계(기계 감리) 규격과 설치 절차.** 모델을 쓰지 않는다.
 이 문서는 감리의 규범 문서다. 결정 원문은 `PROGRAM_MODE.md` §0 "결정 M7"에 있고, 남는 위험의 요약은
 같은 문서 §13 "감리 (M7)"에 있다. 이 문서는 `RUNTIME_PATHS` 밖이다. 그래도 §3~§11과 §14의 규칙을
-바꾸는 PR은 감리 코드와 같은 변경 통제(§15)를 받는다.
+바꾸는 PR은 감리 코드와 같은 변경 통제(§15, `AGENTS.md` §2 INSPECTOR)를 받는다.
 
 목표: User가 약 1분 안에 다음을 본다.
 - 프로그램 모드의 각 제품이 어디까지 왔는가.
@@ -68,7 +68,7 @@ PR2와 PR3은 `RUNTIME_PATHS` 파일을 바꾸지 않는다. 그래서 감리 �
 |---|---|---|
 | INSPECTOR (`aiops-inspect`, root 고정 도구) | 읽기, 신호 계산, 원장 이슈 하나와 감리 채널 하나에 게시 | 위 "하지 않는 일" 전부 (`AGENTS.md` §2 INSPECTOR) |
 | User | 설치 지시, 토큰과 Slack 앱 만들기, 단계 전환 지시, 재개 지시, 감리 글 읽기 | — |
-| 그록봇 (HOST OPERATOR) | 설치, 호스트 재시작 뒤 `start`, User 지시로 고정 명령 `preflight`, `status`, `start`, `stop`, `resume` 실행 | 점검 실행·예약, 감리 결과 전달·읽기·요약, 설정과 문턱의 임의 변경, 비밀값 출력 (`AGENTS.md` §5) |
+| 그록봇 (HOST OPERATOR) | 설치(§12: 계정, 파일, digest, sudoers, 비밀값, 설정), User 지시 댓글대로 설정 변경과 철회, 호스트 재시작 뒤 `start`, User 지시로 고정 명령 `preflight`, `status`, `start`, `stop`, `resume` 실행, 설치 수용 시험에서 `probe` 한 번(§13.1 A3, 개수와 hash만) | 점검(`tick`) 실행·예약, 감리 결과 전달·읽기·요약, 설정과 문턱의 임의 변경, 안전 정지 파일 손대기, 원장 이슈 만들기, 비밀값 출력 (`AGENTS.md` §5) |
 | 현장 소장 | 감리와 무관하게 일한다 | 감리 채널, "AIOPS Program Health" 이슈, `AIOPS_INSPECT_V1` 글을 읽거나 그에 따라 행동 (`COORDINATOR_PLAYBOOK.md` §0) |
 | Astra (Fable) | 감리 코드 변경의 A3 감사(§15) | 감리 결과를 판정 근거로 쓰기 |
 
@@ -174,9 +174,11 @@ flowchart TD
 **깨우는 방법.** root 루프 `aiops-inspect daemon` 하나다.
 - 다음 `tick_minute`(17분) KST까지 잔다.
 - `tick`을 자식 프로세스로 띄운다. 자식은 자기 프로세스 그룹을 가진다. 상한은 45분이다.
-- 자식과 렌더 자식의 pgid를 `children.json`에 적는다.
+- 자식의 pgid와, 렌더 자식의 pgid·uid·시작 시각(`/proc/<pid>/stat` 22번째 칸)을 `children.json`에 적는다. 데몬은 uid와 시작 시각이 그대로일 때만 렌더 그룹을 끝낸다.
 - 45분을 넘기면 기록된 그룹만 `killpg`하고 `DEGRADED reason=OVERRUN`으로 표시한다.
-- 점검 실패는 루프를 끝내지 않는다. SIGTERM을 받으면 기록된 그룹을 정리하고 끝난다.
+- 점검 실패는 루프를 끝내지 않는다. 자식을 띄우거나 상태 파일을 쓰다 실패해도 루프는 계속된다. 이때 `errors.jsonl`에 `DAEMON_LOOP`를 남긴다.
+- 데몬은 `daemon.lock`을 약 1초 동안 다시 잡아 본다(`start`, `status`, `stop`이 잠깐 잡을 수 있다).
+- SIGTERM을 받으면 기록된 그룹을 정리하고 끝난다.
 - cron, systemd 단위, Actions workflow는 쓰지 않는다. 감리의 예약 실행은 이 root 루프 하나다.
 
 **순서.**
@@ -214,6 +216,8 @@ flowchart TD
 그 밖에는 T1을 실행한다. 그래서 실패한 T1은 다음 점검에서 반드시 다시 돈다.
 `next_recheck_at`은 다음 시각 중 가장 이른 것이다.
 - 각 CONFIRMED 행, 각 막힘 라벨, 각 제품의 마지막 완료 뒤 날수, 각 대기 중인 병합 후 체크가 다음 문턱 구간을 넘는 시각
+- DONE 노드의 병합 후 체크가 PENDING이고 병합 뒤 7일 안이면(병합 시각을 모르면 포함) 다음 점검. 체크 실행이 끝나도 probe가 읽는 것은 바뀌지 않기 때문이다
+- 노는데 대기(S7)가 보였지만 아직 주의 조건(연속 T1 2번, 1시간 이상)에 못 미칠 때, 그 조건을 채울 수 있는 다음 시각. 노는 레인과 대기 노드는 probe가 읽는 것을 바꾸지 않기 때문이다
 - 다음 KST 일일 줄 시각
 - 지금 + 24시간
 
@@ -226,12 +230,14 @@ flowchart TD
   배달 pin은 중앙 `current_writer`, `pin_of`로 찾는다. pin이 있으면 그 PR, 병합됐으면 병합 커밋의 check run과 PR 파일 목록.
   그다음 `node_completion`(§5).
 - 노드 이슈 상태. 막힘 라벨(`needs-user`, `needs-operator`, `needs-lane-cleanup`, `blocked`, `decision-required`)이 있으면 이슈 이벤트에서 `blocked_since`.
+  막힘 라벨마다 붙은 시각도 따로 적는다(`label_since`). S7의 정리 대기 시간은 이 값을 쓴다.
 - 최근 7일 기본 branch 병합 PR, 직접 push(`commits/{sha}/pulls`가 빈 커밋).
 - 최근 14일 `ASTRA_CONSULT_V1 result=APPROVED_SMALL_EXCEPTION` 댓글 수 (노드별).
 - 필수 체크: `projects.json`의 `program_required_checks`. 처음 본 목록을 `baseline.json`에 두고, 이후 줄어들면 사실 `required_checks_shrank`.
 - 감리 자신의 원장 댓글: journal에 있는 댓글 id마다 현재 `updated_at`과 본문 sha256 (S0).
 
-**예산.** 넘으면 그 단계를 `InspectError`로 끊는다. T1이면 `t1_dirty = true`이고 이전 사실을 유지한다.
+**예산.** T1의 시간·호출 수 상한을 넘으면 T1을 `InspectError`로 끊는다. 그러면 `t1_dirty = true`이고 이전 사실을 유지한다.
+렌더와 게시에는 따로 재는 단계 타이머가 없다. 아래 요청별 상한과 점검 전체 45분이 묶는다.
 
 | 항목 | 상한 |
 |---|---|
@@ -241,12 +247,13 @@ flowchart TD
 | GitHub 요청 | T1당 600번 |
 | GitHub 응답 크기 | 8 MiB |
 | host 출력 크기 | 4 MiB |
-| 렌더 | 3분. 렌더 프로세스는 CPU 60초, 주소 공간 1.5 GiB, 파일 20 MiB, 파일 수 64, 프로세스 수 32, 벽시계 120초 뒤 `killpg` |
-| 게시 | 3분 |
+| 렌더 | 렌더 프로세스 벽시계 120초 뒤 `killpg`. CPU 60초, 주소 공간 1.5 GiB, 파일 20 MiB, 파일 수 64, 프로세스 수 32 |
+| 게시 | 별도 상한 없음. 요청마다 GitHub 30초, Slack 20초, 업로드 60초. 점검 전체 45분 안 |
 
 **상태 커밋.** T1이 성공하면 한 묶음으로 커밋한다: `facts.json`, `hashes.json`,
 `recheck.json`(`{"next_recheck_at", "t1_dirty": false, "last_t1": now}`), ETag, `history.jsonl` 한 줄
 (`{"t": now, "products": {repo: {"planned": n, "done": n}}}`).
+읽기 실패로 확인 불가가 된 묶음이 있으면(§10) 이 묶음은 커밋한다. 그러나 `t1_dirty`는 참으로 두고 연속 실패로 센다.
 
 ## 4. 사실과 출처 등급
 
@@ -271,7 +278,8 @@ flowchart TD
 ## 5. 완료 단계
 
 완료는 감리가 계산하지 않는다. 중앙 함수 `control_plane_program.node_completion` 하나만 쓴다.
-런타임의 `dependency_done`도 같은 함수를 쓴다. 그래서 감리의 "완료"와 런타임의 DONE은 항상 같다.
+런타임의 `dependency_done`도 같은 함수를 쓴다. 그래서 같은 커밋의 중앙 모듈을 쓰는 동안 감리의 "완료"와 런타임의 DONE은 같은 규칙이다.
+설치된 사본이 main보다 늦을 수 있고(§16), 감리의 사실은 마지막으로 성공한 T1 시각의 것이다.
 
 | 단계 | 화면 | 조건 (위에서부터 처음 맞는 것) |
 |---|---|---|
@@ -406,6 +414,7 @@ ACK는 1단계에 없다. 발견 사항은 `ack: null`이다. 표시용 ACK는 2
 ### 9.1 순서
 
 게시가 필요한 때: 판정이나 발견 상태가 바뀌었을 때, 또는 첫 실행.
+이전 게시의 원장 댓글이 FAILED로 끝났으면 다음 T1도 게시한다(§9.2).
 
 1. journal `state/publish/<run>.json`에 `PREPARED`와 본문 sha256을 먼저 적는다.
 2. 원장 이슈에 댓글 하나 → `GH_POSTED`(댓글 id, url) 또는 `GH_UNKNOWN`.
@@ -421,12 +430,17 @@ ACK는 1단계에 없다. 발견 사항은 `ack: null`이다. 표시용 ACK는 2
 | 결과 | 기록 | 다음 |
 |---|---|---|
 | 2xx / `ok` | POSTED | — |
-| 4xx, `ok:false`, 연결을 열지 못함 | REFUSED (아무것도 보내지 않음) | 다음 점검부터 최대 3번 다시 시도 |
+| 4xx, `ok:false`, 연결을 열지 못함 | REFUSED (아무것도 보내지 않음) | 처음 보내기를 포함해 최대 3번 시도한다(거절 뒤 다음 점검부터 2번 더). 연결을 열지 못한 경우는 횟수에 넣지 않는다. 3번째도 거절이면 FAILED |
 | 시간 초과, 보낸 뒤 연결 끊김, 5xx | UNKNOWN | **같은 내용을 다시 보내지 않는다** |
 
 - GitHub UNKNOWN: 다음 점검들의 `reconcile_unknown()`이 실행 시작 이후의 원장 댓글을 읽는다. 본문 sha256이 journal과 같은 댓글이 보이면 `GH_POSTED`로 바꾼다.
 - 24시간 지나도 보이지 않으면 `GH_ABANDONED_UNKNOWN`. 표시만 하고 다시 보내지 않는다.
 - Slack UNKNOWN: 감리는 Slack을 읽지 않으므로 확인할 수 없다. 하트비트에 "게시 미확인 <m>"으로 보인다.
+- 알리지 못한 변화: `findings.json`은 journal을 준비할 때 넘어간다. 그래서 그 journal의 변화와 직전 판정을 `findings.json`의 `unannounced`에 함께 적는다.
+  - 그 journal의 원장 댓글이 한 번도 보내지지 않았으면(FAILED, SUPERSEDED, 또는 새 게시가 덮을 PENDING·REFUSED) 다음 T1이 그 변화를 다시 싣는다.
+  - FAILED만으로도 다음 T1은 게시한다. Slack은 여전히 GitHub가 POSTED나 UNKNOWN이 된 뒤에만 올린다.
+  - 발견이 그 사이 다시 바뀌었으면 새 변화를 쓴다. 판정 화살표는 User가 마지막으로 본 판정에서 시작한다.
+  - UNKNOWN, POSTED, `GH_ABANDONED_UNKNOWN`은 다시 싣지 않는다.
 
 ### 9.3 원장 댓글
 
@@ -500,17 +514,20 @@ AIOPS_INSPECT_V1 status=STALE · 감리가 <deadman_hours>시간 넘게 점검�
 |---|---|---|---|
 | 설정이 틀림 (`CONFIG`) | ERROR, 점검 없음 | 없음 | 그록봇이 User 지시대로 설정을 고치고 `preflight` |
 | 비밀값 파일의 권한·모양이 틀림 (`SECRET_<KIND>`) | ERROR | 없음 | `set-secret` 다시 |
-| 기대 digest 불일치 (`TOOL_TAMPERED`) | 안전 정지 | 하트비트 HALTED | §12 갱신 절차로 다시 설치, User 지시로 `resume` |
+| 기대 digest 불일치 (`TOOL_TAMPERED`) | 안전 정지 | 하트비트 HALTED | §12.12 갱신 절차: 다시 설치 → User 지시로 `resume` → `preflight` → `start` |
 | 나가는 글에 실제 비밀값 (`SECRET_LIVE`) | 안전 정지, 그 글은 올리지 않음 | 하트비트 HALTED | 토큰 교체, User 지시로 `resume` |
-| Slack 범위·팀·봇 불일치 (`SLACK_SCOPE`) | 안전 정지 | 원장 댓글만 | Slack 앱 범위를 두 개로 되돌림, `resume` |
+| Slack 범위·팀·봇 불일치 (`SLACK_SCOPE`) | 안전 정지. `auth.test`가 점검의 첫 단계라서 어떤 쓰기보다 먼저 멈춘다 | 없음. 원장 댓글도 없고, 하트비트도 고치지 못한다(정지 중 점검마다 `auth.test`가 다시 거절). 이전 점검이 걸어 둔 장애 경보가 `deadman_hours` 뒤 STALE로 올라온다 | Slack 앱 범위를 두 개로 되돌림, User 지시로 `resume`, `preflight` |
 | 24시간 안 ERROR 3번 (`errors.jsonl`) | 안전 정지 | 하트비트 HALTED | 원인 확인, `resume` |
-| GitHub 읽기 실패 (`GITHUB_RATE_LIMIT`, `GITHUB_5XX`, `GITHUB_READ`, `GITHUB_JSON`, `MAX_RESPONSE`, `NET_DOWN`) | T1 실패, `t1_dirty`, 이전 사실 유지 | 연속 3번이면 `DEGRADED(GITHUB_READ)` | 다음 점검에서 자동 |
-| host 읽기 실패 (`HOST_REFUSED`, `HOST_TIMEOUT`, `HOST_BUDGET`, `HOST_ARGV`) | 같음 | 연속 3번이면 `DEGRADED(HOST)` | 자동. 계속되면 sudoers와 helper 확인 |
+| GitHub 속도 제한·연결 실패 (`GITHUB_RATE_LIMIT`, `NET_DOWN`), host 호출 수 초과 (`HOST_BUDGET`) | T1 실패, `t1_dirty`, 이전 사실 유지 | 연속 3번이면 `DEGRADED(GITHUB_READ)` 또는 `DEGRADED(HOST)` | 다음 점검에서 자동 |
+| GitHub 읽기 실패 (`GITHUB_5XX`, `GITHUB_READ`, `GITHUB_JSON`, `GITHUB_NOT_FOUND`, `MAX_RESPONSE`) | 그 묶음만 확인 불가(UNKNOWN). T1은 커밋하지만 `t1_dirty`를 둔다. 다음 점검에서 다시 수집하고, 연속 실패로 센다 | 연속 3번이면 `DEGRADED(GITHUB_READ)` | 다음 점검에서 자동 |
+| host 읽기 실패 (`HOST_REFUSED`, `HOST_TIMEOUT`, `HOST_UNAVAILABLE`, `HOST_ARGV`, `HOST_OUTPUT`) | 같음 | 연속 3번이면 `DEGRADED(HOST)` | 자동. 계속되면 sudoers와 helper 확인 |
+| check run 403, 속도 제한 아님 (`CHECKS_FORBIDDEN`) | `checks` 묶음만 확인 불가. 읽기 실패로 세지 않는다. `t1_dirty`도 두지 않는다 | `DEGRADED` 아님 | 읽기 토큰의 Checks 권한(§12.7) |
+| 목록이 상한에서 잘림 (`FILES_TRUNCATED`, `CHECKS_TRUNCATED`, `EVENTS_TRUNCATED`, `EXCEPTIONS_TRUNCATED`), 막힘 라벨의 이벤트 없음 (`EVENTS_MISSING`) | 그 묶음만 확인 불가. 읽기 실패로 세지 않는다 | `DEGRADED` 아님 | — |
 | T1 예산 초과 | 같음 | 같음 | 자동 |
 | 한국어 글꼴 없음 (`FONT_MISSING`), 렌더 실패·시간 초과 | 그림 없음 | 글 카드만 | 글꼴 설치 (§12.10) |
-| GitHub 쓰기 거절 (`GITHUB_WRITE_REFUSED`) | REFUSED | — | 다음 점검부터 최대 3번 |
+| GitHub 쓰기 거절 (`GITHUB_WRITE_REFUSED`) | REFUSED | — | 처음 보내기를 포함해 최대 3번 시도(다음 점검부터 2번 더), 그 뒤 FAILED. 알리지 못한 변화는 다음 T1이 다시 싣는다(§9.2) |
 | GitHub 쓰기 결과 불명 (`GITHUB_WRITE_UNKNOWN`) | `GH_UNKNOWN` | 다시 보내지 않음 | 대조로 POSTED, 24시간 뒤 `GH_ABANDONED_UNKNOWN` |
-| Slack 거절 / 결과 불명 | REFUSED / UNKNOWN | 거절은 최대 3번, 불명은 다시 보내지 않음 | 하트비트 "게시 미확인" |
+| Slack 거절 / 결과 불명 | REFUSED / UNKNOWN | 거절은 처음 보내기를 포함해 최대 3번 시도, 불명은 다시 보내지 않음 | 하트비트 "게시 미확인" |
 | 점검 45분 초과 | 기록된 그룹 `killpg` | `DEGRADED(OVERRUN)` | 자동 |
 | `tick.lock`이 잡혀 있음 | BUSY | 없음 | — |
 | 데몬이 죽음, 호스트 재시작 | 점검 없음 | Slack이 STALE 경보를 올림 | 그록봇 `status`, `start` (§12.11) |
@@ -520,7 +537,7 @@ AIOPS_INSPECT_V1 status=STALE · 감리가 <deadman_hours>시간 넘게 점검�
 **안전 정지 (kill switch).**
 - 쓰는 주체: 도구 자신(`TOOL_TAMPERED`, `SECRET_LIVE`, 24시간 안 ERROR 3번, `SLACK_SCOPE`).
 - 파일: `/etc/aiops/inspect-disabled` (root 0644, JSON: `reason`, `run`, `at`). 첫 사유가 남는다.
-- 정지 중에도 하트비트는 계속 "HALTED since <KST>, 사유"로 고친다.
+- 정지 중에도 하트비트는 계속 "HALTED since <KST>, 사유"로 고친다. 단 `SLACK_SCOPE`로 멈췄으면 Slack에 쓸 수 없으므로 하트비트도 그대로이고, User는 STALE 경보로 알게 된다.
 - 해제는 `resume --pointer URL`로만 한다. URL은 User가 control 저장소 이슈에 남긴 재개 지시 댓글이다.
   그록봇은 그 지시가 있을 때만 실행한다. 파일을 손으로 지우지 않는다.
 
@@ -547,7 +564,9 @@ AIOPS_INSPECT_V1 status=STALE · 감리가 <deadman_hours>시간 넘게 점검�
   - GitHub에서 온 모든 입력은 사실의 문자열 칸에 들어가기 전에 처리한다.
   - 나가는 모든 글은 올리기 전에 처리한다.
   - 나가는 글에서 **실제 값**이 맞으면 `SECRET_LIVE`로 안전 정지한다. 모양만 맞으면 지우고 센다(입력에서 온 것이다).
-- GitHub 글(`gh_text`): Markdown 특수 문자를 이스케이프하고, 줄바꿈과 탭을 공백으로 바꾸고, `@` 뒤에 U+200B를 넣고, 길이를 자른다.
+- GitHub 글(`gh_text`): Markdown 특수 문자와 `&`를 이스케이프하고, 줄바꿈과 탭을 공백으로 바꾸고, 길이를 자른다.
+  - `@`와 `#` 뒤에 U+200B를 넣는다. `://`와 `www.` 안에도 넣는다. `GH-<숫자>`는 `GH` 뒤에 넣는다.
+  - 그래서 멘션, 이슈 참조, 링크, 자동 링크가 만들어지지 않는다.
 - Slack 글(`slack_text`): `&`, `<`, `>`를 엔터티로 바꾸고, `@` 뒤에 U+200B를 넣는다. 그래서 `<!channel>`, `<@U…>`, `<url|text>`가 만들어지지 않는다.
 - 표식 무력화(`strip_markers`): 줄 첫머리의 `ASTRA_`, `AIOPS_`, `<!--` 앞에 U+200B를 넣는다. 감리가 옮긴 글이 다른 도구의 표식으로 읽히지 않는다.
 
@@ -700,14 +719,12 @@ settings:
 
 ### 12.6 원장 이슈 2개
 
-`BeautifulMind-JT/ai-ops-control-plane`에 이슈 두 개를 만든다. User가 웹에서 만들거나, User 지시로 그록봇이 만든다.
+User가 웹에서 `BeautifulMind-JT/ai-ops-control-plane`에 이슈 두 개를 만든다. 그록봇은 만들지 않는다(`AGENTS.md` §5).
 
-```sh
-gh issue create --repo BeautifulMind-JT/ai-ops-control-plane --title "AIOPS Program Health" \
-  --body "감리 원장 (User 결정 M7). aiops-inspect가 본문과 댓글을 씁니다. 자문 전용 · 게이트 아님."
-gh issue create --repo BeautifulMind-JT/ai-ops-control-plane --title "AIOPS Program Health (test)" \
-  --body "감리 시험 원장 (DRY). 자문 전용 · 게이트 아님."
-```
+| 제목 | 본문 |
+|---|---|
+| `AIOPS Program Health` | `감리 원장 (User 결정 M7). aiops-inspect가 본문과 댓글을 씁니다. 자문 전용 · 게이트 아님.` |
+| `AIOPS Program Health (test)` | `감리 시험 원장 (DRY). 자문 전용 · 게이트 아님.` |
 
 - 라벨, 담당자, 마일스톤을 붙이지 않는다. 특히 `aiops-task`를 붙이지 않는다.
 - 두 번호를 설정의 `ledger_issue`, `test_ledger_issue`에 넣는다.
@@ -783,7 +800,7 @@ sudo /opt/aiops/bin/aiops-inspect status
 
 - `start`를 두 번 하면 두 번째는 `ALREADY_RUNNING`이다.
 - **호스트가 다시 켜진 뒤:** 그록봇이 `status`와 `start`를 실행한다. 이것은 운영자 사건이고 routine이 아니다.
-  부팅 때 다른 도구를 시작하는 기존 장치가 있으면 거기에 `/opt/aiops/bin/aiops-inspect start` 한 줄을 더할 수 있다. 새 cron이나 systemd 단위는 만들지 않는다.
+  부팅 장치(cron, systemd 단위, 다른 도구의 부팅 설정)에 `start`를 넣지 않는다.
 - STALE 경보를 받은 User가 지시하면 그록봇이 `status`를 실행하고 출력을 그대로 전한다. 데몬이 없으면 `start`.
 - `status`가 안전 정지를 보이면 `start`만으로 풀리지 않는다. User의 재개 지시 댓글이 있어야 `resume --pointer <댓글 URL>`을 실행한다.
 
@@ -793,7 +810,8 @@ sudo /opt/aiops/bin/aiops-inspect status
 
 1. `sudo /opt/aiops/bin/aiops-inspect stop`
 2. 새 `$C`로 §12.0의 확인, §12.2의 파일 설치, §12.3의 digest, (sudoers가 바뀌었으면) §12.4.
-3. `preflight`가 PASS면 `start`.
+3. 안전 정지 중이면(`status`의 안전 정지 표시, 예: `TOOL_TAMPERED`) User의 재개 지시 댓글이 있을 때 `resume --pointer <댓글 URL>`을 먼저 실행한다. 안전 정지 파일이 있는 동안 `preflight`는 늘 FAIL이다.
+4. `preflight`가 PASS면 `start`.
 
 파일과 digest는 항상 같은 커밋에서 함께 바꾼다. 하나만 바꾸면 `TOOL_TAMPERED`로 멈춘다.
 
@@ -814,13 +832,13 @@ User가 멈추라고 하면:
 |---|---|---|
 | A1 | `sudo /opt/aiops/bin/aiops-inspect preflight` | `{"status":"PASS"}`. 항목: 경로 소유자와 모드, 두 계정(존재, nologin, uid ≠ 0), digest, 비밀값 모양, `auth.test`와 범위 2개, 대상 저장소마다 GitHub 읽기, `aiops-inspect-ledger`로 `status --lanes`, 렌더(matplotlib과 글꼴) |
 | A2 | §12.4의 `visudo -cf`, `sudo -l -U` | 명령 3개만 허용, `reconcile`·`init`·`preflight` 거부 |
-| A3 | `sudo /opt/aiops/bin/aiops-inspect probe` | 개수와 hash만 출력. 원장 이슈와 Slack에 새 글 없음. 데몬 상태 변화 없음 |
-| A4 | `sudo /opt/aiops/bin/aiops-inspect tick` (DRY 첫 점검) | 시험 이슈에 댓글 1개(머리 두 줄 정확), 시험 채널에 하트비트, 카드, 스레드 그림(글꼴이 없으면 글만), 장애 경보 예약. 운영 채널과 운영 이슈는 그대로 |
-| A5 | 곧바로 `tick` 한 번 더 | `"t1":"SKIPPED"`. 하트비트만 고쳐지고 새 카드 없음 |
-| A6 | `start`, 다시 `start`, `status` | `STARTED`, `ALREADY_RUNNING`, 데몬 살아 있음. 다음 17분에 점검, 다음 09:17에 일일 줄 |
-| A7 | `stop`, `start` | 하트비트 PAUSED → 다음 점검에서 OK |
+| A3 | 그록봇이 `sudo /opt/aiops/bin/aiops-inspect probe`를 한 번 실행하고 JSON 한 줄을 그대로 전한다 | 개수와 hash만 출력(발견 사항 없음). 원장 이슈와 Slack에 새 글 없음. 데몬 상태 변화 없음 |
+| A4 | 그록봇이 `start`, `status`. User가 다음 정시 점검(17분 KST, DRY 첫 점검) 뒤 시험 이슈와 시험 채널을 본다 | `STARTED`, 데몬 살아 있음. 시험 이슈에 댓글 1개(머리 두 줄 정확), 시험 채널에 하트비트, 카드, 스레드 그림(글꼴이 없으면 글만). 운영 채널과 운영 이슈는 그대로 |
+| A5 | User가 그다음 정시 점검 뒤 시험 채널을 본다 (그 사이 제품 변화가 없을 때) | 하트비트의 마지막 점검 시각만 바뀌고 새 카드와 새 댓글 없음 |
+| A6 | 그록봇이 다시 `start`, `status` | `ALREADY_RUNNING`, 데몬 살아 있음. 다음 09:17에 일일 줄 |
+| A7 | 그록봇이 `stop`, `start` | 하트비트 PAUSED → 다음 점검에서 OK |
 | A8 | 점검 중 레인 확인 | `status --lanes`와 레인 census에 감리 uid가 없다. reap 동작이 그대로다 |
-| A9 | 안전 정지 연습 | 도구가 아닌 그록봇이 `{"reason":"DRILL"}` 파일을 `/etc/aiops/inspect-disabled`(root 0644)로 둔다 → 하트비트 HALTED → User가 시험 원장 이슈에 재개 지시 댓글 → `resume --pointer <댓글 URL>` → 다음 점검 OK |
+| A9 | 안전 정지 연습 (선택. User가 호스트 터미널에 직접 닿을 때만) | User가 직접 `{"reason":"DRILL"}` 파일을 `/etc/aiops/inspect-disabled`(root 0644)로 둔다 → 하트비트 HALTED → User가 시험 원장 이슈에 재개 지시 댓글 → 그록봇이 `resume --pointer <댓글 URL>` → 다음 점검 OK. 그록봇은 안전 정지 파일을 만들거나 지우지 않는다. User가 하지 않으면 "하지 않음"으로 남긴다 |
 
 ### 13.2 DRY 운영 (최소 7일)
 
@@ -888,7 +906,7 @@ sudo /opt/aiops/bin/aiops-inspect start
 | `.github/control-plane/sudoers-aiops-inspector.example` | 같음. 이 파일은 `RUNTIME_PATHS`에 있으므로 활성화 재결합도 필요하다 |
 | 설치된 감리 파일 (`/opt/aiops/bin/aiops-inspect`, `/opt/aiops/inspect/lib/*`, `/etc/sudoers.d/aiops-inspector`) | User가 병합한 커밋에서만 설치한다. digest는 그 커밋에서 `git show <commit>:<path> \| sha256sum`으로 만든다(§12.3) |
 | `control_plane.py`, `control_plane_program.py` (중앙 모듈) | 이미 `RUNTIME_PATHS` 통제를 받는다. main에서 바뀌면 감리 사본을 §12.12로 같은 커밋에 맞춘다 |
-| 이 문서의 규범(§3~§11, §14) | 감리 코드와 같은 통제 |
+| 이 문서의 규범(§3~§11, §14) | 감리 코드와 같은 통제 (`AGENTS.md` §2 INSPECTOR, `CONTROL_PLANE_RUNTIME.md` "감리") |
 | `/etc/aiops/inspect.json` (단계, id, 이슈 번호, 문턱, `contract_pairs`) | User 지시(control 저장소 이슈 댓글). 그록봇이 고치고 `preflight` |
 | 비밀값 | User가 새로 만들고 `set-secret`. 옛 값은 폐기 |
 
@@ -904,7 +922,7 @@ User가 M7로 감수한다(2026-09-30). 요약은 `PROGRAM_MODE.md` §13 "감리
 - **감리 전용 자격 증명이 호스트에 있다.** 세 비밀값은 root 0600 파일이다. root와, root를 통한 그록봇은 읽을 수 있다(헌법 규칙 8).
   - 읽기 토큰이 새면 여섯 저장소를 읽을 수 있다.
   - 원장 토큰이 새면 이 저장소의 **모든** 이슈에 댓글을 달고 고칠 수 있다. fine-grained 권한은 이슈 하나로 좁힐 수 없다.
-  - Slack 봇 토큰이 새면 봇이 들어간 두 비공개 채널에 쓸 수 있다. 읽지는 못한다.
+  - Slack 봇 토큰이 새면 봇 이름으로 봇이 들어간 채널과 워크스페이스 구성원의 앱 DM에 글과 파일을 올리고, 봇 자신의 글(하트비트, 카드)을 고치거나 지울 수 있다. 가짜 "AIOPS 감리" 지시를 보낼 수 있다는 뜻이다. 읽지는 못한다.
   - 어느 것도 발송·병합 권한이 없다.
 - **비밀값이 한 번 그록봇 세션을 지날 수 있다.** User가 터미널에 직접 붙여 넣지 못할 때다.
 - **GitHub 글 기반 신호는 위조될 수 있다(M4 단일 토큰).** 라벨, 이슈 닫힘 이유, 댓글이 그렇다. 주의까지만 올리고 "GitHub 글 기준"으로 표시한다.

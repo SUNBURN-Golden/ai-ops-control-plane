@@ -13,6 +13,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,7 +50,8 @@ def req(seed: str) -> str:
 
 
 def b64(obj: Any) -> Dict[str, Any]:
-    return {"encoding": "base64", "content": base64.b64encode(json.dumps(obj).encode()).decode()}
+    data = obj if isinstance(obj, bytes) else json.dumps(obj).encode()   # bytes = a raw file body
+    return {"encoding": "base64", "content": base64.b64encode(data).decode()}
 
 
 def config(**over: Any) -> Dict[str, Any]:
@@ -790,6 +792,7 @@ class HashTests(Base):
         no_block = copy.deepcopy(lanes_only)
         no_block["collected_at"] = iso(NOW)
         no_block["products"][ZARI]["nodes"]["N4"]["blocked_since"] = None
+        no_block["products"][ZARI]["nodes"]["N4"]["label_since"] = None
         h0 = facts_mod.hashes_of(no_block)["products"][ZARI]
         no_block["collected_at"] = iso(NOW + timedelta(hours=23))
         self.assertEqual(facts_mod.hashes_of(no_block)["products"][ZARI], h0)
@@ -819,6 +822,7 @@ class HashTests(Base):
         # blocked 20h ago -> 24h crossing in 4h
         self.assertEqual(facts_mod.next_recheck_at(quiet, NOW, config()), NOW + timedelta(hours=4))
         quiet["products"][ZARI]["nodes"]["N4"]["blocked_since"] = None
+        quiet["products"][ZARI]["nodes"]["N4"]["label_since"] = None
         # next daily line: 09:00 KST on 10/02 = 00:00 UTC; done gap crossing (3d after 2 days ago) is later
         self.assertEqual(facts_mod.next_recheck_at(quiet, NOW, config()),
                          datetime(2026, 10, 2, 0, 0, tzinfo=timezone.utc))
@@ -827,6 +831,220 @@ class HashTests(Base):
         self.assertEqual(at, datetime(2026, 10, 1, 5, 0, tzinfo=timezone.utc) + timedelta(days=1))
         self.assertLessEqual(at, NOW + timedelta(hours=24))
 
+
+
+# ---------------------------------------------------------------------------- review fixes
+
+class ReviewFixTests(Base):
+    def run_ticks(self, w: World, hours: List[int],
+                  cfg: Optional[Dict[str, Any]] = None) -> List[Optional[Dict[str, Any]]]:
+        return [self.tick(w, NOW + timedelta(hours=h), cfg)[1] for h in hours]
+
+    def test_redaction_input_is_bounded(self) -> None:
+        seen: List[int] = []
+        real = core.redact
+
+        def spy(text: str, live: Any = ()) -> Any:
+            seen.append(len(text))
+            return real(text, live)
+
+        with unittest.mock.patch.object(core, "redact", spy):
+            red = facts_mod._Redactor()
+            red.text("eyJ" * 20000, 200)
+            red.text("x" * 50000, 4096)
+            cut = red.text("a" * 190 + "ghp_" + "Z" * 10000, 200)
+        self.assertLessEqual(max(seen), 4096 + 4096)
+        self.assertLessEqual(seen[0], 200 + 4096)
+        self.assertNotIn("ghp_", cut)
+        self.assertNotIn("ZZZZ", cut)
+        self.assertLessEqual(len(cut), 200)
+
+    def test_read_error_in_t1_stays_dirty_and_recollects(self) -> None:
+        w = full_world()
+        self.tick(w)
+        w.fail[f"/repos/{ZARI}/pulls/11"] = 502
+        w.repos[ZARI]["issues"][0]["updated_at"] = iso(NOW)   # some change starts a T1
+        _, doc = self.tick(w, NOW + timedelta(hours=1))
+        self.assertEqual(doc["products"][ZARI]["unknown"], ["delivery"])
+        self.assertIsNone(doc["products"][ZARI]["nodes"]["N1"]["completion"])
+        recheck = self.state.read("recheck")
+        self.assertTrue(recheck["t1_dirty"])
+        self.assertEqual((recheck["t1_failures"], recheck["last_error"]), (1, "GITHUB_5XX"))
+        del w.fail[f"/repos/{ZARI}/pulls/11"]
+        _, doc2 = self.tick(w, NOW + timedelta(hours=2))
+        self.assertIsNotNone(doc2)                              # collected again although nothing changed
+        self.assertEqual(doc2["products"][ZARI]["nodes"]["N1"]["completion"]["stage"], "DONE")
+        recheck = self.state.read("recheck")
+        self.assertEqual((recheck["t1_dirty"], recheck["t1_failures"], recheck["last_error"]), (False, 0, None))
+
+    def test_host_down_counts_consecutive_failures(self) -> None:
+        w = full_world()
+        w.host_mode = "timeout"
+        docs = self.run_ticks(w, [0, 1, 2])
+        self.assertTrue(all(d is not None for d in docs))
+        recheck = self.state.read("recheck")
+        self.assertTrue(recheck["t1_dirty"])
+        self.assertEqual(recheck["t1_failures"], 3)
+        self.assertTrue(recheck["last_error"].startswith("HOST_"), recheck["last_error"])
+
+    def test_steady_data_gap_is_not_a_read_failure(self) -> None:
+        w = full_world()
+        del w.repos[ZARI]["pull_detail"][11]                    # pinned PR 404: a fact, not a read failure
+        _, doc = self.tick(w)
+        self.assertIn("delivery", doc["products"][ZARI]["unknown"])
+        recheck = self.state.read("recheck")
+        self.assertEqual((recheck["t1_dirty"], recheck["t1_failures"]), (False, 0))
+
+    def test_non_list_page_is_a_read_failure(self) -> None:
+        class Resp:
+            status, json = 200, {"message": "not a list"}
+
+        class Reader:
+            calls = 0
+
+            def get(self, path: str, params: Any) -> Any:
+                self.calls += 1
+                return Resp()
+
+        run = facts_mod._Run(Reader(), None, facts_mod.Budgets(), {}, facts_mod._Redactor())
+        with self.assertRaises(core.InspectError) as ctx:
+            run.pages(f"/repos/{ZARI}/issues/1/comments", {"per_page": 100}, 3)
+        self.assertEqual(ctx.exception.reason, "GITHUB_JSON")
+        self.assertEqual(run.read_errors, {"GITHUB_JSON"})
+
+    def test_check_runs_forbidden_is_steady_not_a_read_failure(self) -> None:
+        # A read token without Checks permission (INSPECTOR.md §12.7) gets a plain 403 on check runs:
+        # "checks" is UNKNOWN, but the T1 is not dirty and never counts toward DEGRADED(GITHUB_READ).
+        w = full_world()
+        w.fail[f"/repos/{ZARI}/commits/{sha(f'{ZARI}pr11merge')}/check-runs"] = 403
+        docs = self.run_ticks(w, [0, 1, 2, 3])
+        self.assertIsNotNone(docs[0])
+        self.assertEqual(docs[0]["products"][ZARI]["unknown"], ["checks"])
+        self.assertEqual(docs[1:], [None, None, None])          # nothing changed: no T1 every tick
+        recheck = self.state.read("recheck")
+        self.assertEqual((recheck["t1_dirty"], recheck["t1_failures"], recheck["last_error"]), (False, 0, None))
+
+    def test_forbidden_elsewhere_is_still_a_read_failure(self) -> None:
+        w = full_world()
+        w.fail[f"/repos/{ZARI}/pulls/11"] = 403                 # only check runs have the steady 403
+        _, doc = self.tick(w)
+        self.assertIn("delivery", doc["products"][ZARI]["unknown"])
+        recheck = self.state.read("recheck")
+        self.assertEqual((recheck["t1_dirty"], recheck["t1_failures"], recheck["last_error"]), (True, 1, "GITHUB_READ"))
+
+    def test_check_runs_cached_only_when_final(self) -> None:
+        w = full_world()
+        merge = sha(f"{ZARI}pr11merge")
+        w.repos[ZARI]["check_runs"][merge] = [{"id": 3, "name": "lint", "status": "completed",
+                                               "conclusion": "success", "app": {"id": 1, "slug": "gha"}}]
+        _, doc = self.tick(w)
+        self.assertEqual(doc["products"][ZARI]["nodes"]["N1"]["completion"]["merge_checks"], "PENDING")
+        self.assertNotIn(f"{ZARI}@{merge}", self.state.read("cache")["checks"])
+        w.repos[ZARI]["check_runs"][merge].append({"id": 4, "name": "bridge", "status": "completed",
+                                                   "conclusion": "failure", "app": {"id": 1, "slug": "gha"}})
+        w.ctrl_main = sha("ctrl-main-2")                        # force a T1
+        _, doc = self.tick(w, NOW + timedelta(hours=1))
+        self.assertEqual(doc["products"][ZARI]["nodes"]["N1"]["completion"]["merge_checks"], "FAIL")
+        # a successful re-run is seen too
+        w.repos[ZARI]["check_runs"][merge].append({"id": 5, "name": "bridge", "status": "completed",
+                                                   "conclusion": "success", "app": {"id": 1, "slug": "gha"}})
+        w.ctrl_main = sha("ctrl-main-3")
+        _, doc = self.tick(w, NOW + timedelta(hours=2))
+        self.assertEqual(doc["products"][ZARI]["nodes"]["N1"]["completion"]["merge_checks"], "PASS")
+        self.assertIn(f"{ZARI}@{merge}", self.state.read("cache")["checks"])
+        # a cached PASS no longer counts once the required list grows
+        w.projects[ZARI]["program_required_checks"] = ["bridge", "e2e"]
+        w.ctrl_main = sha("ctrl-main-4")
+        _, doc = self.tick(w, NOW + timedelta(hours=3))
+        self.assertEqual(doc["products"][ZARI]["nodes"]["N1"]["completion"]["merge_checks"], "PENDING")
+
+    def test_pending_merge_checks_recheck_every_tick(self) -> None:
+        w = full_world()
+        merge = sha(f"{ZARI}pr11merge")
+        w.repos[ZARI]["check_runs"][merge] = [{"id": 9, "name": "bridge", "status": "in_progress",
+                                               "conclusion": None, "app": {"id": 1, "slug": "gha"}}]
+        _, doc = self.tick(w)
+        self.assertEqual(doc["products"][ZARI]["nodes"]["N1"]["completion"]["merge_checks"], "PENDING")
+        w.repos[ZARI]["check_runs"][merge] = [{"id": 9, "name": "bridge", "status": "completed",
+                                               "conclusion": "failure", "app": {"id": 1, "slug": "gha"}}]
+        _, doc = self.tick(w, NOW + timedelta(hours=1))
+        self.assertIsNotNone(doc)
+        self.assertEqual(doc["products"][ZARI]["nodes"]["N1"]["completion"]["merge_checks"], "FAIL")
+        # settled: back to the ordinary recheck time
+        _, doc = self.tick(w, NOW + timedelta(hours=2))
+        self.assertIsNone(doc)
+
+    def test_idle_while_waiting_rechecks_until_the_span_is_covered(self) -> None:
+        w = full_world()
+        w.rows[(ZARI, "ZARI-N3")] = []                          # N3 NOT_STARTED, its only dependency is DONE
+        docs = self.run_ticks(w, [0, 1, 2, 3])
+        self.assertIsNotNone(docs[0])
+        self.assertIsNotNone(docs[1])                           # second idle snapshot one hour later
+        self.assertIsNone(docs[2])                              # two snapshots spanning 1 h: enough
+        self.assertIsNone(docs[3])
+        # without idle lanes nothing extra is collected
+        w2 = full_world()
+        w2.rows[(ZARI, "ZARI-N3")] = []
+        for lane in w2.lanes["lanes"]:
+            lane["enabled"] = False
+        self.state = core.StateStore(Path(self.tmp.name) / "idle2")
+        docs = self.run_ticks(w2, [0, 1])
+        self.assertIsNone(docs[1])
+
+    def test_truncated_exception_comments_are_unknown(self) -> None:
+        w = full_world()
+        marker = "ASTRA_CONSULT_V1 result=APPROVED_SMALL_EXCEPTION"
+        url = f"https://api.github.com/repos/{ZARI}/issues/102"
+        w.repos[ZARI]["comments"] = [{"id": i, "body": marker, "issue_url": url, "updated_at": iso(ago(hours=1))}
+                                     for i in range(1, 502)]
+        _, doc = self.tick(w)
+        self.assertIn("comments", doc["products"][ZARI]["unknown"])
+
+    def test_truncated_label_events_are_unknown(self) -> None:
+        w = full_world()
+        w.repos[ZARI]["issues"][3]["labels"].append({"name": "needs-user"})
+        events = [{"event": "labeled", "label": {"name": "needs-user"}, "created_at": iso(ago(hours=80))}]
+        events += [{"event": "commented", "created_at": iso(ago(hours=70))} for _ in range(300)]
+        events += [{"event": "labeled", "label": {"name": "needs-user"}, "created_at": iso(ago(hours=2))}]
+        w.repos[ZARI]["events"][104] = events
+        _, doc = self.tick(w)
+        self.assertIn("events", doc["products"][ZARI]["unknown"])
+        self.assertIsNone(doc["products"][ZARI]["nodes"]["N4"]["blocked_since"])
+
+    def test_label_since_per_blocking_label(self) -> None:
+        w = full_world()
+        w.repos[ZARI]["issues"][3]["labels"] += [{"name": "needs-user"}, {"name": "needs-lane-cleanup"}]
+        w.repos[ZARI]["events"][104] = [
+            {"event": "labeled", "label": {"name": "needs-user"}, "created_at": iso(ago(hours=72))},
+            {"event": "labeled", "label": {"name": "needs-lane-cleanup"}, "created_at": iso(ago(hours=1))}]
+        _, doc = self.tick(w)
+        n4 = doc["products"][ZARI]["nodes"]["N4"]
+        self.assertEqual(n4["blocked_since"], iso(ago(hours=72)))
+        self.assertEqual(n4["label_since"], {"needs-lane-cleanup": iso(ago(hours=1)),
+                                             "needs-user": iso(ago(hours=72))})
+        self.assertIsNone(doc["products"][ZARI]["nodes"]["N3"]["label_since"])
+        # the cleanup label's own 24 h crossing is a recheck time and moves the hash
+        self.assertEqual(facts_mod.next_recheck_at(doc, NOW, config(daily_hour_kst=14)), NOW + timedelta(hours=23))
+        later = copy.deepcopy(doc)
+        later["collected_at"] = iso(NOW + timedelta(hours=23, minutes=30))
+        self.assertNotEqual(facts_mod.hashes_of(later)["products"][ZARI],
+                            facts_mod.hashes_of(doc)["products"][ZARI])
+        self.assertNotIn("label_since", facts_mod.facts_core(doc)["products"][ZARI]["nodes"]["N4"])
+
+
+    def test_deeply_nested_plan_is_invalid_and_collect_completes(self) -> None:
+        # Hostile nesting (deeper than the recursion limit, and shallow enough to escape json but not
+        # copy.deepcopy) is bad JSON: the plan is INVALID and T1 still commits.
+        for depth in (2000, 500):
+            w = World()
+            commit = w.add_plan(KIXP, plan_doc(KIXP, "KIX", [node("A")], program="kixp"), ago(days=1))
+            w.repos[KIXP]["plan_content"][commit] = (
+                '{"schema_version":1,"x":' + "[" * depth + "]" * depth + "}").encode()
+            self.state = core.StateStore(Path(self.tmp.name) / f"deep{depth}")
+            _, doc = self.tick(w)
+            self.assertIsNotNone(doc, depth)
+            self.assertEqual(doc["products"][KIXP]["plan"]["state"], "INVALID", depth)
+            self.assertIsNotNone(self.state.read("facts"), depth)
 
 if __name__ == "__main__":
     unittest.main()
