@@ -95,6 +95,7 @@ class FakeGitHub:
     def __init__(self):
         self.issues, self.comments_by_issue, self.pulls, self.reviews, self.checks = {}, {}, {}, {}, {}
         self.contents, self.compare, self.statuses = {}, {}, {}
+        self.file_contents, self.workflows = {}, []
         self.unmerged = set()      # commits not on the default branch
         self.next_issue, self.next_comment, self.next_review = 30, 5000, 900
         self.posts = self.label_posts = 0
@@ -179,7 +180,11 @@ class FakeGitHub:
             raise cp.ControlPlaneError("GitHub API GET comment failed: 404")
         if method == "GET" and path_only.startswith("/contents/"):
             ref = re.search(r"ref=([0-9a-f]{40})", path).group(1)
+            if (path_only[len("/contents/"):], ref) in self.file_contents:
+                return self.file_contents[(path_only[len("/contents/"):], ref)]
             return {"content": base64.b64encode(json.dumps(self.contents[ref]).encode()).decode()}
+        if method == "GET" and path_only == "/actions/runs":
+            return {"workflow_runs": self.workflows if page == 1 else []}
         match = re.fullmatch(r"/compare/main\.\.\.([0-9a-f]{40})", path_only)
         if match:
             return {"status": "ahead" if match.group(1) in self.unmerged else "behind"}
@@ -307,6 +312,13 @@ class ProgramModeTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         env = patch.dict(os.environ, {"GITHUB_TOKEN": "t", "GITHUB_ACTOR": ACTOR, "GITHUB_TRIGGERING_ACTOR": ACTOR})
+        # These provider-free fixtures have an explicitly clear protected
+        # journal. Production queries root before any terminal writer resume.
+        original_fable_program = prog.fable_program
+        p = patch.object(prog, "fable_program", side_effect=lambda operation, issue, **fields:
+                         {"status": "CLEAR"} if operation == "decision-status"
+                         else original_fable_program(operation, issue, **fields))
+        p.start(); self.addCleanup(p.stop)
         env.start()
         self.addCleanup(env.stop)
         out = patch("sys.stdout")
@@ -347,6 +359,7 @@ class ProgramModeTests(unittest.TestCase):
 
     def pr(self, pr=7, sha=HEAD, ref="astra/zari-n1", **overrides):
         self.gh.pulls[pr] = {"state": "open", "draft": False, "mergeable_state": "clean", "merged": False,
+                             "merge_commit_sha": "f" * 40,
                              "head": {"sha": sha, "ref": ref, "repo": {"full_name": REPO}}, "base": {"ref": "main"},
                              **overrides}
 
@@ -1020,6 +1033,102 @@ class ProgramModeTests(unittest.TestCase):
         second = self.materialized("n2")
         waiting = prog.start(second, "zari", "n2", PLAN1, self.file("p.json"), preflight=lambda lane: True)
         self.assertEqual(waiting["status"], "WAITING_ON_DEPENDENCIES")
+
+    def test_external_dependency_field_is_rejected_before_materialization_or_start(self):
+        for external in ([], [{"repository": "BeautifulMind-JT/kix-protocol", "node": "sdk"}], None):
+            with self.subTest(external=external):
+                self.gh.contents[PLAN1] = plan([node(depends_on_external=external)])
+                with self.assertRaisesRegex(prog.ProgramError, "not supported by active schema"):
+                    prog.materialize("zari", "n1", PLAN1)
+                self.assertEqual(self.gh.posts, 0)
+        self.gh.contents[PLAN1] = plan()
+        issue = self.materialized()
+        self.gh.contents[PLAN2] = plan([node(depends_on_external=[])])
+        self.gh.compare[(PLAN1, PLAN2)] = "ahead"
+        with self.assertRaisesRegex(prog.ProgramError, "not supported by active schema"):
+            prog.start(issue, "zari", "n1", PLAN2, self.file("packet.json"), preflight=lambda _: True)
+        self.assertEqual(self.host.ledger.materialize_status("zari", "n1")["plan_commit"], PLAN1)
+        self.assertFalse(self.file("packet.json").exists())
+
+    def kix_post_merge_fixture(self):
+        cfg = {**self.cfg, "repository": "BeautifulMind-JT/kix-protocol", "project": "KIX",
+               "program_required_checks": ["kernel", "protocol"]}
+        merge = "f" * 40
+        self.pr(merged=True, state="closed", head={"sha": HEAD, "ref": "astra/zari-n1",
+                "repo": {"full_name": cfg["repository"]}})
+        self.gh.checks[merge] = [{"name": name, "id": suite, "check_suite": {"id": suite},
+                                "status": "completed", "conclusion": "success"}
+                               for name, suite in (("kernel", 100), ("protocol", 200))]
+        self.gh.workflows = [{"id": suite, "workflow_id": suite, "check_suite_id": suite,
+                              "event": "push", "head_branch": "main", "head_sha": merge,
+                              "status": "completed", "conclusion": "success", "run_number": 1}
+                             for suite in (100, 200)]
+        paths = ("runtime/crates/kix-kernel/src/lib.rs", "runtime/crates/kix-kernel/tests/quarantine_capacity.rs")
+        cfg["program_post_merge_locked_blobs"] = {}
+        for path in paths:
+            raw = ("provider-free fixture " + path).encode()
+            blob = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+            cfg["program_post_merge_locked_blobs"][path] = blob
+            self.gh.file_contents[(path, merge)] = {"type": "file", "encoding": "base64", "sha": blob,
+                                                   "content": base64.b64encode(raw).decode()}
+        return cfg, {"kind": "DELIVERY", "pr": 7, "head": HEAD}, merge
+
+    def test_kix_completion_needs_exact_merge_push_checks_and_locked_blobs(self):
+        cfg, pin, merge = self.kix_post_merge_fixture()
+        self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "DONE")
+        self.gh.checks[merge][1]["conclusion"] = "failure"
+        self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "POST_MERGE_FAILED")
+        self.gh.checks[merge][1]["conclusion"] = "success"
+        self.gh.workflows[1]["event"] = "pull_request"
+        result = prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")
+        self.assertEqual(result["status"], "MERGED_POST_VERIFY")
+        self.assertIn("main/push", " ".join(result["reasons"]))
+
+    def test_kix_post_merge_missing_stale_skipped_and_running_evidence_holds(self):
+        for mode in ("missing-baseline", "old-ci-sha", "skipped", "running", "wrong-suite", "rerun-running"):
+            cfg, pin, merge = self.kix_post_merge_fixture()
+            if mode == "missing-baseline": cfg.pop("program_post_merge_locked_blobs")
+            elif mode == "old-ci-sha": self.gh.checks[HEAD] = self.gh.checks.pop(merge)
+            elif mode == "skipped": self.gh.checks[merge][1]["conclusion"] = "skipped"
+            elif mode == "running": self.gh.workflows[1]["status"] = "in_progress"
+            elif mode == "wrong-suite": self.gh.workflows[1]["check_suite_id"] = 999
+            else: self.gh.workflows.append({**self.gh.workflows[1], "run_attempt": 2, "status": "in_progress"})
+            with self.subTest(mode=mode):
+                self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"],
+                                 "MERGED_POST_VERIFY")
+
+    def test_kix_locked_blob_changed_or_forged_metadata_is_post_merge_failure(self):
+        for mode in ("sha-metadata", "content"):
+            cfg, pin, merge = self.kix_post_merge_fixture()
+            path = next(iter(cfg["program_post_merge_locked_blobs"]))
+            value = self.gh.file_contents[(path, merge)]
+            value["sha" if mode == "sha-metadata" else "content"] = "b" * 40 if mode == "sha-metadata" \
+                else base64.b64encode(b"changed locked bytes").decode()
+            with self.subTest(mode=mode):
+                self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "POST_MERGE_FAILED")
+
+    def test_merged_delivery_wrong_target_or_unknown_lineage_never_done_or_redispatched(self):
+        issue, _ = self.released_writer()
+        for mode in ("wrong-target", "off-main", "missing-merge-sha"):
+            self.gh.pulls[7].update(merged=True, state="closed", base={"ref": "main"}, merge_commit_sha="f" * 40)
+            self.gh.unmerged.clear()
+            if mode == "wrong-target": self.gh.pulls[7]["base"]["ref"] = "other"
+            elif mode == "off-main": self.gh.unmerged.add("f" * 40)
+            else: self.gh.pulls[7]["merge_commit_sha"] = None
+            with self.subTest(mode=mode):
+                result = prog.start(issue, "zari", "n1", PLAN1, self.file("p.json"), preflight=lambda _: True)
+                self.assertEqual(result["status"], "MERGED_POST_VERIFY")
+                self.assertEqual(self.record(issue)["attempt_id"], 1)
+
+    def test_kix_failed_post_merge_blocks_successor_even_if_comment_claims_done(self):
+        cfg, pin, merge = self.kix_post_merge_fixture()
+        self.gh.checks[merge][0]["conclusion"] = "failure"
+        self.gh.create_comment(31, "POST_MERGE_FAILED recorded; corrective issue #99; DONE")
+        row = {"role": "WRITER", "state": "RECONCILED", "resolution": cp.VERIFIED_RELEASE, "pin": pin}
+        with patch.object(prog, "host", return_value={"status": "CREATED", "repository": cfg["repository"]}), \
+                patch.object(prog, "task_rows", return_value=[row]):
+            self.assertEqual(prog.pending_dependencies(self.gh, cfg, plan([node("n1"), node("n2", depends_on=["n1"])]),
+                                                       node("n2", depends_on=["n1"])), ["n1"])
 
     # ------------------------------------------------------------------ materialize and plan
 

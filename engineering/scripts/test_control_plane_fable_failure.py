@@ -136,9 +136,36 @@ class FailureParserTests(unittest.TestCase):
             events[1]["rate_limit_info"].update(change)
             with self.subTest(change=change):
                 record = parse(events)
-                self.assertEqual(record["error_code"], "OVERAGE_NOT_BLOCKED")
+                expected = ("OVERAGE_NOT_BLOCKED" if change.get("isUsingOverage") is True
+                            or change.get("overageStatus") == "allowed" else "OVERAGE_UNVERIFIED")
+                self.assertEqual(record["error_code"], expected)
                 self.assertIsNone(record["reset_at_epoch_ms"])
-        self.assertEqual(parse([failed_events()[0], failed_events()[-1]])["error_code"], "OVERAGE_NOT_BLOCKED")
+        self.assertEqual(parse([failed_events()[0], failed_events()[-1]])["error_code"], "OVERAGE_UNVERIFIED")
+
+    def test_guard_stop_is_operator_settlement_evidence_and_never_quota_evidence(self):
+        for change, expected in (({"overageStatus": None}, "OVERAGE_UNVERIFIED"),
+                                 ({"isUsingOverage": True}, "OVERAGE_NOT_BLOCKED")):
+            events = failed_events(machine_reset=True)
+            events[1]["rate_limit_info"].update(change)
+            # A success or quota result buffered after the guard is not read.
+            raw, guard = fable.read_stream(io.BytesIO(raw_of(events)))
+            execution = {**EXECUTION, "exit_code": -signal.SIGKILL, "guard_stop": guard}
+            record = fable.failure_of(raw, version=fable.SUPPORTED_CLAUDE_VERSION,
+                                      execution=execution, observed_at_epoch_ms=NOW_MS)
+            with self.subTest(change=change):
+                self.assertEqual(record["error_code"], expected)
+                self.assertEqual(record["terminal_evidence"], "VERIFIED")
+                self.assertIsNone(record["reset_at_epoch_ms"])
+                self.assertIsNone(record["limit_type"])
+                self.assertIsNone(record["extra_usage"])
+                self.assertEqual(len(fable.events_of(raw)), 2)
+                for alteration in ({"process_group_state": "PRESENT"}, {"exit_code": 1},
+                                   {"timed_out": True}, {"interrupted": True},
+                                   {"guard_stop": {**guard, "event_sha256": "0" * 64}},
+                                   {"guard_stop": {**guard, "event_index": True}}):
+                    unproved = fable.failure_of(raw, version=fable.SUPPORTED_CLAUDE_VERSION,
+                                                execution={**execution, **alteration})
+                    self.assertEqual(unproved["terminal_evidence"], "UNKNOWN")
 
     def test_informational_weekly_event_does_not_override_rejected_five_hour(self):
         events = failed_events(machine_reset=True)
@@ -264,6 +291,28 @@ class ProcessTests(unittest.TestCase):
         self.assertNotEqual(fable.failure_of(runner.last_output, version=fable.SUPPORTED_CLAUDE_VERSION,
                                              execution=runner.last_execution)["terminal_evidence"], "VERIFIED")
 
+    def test_missing_overage_stops_the_real_runner_flow_before_terminal_result(self):
+        events = failed_events(machine_reset=True)
+        del events[1]["rate_limit_info"]["overageStatus"]
+        runner, proc, signals = self.runner(), self.process(output=raw_of(events)), []
+        def killpg(pid, sig):
+            signals.append(sig)
+            if sig == 0:
+                raise ProcessLookupError
+        def wait(timeout=None):
+            proc.calls.append(("wait", timeout))
+            proc.returncode = -signal.SIGKILL
+        proc.wait = wait
+        with patch.object(fable.subprocess, "Popen", return_value=proc), \
+                patch.object(fable.threading, "Timer"), patch.object(fable.os, "killpg", killpg):
+            runner(Path("/fake/work"), "system", {}, "prompt")
+        self.assertEqual(signals, [signal.SIGKILL, 0])
+        self.assertEqual(len(fable.events_of(runner.last_output)), 2)
+        self.assertEqual(runner.last_execution["guard_stop"]["error_code"], "OVERAGE_UNVERIFIED")
+        record = fable.failure_of(runner.last_output, version=fable.SUPPORTED_CLAUDE_VERSION,
+                                  execution=runner.last_execution)
+        self.assertEqual(record["terminal_evidence"], "VERIFIED")
+
 
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
@@ -315,6 +364,51 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual((run / name).stat().st_mode & 0o777, 0o600)
         with self.assertRaises(FileExistsError):
             fable.sealed_file(run / "failure-evidence.json", b"overwrite")
+
+    def test_sealed_protective_stop_is_verified_without_extra_usage_or_retry_authority(self):
+        events = failed_events(machine_reset=True)
+        del events[1]["rate_limit_info"]["overageStatus"]
+        raw, guard = fable.read_stream(io.BytesIO(raw_of(events)))
+        ctx = self.context(output=raw, execution={**EXECUTION, "exit_code": -signal.SIGKILL,
+                                                  "guard_stop": guard})
+        run_id, run, record = self.fail_run(ctx)
+        self.assertEqual(record["error_code"], "OVERAGE_UNVERIFIED")
+        self.assertEqual(fable.verify_failure_evidence(ctx, run_id), record)
+        self.assertEqual((run / "guard-stop.json").stat().st_mode & 0o777, 0o600)
+        self.assertIsNone(record["extra_usage"])
+        self.assertIsNone(record["reset_at_epoch_ms"])
+        (run / "guard-stop.json").write_bytes(b"{}")
+        with self.assertRaisesRegex(fable.FableError, "protective stop"):
+            fable.verify_failure_evidence(ctx, run_id)
+
+    def test_guard_archive_to_operator_settlement_preserves_admission_and_blocks_quota_retry(self):
+        import control_plane_program_receipts as journal
+        from control_plane_program_quota import Quota
+        events = failed_events(machine_reset=True)
+        del events[1]["rate_limit_info"]["overageStatus"]
+        raw, guard = fable.read_stream(io.BytesIO(raw_of(events)))
+        ctx = self.context(output=raw, execution={**EXECUTION, "exit_code": -signal.SIGKILL,
+                                                  "guard_stop": guard})
+        store = journal.Receipts(self.runs, "a" * 64, trust=lambda *args, **kwargs: None)
+        def invoke():
+            _, _, failure = self.fail_run(ctx)
+            raise fable.FableError("protective stop", failure=failure)
+        with self.assertRaises(fable.FableError):
+            store.execute("audit", self.binding, invoke)
+        first = store.read("audit", self.binding)
+        original = store._path(first["admission"], "outcome").read_bytes()
+        verify = lambda run: fable.verify_failure_evidence(ctx, run)
+        def forbidden_call(*args):
+            self.fail("protective stop granted an automatic model retry")
+        quota = Quota(store, verify, forbidden_call, forbidden_call, clock_ms=lambda: NOW_MS)
+        self.assertEqual(quota.resume("audit", self.binding, forbidden_call)["status"], "BLOCKED_ERROR")
+        self.assertEqual(list(quota.root.iterdir()), [])
+        settled = store.reconcile(first["admission"], first["state_version"], verify)
+        self.assertEqual(settled["status"], "RECONCILED_FAILED")
+        self.assertEqual(store._path(first["admission"], "outcome").read_bytes(), original)
+        self.assertEqual(store.read("audit", self.binding)["status"], "ERROR")
+        self.assertEqual(store.read("audit", self.binding)["settlement"], "TERMINAL_FAILED")
+        self.assertEqual(quota.resume("audit", self.binding, forbidden_call)["status"], "BLOCKED_ERROR")
 
     def test_tampered_archive_or_projection_cannot_settle(self):
         for target in ("claude-output.jsonl", "claude-stderr.txt", "failure-evidence.json", "model-attempt.json"):

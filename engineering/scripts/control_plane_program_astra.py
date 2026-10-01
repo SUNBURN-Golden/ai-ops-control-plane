@@ -205,6 +205,34 @@ def resolve_request(api, cfg, issue_number, operation, payload):
         binding, issue, plan, node, rows, writer = request_context(api, cfg, issue_number, pr, head)
     elif operation == "decision-status":
         binding, issue, plan, node, rows, writer = request_context(api, cfg, issue_number, decision_only=True)
+        proposed = payload.get("plan_commit")
+        if proposed is not None:
+            if not isinstance(proposed, str) or not prog.SHA.fullmatch(proposed):
+                raise BridgeError("decision-status plan_commit must be an exact commit SHA")
+            proposed_plan = prog.load_plan(api, cfg, proposed)
+            if proposed_plan["program"] != plan["program"]:
+                raise BridgeError("decision-status proposed plan changes the canonical program")
+            proposed_node = prog.plan_node(proposed_plan, node["id"])
+            prog.require_on_default_branch(api, proposed)
+            prog.require_descendant(api, binding["plan_commit"], proposed)
+            # An unrelated commit or edited spec under the old approval is not
+            # a User decision. Preserve the semantic binding unless this merged
+            # plan names a distinct durable approval/decision pointer AND
+            # changes the selected node's approved definition. Same-scope User
+            # settlement needs its own adopted reconciler; this is not one.
+            if proposed_plan["approval_pointer"] != plan["approval_pointer"]:
+                decision = proposed_plan["approval_pointer"]
+                repositories = (cfg["repository"], "BeautifulMind-JT/ai-ops-control-plane")
+                if not any(re.fullmatch(r"https://github\.com/" + re.escape(repo)
+                                       + r"/(?:issues|pull)/[1-9][0-9]*(?:#issuecomment-[1-9][0-9]*)?", decision)
+                           for repo in repositories):
+                    raise BridgeError("revised scope requires a durable approval/decision pointer")
+                # Read-only here. Keep writer_launch; this cannot manufacture a
+                # new execution. Same-task execution fences still span revisions.
+                if proposed_node != node:
+                    binding = {**binding, "plan_commit": proposed,
+                               "task_revision": prog.task_revision_for(proposed, writer["lane"])}
+            plan, node = proposed_plan, proposed_node
     else:
         binding, issue, plan, node, rows, writer = request_context(api, cfg, issue_number)
         question = payload.get("question")
@@ -258,7 +286,7 @@ def require_quota_context(action, api, cfg, context):
 
 
 def run(ctx, fable, payload):
-    allowed = {"operation", "repository", "issue", "pr", "head", "question", "github_token"}
+    allowed = {"operation", "repository", "issue", "pr", "head", "question", "github_token", "plan_commit"}
     if not isinstance(payload, dict) or set(payload) - allowed:
         raise BridgeError("invalid program Astra input")
     repository, operation, issue_number = payload.get("repository"), payload.get("operation"), payload.get("issue")
@@ -268,6 +296,8 @@ def run(ctx, fable, payload):
         raise BridgeError("invalid program Astra target or operation")
     if not isinstance(payload.get("github_token"), str) or not payload["github_token"]:
         raise BridgeError("GitHub token is required on stdin")
+    if "plan_commit" in payload and operation != "decision-status":
+        raise BridgeError("only decision-status accepts a proposed plan_commit")
     # Only the allowlisted installed profiles are used. No caller-controlled root
     # path, PYTHONPATH, credential path, Git ref or model is accepted.
     for path in (cp.CONFIG_PATH, cp.CONFIG_PATH.with_name("projects.json")):

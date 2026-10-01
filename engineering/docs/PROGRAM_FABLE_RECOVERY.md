@@ -46,6 +46,47 @@ same-bound failure archive and definitely unstarted publication. It preserves
 the original ERROR. It grants neither PASS nor another model invocation.
 UNKNOWN without that evidence stays fenced, including legacy unproven failures.
 
+## Protective stop and fixed-command account lease
+
+Missing or malformed `overageStatus` is `OVERAGE_UNVERIFIED`; affirmative evidence
+that extra usage is not blocked remains `OVERAGE_NOT_BLOCKED`. Both stop immediately
+and preserve fail-closed billing protection. A supported-profile protective stop
+records the exact triggering stream event/index/hash and sealed guard-stop archive,
+waits for the killed process group to be absent, and proves publication NOT_STARTED.
+Only the operator reconciliation path may then settle TERMINAL_FAILED. Missing
+guard/archive/process/publication proof remains UNKNOWN. Neither settlement nor
+the guard event creates reset evidence or quota eligibility: the automatic wake
+still accepts only verified MODEL_RATE_LIMIT failures.
+
+All fixed CLI model-producing commands take a root-owned nonblocking
+`account-model.lock` before model context or program admission. The existing
+program journal/quota locks remain inner locks. A BUSY caller admitted nothing;
+check and reconciliation do not require the model lease. Standalone Claude/Opus
+sessions outside aiops-fable are not serialized by this lease.
+
+## Start and completion safeguards
+
+A proposed approved descendant plan cannot bypass an unresolved execution journal
+entry, including User-only/nondelegated nodes or a removed Astra delegation flag. Exact semantic USER_REQUIRED bindings
+may be superseded only by a revised node definition with a distinct approved
+decision pointer; new commit SHA alone is insufficient. Same-scope semantic
+decision changes require a separately adopted decision-resolution path.
+Execution ambiguity cannot be superseded by scope revision.
+Active schema v1 rejects `depends_on_external`, including an empty field, before
+materialization or start. The separate external completion capability is not
+installed by this change.
+
+Completion/dependency readiness verifies the recorded actual merge SHA on the
+default branch. KIX requires terminal successful push-workflow checks bound to
+that SHA and a protected profile pinning both locked Git blobs to the existing
+repository contract. Missing required proof, pending CI, failure, or a bare skipped
+required check holds downstream readiness. Projects without a post-merge phase
+retain DISPATCH §20's recorded-merge completion rule. That section still permits the original task to be
+closed after durable POST_MERGE_FAILED and a corrective-task pointer; that closure
+alone never proves the failed delivery ready for dependants. Cached same-tree
+main-workflow shortcuts need their named authoritative verification evidence;
+the current reader holds when it cannot establish that evidence.
+
 ## One quota wake through the existing heartbeat
 
 The candidate `quota-readiness` query runs no model. `quota-resume` accepts the

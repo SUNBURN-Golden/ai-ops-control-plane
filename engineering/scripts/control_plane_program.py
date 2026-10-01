@@ -259,6 +259,11 @@ def validate_plan(plan: Any, cfg: Dict[str, Any]) -> Dict[str, Any]:
         deps = node.get("depends_on", [])
         if not isinstance(deps, list) or any(dep not in ids or dep == node["id"] for dep in deps):
             raise ProgramError(f"node {node['id']} has invalid depends_on")
+        # Schema v1 has no adopted cross-repository completion reader. Even an
+        # empty field must not look like supported/consumed dependency evidence.
+        if "depends_on_external" in node:
+            raise ProgramError(f"node {node['id']}: depends_on_external is not supported by active schema v1; "
+                               "keep cross-repository dependencies in the pending catalogue until adopted")
         node.setdefault("audit_floor", "A1")
         node.setdefault("astra_gate", "NONE")
         node.setdefault("deliverable_mode", "PR")
@@ -536,10 +541,117 @@ def effective_floor(plan_floor: str, verdicts: List[tuple]) -> str:
 
 
 def merged_delivery(api: cp.GithubApi, pin: Optional[Dict[str, Any]]) -> bool:
+    """Merge existence only, never a dependency/completion predicate."""
     if pin is None:
         return False
     pr = api._request("GET", f"/pulls/{pin['pr']}")
     return pr.get("merged") is True and (pr.get("head") or {}).get("sha") == pin["head"]
+
+
+def post_merge_workflow_runs(api: cp.GithubApi, branch: str, merge_sha: str) -> List[Dict[str, Any]]:
+    """Actual main/push runs, not mutable evidence prose or PR checks at another SHA."""
+    result, page = [], 1
+    while True:
+        value = api._request("GET", f"/actions/runs?event=push&branch={branch}&head_sha={merge_sha}"
+                             f"&per_page=100&page={page}")
+        runs = value.get("workflow_runs") if isinstance(value, dict) else None
+        if not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs):
+            raise ProgramError("post-merge workflow list is malformed")
+        result.extend(run for run in runs if run.get("event") == "push" and run.get("head_branch") == branch
+                      and run.get("head_sha") == merge_sha)
+        if len(runs) < 100:
+            return result
+        page += 1
+
+
+def delivery_completion(api: cp.GithubApi, cfg: Dict[str, Any], pin: Optional[Dict[str, Any]],
+                        task_id: str) -> Dict[str, Any]:
+    """Project completion and readiness at an exact delivery/merge, DISPATCH §20.
+
+    There is no adopted protected post-merge failure/follow-up issuer yet. A
+    failed KIX verification therefore holds the original and downstream here;
+    E04 can later expose the independently recorded failure+corrective task for
+    original-task closure without granting downstream product readiness.
+    """
+    if pin is None:
+        return {"status": "NOT_MERGED"}
+    pr = api._request("GET", f"/pulls/{pin['pr']}")
+    if pr.get("merged") is not True:
+        return {"status": "NOT_MERGED"}
+    merge_sha = pr.get("merge_commit_sha")
+    branch = default_branch(api)
+    reasons = []
+    if (pr.get("head") or {}).get("sha") != pin["head"]:
+        reasons.append("merged PR head differs from the host-pinned delivery")
+    if ((pr.get("head") or {}).get("repo") or {}).get("full_name") != cfg["repository"] \
+            or (pr.get("head") or {}).get("ref") != branch_for(task_id) \
+            or (pr.get("base") or {}).get("ref") != branch:
+        reasons.append("merged delivery does not name this task/repository/default target")
+    if not isinstance(merge_sha, str) or not SHA.fullmatch(merge_sha):
+        reasons.append("merged delivery has no exact merge commit")
+    else:
+        try:
+            require_on_default_branch(api, merge_sha)
+        except ProgramError:
+            reasons.append("merged delivery commit is not on the default target lineage")
+    result = {"status": "MERGED_POST_VERIFY", "pr": pin["pr"], "head": pin["head"],
+              "merge_commit": merge_sha, "reasons": reasons}
+    if reasons:
+        return result  # an already merged task must not be redispatched either
+    if cfg["repository"] != "BeautifulMind-JT/kix-protocol":
+        return {**result, "status": "DONE"}  # no required post-merge phase for these products
+    checks = latest_check_runs(all_check_runs(api, merge_sha))
+    statuses = api._request("GET", f"/commits/{merge_sha}/status") or {}
+    if any(check.get("status") == "completed" and check.get("conclusion")
+           not in ("success", "neutral", "skipped") for check in checks) \
+            or statuses.get("statuses") and statuses.get("state") in ("failure", "error"):
+        return {**result, "status": "POST_MERGE_FAILED",
+                "reasons": ["KIX post-merge CI failed; durable failure and corrective task evidence required"]}
+    reasons.extend(verification_reasons(api, cfg, merge_sha))
+    push_runs = post_merge_workflow_runs(api, branch, merge_sha)
+    newest = {}
+    for run in push_runs:
+        key = run.get("workflow_id", run.get("path"))
+        order = (run.get("run_number", 0), run.get("run_attempt", 1), run.get("id", 0))
+        if key not in newest or order > newest[key][0]:
+            newest[key] = (order, run)
+    push_runs = [run for _, run in newest.values()]
+    if any(run.get("status") == "completed" and run.get("conclusion")
+           not in ("success", "neutral", "skipped") for run in push_runs):
+        return {**result, "status": "POST_MERGE_FAILED",
+                "reasons": ["KIX exact main/push workflow failed; corrective task evidence required"]}
+    verified_suites = {run.get("check_suite_id") for run in push_runs
+                       if run.get("status") == "completed" and run.get("conclusion") == "success"
+                       and type(run.get("check_suite_id")) is int}
+    for name in cfg.get("program_required_checks", []):
+        required = [check for check in checks if check.get("name") == name]
+        if not required or any((check.get("check_suite") or {}).get("id") not in verified_suites
+                               for check in required):
+            reasons.append(f"KIX post-merge required check {name!r} lacks successful exact main/push origin")
+    # Expected blobs are reviewed profile bytes bound by the installed runtime;
+    # never parse attacker-editable AGENTS or accept caller-selected baselines.
+    locked = cfg.get("program_post_merge_locked_blobs")
+    locked_paths = {"runtime/crates/kix-kernel/src/lib.rs",
+                    "runtime/crates/kix-kernel/tests/quarantine_capacity.rs"}
+    if not isinstance(locked, dict) or set(locked) != locked_paths or not all(
+            isinstance(path, str) and re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", path)
+            and all(part not in (".", "..") for part in path.split("/"))
+            and isinstance(blob, str) and SHA.fullmatch(blob) for path, blob in (locked or {}).items()):
+        reasons.append("KIX protected post-merge locked-blob baseline is missing or invalid")
+    else:
+        for path, blob in locked.items():
+            value = api._request("GET", f"/contents/{path}?ref={merge_sha}")
+            try:
+                raw = base64.b64decode("".join(value["content"].split()), validate=True)
+                actual = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+                valid = value.get("type") == "file" and value.get("encoding") == "base64" \
+                    and value.get("sha") == blob and actual == blob
+            except (KeyError, TypeError, ValueError):
+                valid = False
+            if not valid:
+                return {**result, "status": "POST_MERGE_FAILED",
+                        "reasons": [f"KIX post-merge locked blob differs at {path}"]}
+    return {**result, "status": "MERGED_POST_VERIFY" if reasons else "DONE", "reasons": reasons}
 
 
 def task_context(api: cp.GithubApi, cfg: Dict[str, Any], issue_number: int):
@@ -577,12 +689,12 @@ def rendered_body(issue: Dict[str, Any], plan: Dict[str, Any], node: Dict[str, A
 
 
 def dependency_done(api: cp.GithubApi, cfg: Dict[str, Any], plan: Dict[str, Any], node_id: str) -> bool:
-    """DONE: the node's host-pinned delivery PR was merged at its delivered head."""
+    """Downstream readiness, including the product's required post-merge phase."""
     status = host(["materialize-status", "--program", plan["program"], "--node", node_id])
     if status.get("status") != "CREATED" or status.get("repository") != cfg["repository"]:
         return False
-    return merged_delivery(api, pin_of(current_writer(task_rows(cfg, task_id_for(plan["program"], node_id))),
-                                       "DELIVERY"))
+    tid = task_id_for(plan["program"], node_id)
+    return delivery_completion(api, cfg, pin_of(current_writer(task_rows(cfg, tid)), "DELIVERY"), tid)["status"] == "DONE"
 
 
 def pending_dependencies(api: cp.GithubApi, cfg: Dict[str, Any], plan: Dict[str, Any],
@@ -613,10 +725,12 @@ def start(issue_number: int, program: str, node_id: str, plan_commit: str, packe
         raise ProgramError("canonical issue is closed or its task key does not match the host record")
     require_single_canonical(api, cfg, program, node_id, issue_number)
     tid = task_id_for(program, node_id)
-    if merged_delivery(api, pin_of(current_writer(task_rows(cfg, tid)), "DELIVERY")):
-        # The pinned delivery is merged at its delivered head: the node is DONE, never redispatched.
+    completion = delivery_completion(api, cfg, pin_of(current_writer(task_rows(cfg, tid)), "DELIVERY"), tid)
+    if completion["status"] != "NOT_MERGED":
+        # Merge is terminal for the writer. Incomplete/failed post-merge
+        # verification holds successors and never restarts the original writer.
         cp.write_github_output("launch_required", "false")
-        return {"status": "DONE", "issue": issue_number}
+        return {**completion, "issue": issue_number}
     pending = pending_dependencies(api, cfg, plan, node)
     if pending:
         cp.write_github_output("launch_required", "false")
@@ -627,9 +741,13 @@ def start(issue_number: int, program: str, node_id: str, plan_commit: str, packe
         cp.write_github_output("launch_required", "false")
         return {"status": "TASK_ACTIVE", "issue": issue_number}
     previous_writer = current_writer(task_rows(cfg, tid))
-    if node.get("astra_auto_merge") is True and previous_writer and released(previous_writer) \
-            and status["plan_commit"] == plan_commit:
-        decision = fable_program("decision-status", issue_number)
+    terminal_writer = bool(previous_writer) and previous_writer.get("state") == "RECONCILED" \
+        and previous_writer.get("resolution") in cp.TERMINAL_RELEASES
+    if terminal_writer:
+        # Ask before advancing the host plan/body or reserving a lane. The root
+        # bridge validates a proposed approved revision; execution ambiguity is
+        # fenced across revisions, while a semantic User decision is exact-scope.
+        decision = fable_program("decision-status", issue_number, plan_commit=plan_commit)
         if decision.get("status") != "CLEAR":
             raise ProgramError("Fable decision is unresolved or USER_REQUIRED; an approved plan revision is required")
     attempt = None

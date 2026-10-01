@@ -295,8 +295,8 @@ sudo env GH_TOKEN="$(gh auth token)" /opt/aiops/bin/aiops-fable consult \
   `--fallback-model`은 쓰지 않고, 거절 시 자동 모델 전환도 끈다(`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`).
   Fable을 쓸 수 없거나 거절하면 실패하고 기다린다.
 - **추가 과금 차단:** CLI 출력(stream-json)의 `rate_limit_event`가 `overageStatus: "rejected"`, `isUsingOverage: false`여야 한다.
-  초과 사용(extra usage)이 막혀 있다는 뜻이다. 다른 값이 한 번이라도 나오면 그 즉시 실행을 끊고 아무것도 올리지 않는다
-  (`OVERAGE_NOT_BLOCKED`). 이 신호가 없으면 확인할 수 없으므로 역시 올리지 않는다(`OVERAGE_UNVERIFIED`).
+  초과 사용(extra usage)이 막혀 있다는 뜻이다. 차단되지 않았다는 명시적 값이 나오면 그 즉시 실행을 끊고 아무것도 올리지 않는다
+  (`OVERAGE_NOT_BLOCKED`). 값이 없거나 형식을 확인할 수 없어도 즉시 끊는다(`OVERAGE_UNVERIFIED`).
   첫 요청 뒤에야 신호가 오므로, 초과 사용이 켜진 계정이라도 한 실행에서 새는 양은 첫 요청 하나로 제한된다.
   확실히 0원으로 하려면 claude.ai 설정 > 사용량(Usage)에서 추가 사용량(usage credits)과 자동 충전을 끈다.
   `ANTHROPIC_API_KEY`는 모델 환경에 넘기지 않으므로 API 종량 과금 경로도 없다.
@@ -317,6 +317,13 @@ sudo env GH_TOKEN="$(gh auth token)" /opt/aiops/bin/aiops-fable consult \
 
 증거: 실행 폴더에 packet, 원본 CLI 출력(`claude-output.jsonl`), 올린 글, `run.json`이 남는다.
 댓글에는 host run id, 모델 세션, 도구 sha256, 원본 출력 sha256이 있다.
+
+고정 CLI의 preflight·audit·consult 및 program 모델 실행은 보호된 전역
+`account-model.lock`을 admission 전에 비대기 방식으로 획득한다. 잠겨 있으면
+BUSY이며 모델·admission은 시작하지 않는다. 보호 중단은 원본 이벤트·중단 기록·
+process group 부재·게시 NOT_STARTED를 모두 검증한 운영자만 TERMINAL_FAILED로
+정산할 수 있다. 자동 한도 재개 권한을 주지 않는다. 래퍼 밖 Claude/Opus 실행은
+이 잠금의 적용 대상이 아니다.
 
 실패하면 `{"status": "ERROR", "reason": ...}`를 출력하고 아무것도 올리지 않는다. 운영자는 원문을 보고하고 멈춘다.
 우회하거나 다른 모델로 다시 돌리지 않는다.

@@ -179,6 +179,122 @@ class ContextTests(unittest.TestCase):
             with self.assertRaisesRegex(prog.ProgramError, "USER_REQUIRED"):
                 self.r.launch_writer(issue)
 
+    def protected_status_store(self):
+        root = Path(self.r.temp.name) / "program"
+        root.mkdir(mode=0o700, exist_ok=True)
+        ctx = SimpleNamespace(runs_dir=Path(self.r.temp.name), tool_sha256="a" * 64)
+        return ctx, bridge.Receipts(root, "a" * 64)
+
+    def status_via_bridge(self, ctx, issue, **fields):
+        return bridge.run(ctx, fable, {"repository": runtime.REPO, "issue": issue,
+                          "operation": "decision-status", "github_token": "token", **fields})
+
+    def test_unresolved_execution_blocks_revised_plan_even_if_delegation_removed(self):
+        issue, _, binding = self.reviewed_delivery()
+        self.r.gh.contents[runtime.PLAN2] = runtime.plan([runtime.node(floor="A3", spec="Approved revised scope.")])
+        self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
+        old_body = self.r.gh.issues[issue]["body"]
+        with patch.object(bridge, "protected"), \
+                patch.object(bridge, "installed_fingerprint", return_value="a" * 64), \
+                patch.object(bridge, "require_service_authorization"):
+            ctx, store = self.protected_status_store()
+            store.write("audit", binding, {"status": "UNKNOWN"})
+            def status(operation, actual_issue, **fields):
+                self.assertEqual((operation, actual_issue), ("decision-status", issue))
+                return self.status_via_bridge(ctx, actual_issue, **fields)
+            with patch.object(prog, "fable_program", side_effect=status) as query:
+                with self.assertRaisesRegex(prog.ProgramError, "unresolved"):
+                    self.r.launch_writer(issue, commit=runtime.PLAN2)
+                query.assert_called_once_with("decision-status", issue, plan_commit=runtime.PLAN2)
+        self.assertEqual(self.r.host.ledger.materialize_status("zari", "n1")["plan_commit"], runtime.PLAN1)
+        self.assertEqual(self.r.gh.issues[issue]["body"], old_body)
+        self.assertEqual(len(prog.writer_rows(prog.task_rows(self.r.cfg, "ZARI-N1"))), 1)
+
+    def test_approved_revision_clears_exact_semantic_decision_without_execution_bypass(self):
+        issue, _, binding = self.reviewed_delivery()
+        self.r.gh.contents[runtime.PLAN2] = runtime.plan([runtime.node(floor="A3", astra_auto_merge=True,
+                                                                  spec="User-approved revised scope.")])
+        self.r.gh.contents[runtime.PLAN2]["approval_pointer"] = \
+            "https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/48#issuecomment-123"
+        self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
+        with patch.object(bridge, "protected"), \
+                patch.object(bridge, "installed_fingerprint", return_value="a" * 64), \
+                patch.object(bridge, "require_service_authorization"):
+            ctx, store = self.protected_status_store()
+            store.write("audit", binding, {"status": "POSTED", "result": "DECISION_REQUIRED",
+                        "scope_result": "USER_REQUIRED", "program_binding": binding})
+            self.assertEqual(self.status_via_bridge(ctx, issue)["status"], "BLOCKED")
+            self.assertEqual(self.status_via_bridge(ctx, issue, plan_commit=runtime.PLAN2)["status"], "CLEAR")
+            with patch.object(prog, "fable_program", side_effect=lambda _op, n, **fields:
+                              self.status_via_bridge(ctx, n, **fields)):
+                answer = prog.start(issue, "zari", "n1", runtime.PLAN2,
+                                    self.r.file("p2.json"), preflight=lambda _: True)
+        self.assertEqual(answer["status"], "PREPARED")
+        self.assertEqual(self.r.host.ledger.materialize_status("zari", "n1")["plan_commit"], runtime.PLAN2)
+
+    def test_unrelated_commit_or_spec_edit_without_new_decision_cannot_clear_user_required(self):
+        issue, _, binding = self.reviewed_delivery()
+        self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
+        with patch.object(bridge, "protected"), \
+                patch.object(bridge, "installed_fingerprint", return_value="a" * 64), \
+                patch.object(bridge, "require_service_authorization"):
+            ctx, store = self.protected_status_store()
+            store.write("audit", binding, {"status": "POSTED", "result": "DECISION_REQUIRED",
+                        "scope_result": "USER_REQUIRED", "program_binding": binding})
+            for changed_spec in (False, True):
+                self.r.gh.contents[runtime.PLAN2] = json.loads(json.dumps(self.r.gh.contents[runtime.PLAN1]))
+                if changed_spec: self.r.gh.contents[runtime.PLAN2]["nodes"][0]["spec"] = "Unapproved changed scope."
+                with self.subTest(changed_spec=changed_spec):
+                    self.assertEqual(self.status_via_bridge(ctx, issue, plan_commit=runtime.PLAN2)["status"], "BLOCKED")
+                    with patch.object(prog, "fable_program", side_effect=lambda _op, n, **fields:
+                                      self.status_via_bridge(ctx, n, **fields)):
+                        with self.assertRaisesRegex(prog.ProgramError, "USER_REQUIRED"):
+                            self.r.launch_writer(issue, commit=runtime.PLAN2)
+            self.r.gh.contents[runtime.PLAN2]["approval_pointer"] = "different text is not a User decision"
+            with self.assertRaisesRegex(bridge.BridgeError, "durable approval"):
+                self.status_via_bridge(ctx, issue, plan_commit=runtime.PLAN2)
+            # Same-scope settlement is not manufactured by a pointer change;
+            # it needs an independently adopted decision reconciler.
+            self.r.gh.contents[runtime.PLAN2] = json.loads(json.dumps(self.r.gh.contents[runtime.PLAN1]))
+            self.r.gh.contents[runtime.PLAN2]["approval_pointer"] = \
+                "https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/48#issuecomment-124"
+            self.assertEqual(self.status_via_bridge(ctx, issue, plan_commit=runtime.PLAN2)["status"], "BLOCKED")
+        self.assertEqual(self.r.host.ledger.materialize_status("zari", "n1")["plan_commit"], runtime.PLAN1)
+
+    def test_nondelegated_user_only_consultation_still_fences_cross_plan_resume(self):
+        self.r.gh.contents[runtime.PLAN1] = runtime.plan([runtime.node(floor="A3", user_merge=True)])
+        issue, _ = self.r.released_writer()
+        binding, *_ = bridge.request_context(self.r.gh, self.r.cfg, issue, decision_only=True)
+        self.r.gh.contents[runtime.PLAN2] = runtime.plan([runtime.node(floor="A3", user_merge=True,
+                                                                  spec="Revised User-only scope.")])
+        self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
+        with patch.object(bridge, "protected"), \
+                patch.object(bridge, "installed_fingerprint", return_value="a" * 64), \
+                patch.object(bridge, "require_service_authorization"):
+            ctx, store = self.protected_status_store()
+            store.write("consult", binding, {"status": "UNKNOWN"})
+            with patch.object(prog, "fable_program", side_effect=lambda _op, n, **fields:
+                              self.status_via_bridge(ctx, n, **fields)):
+                with self.assertRaisesRegex(prog.ProgramError, "unresolved"):
+                    self.r.launch_writer(issue, commit=runtime.PLAN2)
+        self.assertEqual(self.r.host.ledger.materialize_status("zari", "n1")["plan_commit"], runtime.PLAN1)
+
+    def test_proposed_plan_status_rejects_unapproved_unmerged_stale_or_different_scope(self):
+        issue, _, _ = self.reviewed_delivery()
+        for mode in ("pending", "unmerged", "stale", "different-program", "missing-node"):
+            self.r.gh.contents[runtime.PLAN2] = runtime.plan([runtime.node(floor="A3", astra_auto_merge=True)])
+            self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
+            self.r.gh.unmerged.clear()
+            if mode == "pending": self.r.gh.contents[runtime.PLAN2]["approval_pointer"] = "PENDING"
+            elif mode == "unmerged": self.r.gh.unmerged.add(runtime.PLAN2)
+            elif mode == "stale": self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "diverged"
+            elif mode == "different-program": self.r.gh.contents[runtime.PLAN2]["program"] = "other"
+            else: self.r.gh.contents[runtime.PLAN2]["nodes"][0]["id"] = "other"
+            with self.subTest(mode=mode), self.assertRaises((prog.ProgramError, bridge.BridgeError)):
+                bridge.resolve_request(self.r.gh, self.r.cfg, issue, "decision-status",
+                                       {"plan_commit": runtime.PLAN2})
+        self.assertEqual(self.r.host.ledger.materialize_status("zari", "n1")["plan_commit"], runtime.PLAN1)
+
     def comment_api(self):
         original = self.r.gh._request
         def request(method, path, payload=None):

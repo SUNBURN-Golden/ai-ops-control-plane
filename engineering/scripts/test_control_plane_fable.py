@@ -300,7 +300,7 @@ class OutputTests(unittest.TestCase):
                 (cli_output(verdict(), limits=({**BLOCKED, "overageStatus": "allowed"},)), "OVERAGE_NOT_BLOCKED"),
                 (cli_output(verdict(), limits=(BLOCKED, {**BLOCKED, "isUsingOverage": True})), "OVERAGE_NOT_BLOCKED"),
                 (cli_output(verdict(), limits=({k: v for k, v in BLOCKED.items() if k != "isUsingOverage"},)),
-                 "OVERAGE_NOT_BLOCKED"),
+                 "OVERAGE_UNVERIFIED"),
                 (b"\n".join(cli_output(verdict()).split(b"\n")[:2]) + b"\n", "no result")):
             with self.subTest(reason=reason), self.assertRaisesRegex(fable.FableError, reason):
                 fable.model_output(raw)

@@ -13,6 +13,8 @@ bills beyond the subscription.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
+import fcntl
 import hashlib
 import io
 import json
@@ -39,6 +41,7 @@ MAX_TURNS = 300
 TIMEOUT_SECONDS = 3 * 3600
 AUDITOR_USER = "aiops-auditor"
 RUNS_DIR = Path("/var/lib/aiops-fable/runs")
+ACCOUNT_MODEL_LOCK = Path("/var/lib/aiops-fable/account-model.lock")
 TOKEN_FILE = Path("/etc/aiops/fable-claude-token")
 CLAUDE_PATHS = ("/usr/local/bin/claude", "/usr/bin/claude")
 API = "https://api.github.com"
@@ -259,6 +262,34 @@ def failure_of(raw, *, version="", execution=None, observed_at_epoch_ms=None):
     except FableError:
         failure["error_code"] = "RESULT_INVALID" if known_process else "UNKNOWN"
         return failure
+    guard = execution.get("guard_stop")
+    if guard is not None:
+        # This is wrapper-owned termination evidence, not a provider result or
+        # a quota-reset receipt. Never infer a reset from the rejected event.
+        terminated = (execution.get("model_attempted") is True
+                      and execution.get("process_state") == "EXITED"
+                      and execution.get("process_group_state") == "ABSENT"
+                      and type(execution.get("exit_code")) is int
+                      and execution["exit_code"] == -signal.SIGKILL
+                      and execution.get("timed_out") is False
+                      and execution.get("interrupted") is False)
+        index = guard.get("event_index") if isinstance(guard, dict) else None
+        if (version != SUPPORTED_CLAUDE_VERSION or not terminated
+                or not isinstance(guard, dict)
+                or set(guard) != {"error_code", "event_index", "event_sha256"}
+                or type(index) is not int or not 0 <= index == len(events) - 1
+                or any(event.get("type") == "result" for event in events)):
+            return failure
+        event = events[index]
+        lines = [line for line in raw.splitlines() if line.strip()]
+        code, _ = overage_policy(event.get("rate_limit_info"))
+        if (event.get("type") != "rate_limit_event"
+                or code not in ("OVERAGE_NOT_BLOCKED", "OVERAGE_UNVERIFIED")
+                or guard["error_code"] != code
+                or guard["event_sha256"] != sha256_bytes(lines[index])):
+            return failure
+        failure.update(error_code=code, terminal_evidence="VERIFIED")
+        return failure
     results = [(i, event) for i, event in enumerate(events) if event.get("type") == "result"]
     if len(results) != 1 or results[0][0] != len(events) - 1:
         # A duplicate or a non-terminal result could include a durable success.
@@ -312,8 +343,10 @@ def failure_of(raw, *, version="", execution=None, observed_at_epoch_ms=None):
             limits.append(event.get("rate_limit_info"))
     # Process and unique terminal result are proved independently of rate limit metadata.
     failure["terminal_evidence"] = "VERIFIED"
-    if not limits or any(overage_violation(info) for info in limits):
-        failure["error_code"] = "OVERAGE_NOT_BLOCKED"
+    policies = [overage_policy(info)[0] for info in limits]
+    if not limits or any(policies):
+        failure["error_code"] = ("OVERAGE_NOT_BLOCKED" if "OVERAGE_NOT_BLOCKED" in policies
+                                 else "OVERAGE_UNVERIFIED")
         return failure
     failure["extra_usage"] = {"overageStatus": "rejected", "isUsingOverage": False}
     failure["extra_usage_evidence_source"] = "preceding_event_same_run"
@@ -445,15 +478,24 @@ def consult_verdict(value):
             "pointers": text_list(value["pointers"], "pointers")}
 
 
-def overage_violation(info):
-    """None only when Claude reports that this run cannot use extra (overage) usage."""
+def overage_policy(info):
+    """Missing evidence stops the run without claiming extra usage is enabled."""
     if not isinstance(info, dict):
-        return "no rate-limit status"
+        return "OVERAGE_UNVERIFIED", "no rate-limit status"
+    if info.get("isUsingOverage") is True:
+        return "OVERAGE_NOT_BLOCKED", "isUsingOverage=True"
+    if info.get("overageStatus") in ("allowed", "allowed_warning"):
+        return "OVERAGE_NOT_BLOCKED", f"overageStatus={info.get('overageStatus')!r}"
     if info.get("isUsingOverage") is not False:
-        return f"isUsingOverage={info.get('isUsingOverage')!r}"
+        return "OVERAGE_UNVERIFIED", f"isUsingOverage={info.get('isUsingOverage')!r}"
     if info.get("overageStatus") != "rejected":
-        return f"overageStatus={info.get('overageStatus')!r}"
-    return None
+        return "OVERAGE_UNVERIFIED", f"overageStatus={info.get('overageStatus')!r}"
+    return None, None
+
+
+def overage_violation(info):
+    """Compatibility predicate: both a violation and missing proof require STOP."""
+    return overage_policy(info)[1]
 
 
 def events_of(raw):
@@ -478,9 +520,11 @@ def model_output(raw):
     if not limits:
         raise FableError("OVERAGE_UNVERIFIED: the run reported no rate-limit status; nothing is posted")
     for info in limits:
-        reason = overage_violation(info)
-        if reason:
-            raise FableError(f"OVERAGE_NOT_BLOCKED: {reason}; turn off extra usage for this Claude account")
+        code, reason = overage_policy(info)
+        if code:
+            action = ("turn off extra usage for this Claude account" if code == "OVERAGE_NOT_BLOCKED"
+                      else "this run has no blocked extra-usage proof; nothing is posted")
+            raise FableError(f"{code}: {reason}; {action}")
     fallback = [event for event in events if event.get("type") == "system"
                 and event.get("subtype") == "model_refusal_fallback"]
     if fallback:
@@ -640,7 +684,7 @@ def belongs(comment, repository, number):
 
 def read_stream(stream):
     """Collect the CLI's JSON lines; stop at the first sign that extra usage is not blocked."""
-    lines, size = [], 0
+    lines, size, event_index = [], 0, 0
     for line in iter(lambda: stream.readline(MAX_OUTPUT - size + 1), b""):
         lines.append(line)
         size += len(line)
@@ -654,9 +698,12 @@ def read_stream(stream):
             # Malformed/duplicate fields cannot conceal an overage event while
             # the expensive process continues running.
             return b"".join(lines), True
-        if (isinstance(event, dict) and event.get("type") == "rate_limit_event"
-                and overage_violation(event.get("rate_limit_info"))):
-            return b"".join(lines), True
+        if isinstance(event, dict) and event.get("type") == "rate_limit_event":
+            code, _ = overage_policy(event.get("rate_limit_info"))
+            if code:
+                return b"".join(lines), {"error_code": code, "event_index": event_index,
+                                        "event_sha256": sha256_bytes(line.rstrip(b"\r\n"))}
+        event_index += 1
     return b"".join(lines), False
 
 
@@ -719,6 +766,8 @@ class Runner:
                 out, stop = read_stream(proc.stdout)
                 self.last_output = out
                 if stop:
+                    if isinstance(stop, dict):
+                        self.last_execution["guard_stop"] = stop
                     kill(proc)
                 proc.wait()
             except BaseException:
@@ -814,6 +863,13 @@ def protected_json(path, limit):
     return value
 
 
+def guard_stop_record(metadata, execution, raw):
+    return {"schema_version": 1, "run": metadata["run"],
+            "tool_sha256": metadata["tool_sha256"], "guard_stop": execution["guard_stop"],
+            "execution_sha256": sha256_bytes(canonical_bytes(execution)),
+            "raw_output_sha256": sha256_bytes(raw), "publication_state": "NOT_STARTED"}
+
+
 def verify_failure_evidence(ctx, run_id):
     """Only a protected local run ID can select evidence; never trust caller paths."""
     if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
@@ -850,6 +906,12 @@ def verify_failure_evidence(ctx, run_id):
     raw = protected_read(run / "claude-output.jsonl", MAX_OUTPUT)
     stderr = protected_read(run / "claude-stderr.txt", 65536)
     execution = record.get("execution")
+    if isinstance(execution, dict) and execution.get("guard_stop") is not None:
+        guard = protected_json(run / "guard-stop.json", 65536)
+        if guard != guard_stop_record(metadata, execution, raw):
+            raise FableError("protective stop archive does not match sealed evidence")
+    elif (run / "guard-stop.json").exists():
+        raise FableError("protective stop evidence is inconsistent")
     parsed = failure_of(raw, version=metadata.get("claude_version"), execution=execution,
                         observed_at_epoch_ms=metadata.get("observed_at_epoch_ms"))
     for key, value in parsed.items():
@@ -912,6 +974,8 @@ class Context:
         try:
             sealed_file(run / "claude-output.jsonl", out)
             sealed_file(run / "claude-stderr.txt", err[-65536:])
+            if execution.get("guard_stop") is not None:
+                sealed_file(run / "guard-stop.json", canonical_bytes(guard_stop_record(metadata, execution, out)))
         except (OSError, FableError):
             raise FableError("model archive durability is unknown", failure={
                 "schema": FAILURE_SCHEMA, "schema_version": 1, "run": metadata["run"],
@@ -1261,6 +1325,52 @@ def pattern(regex, label):
     return check
 
 
+@contextmanager
+def account_model_lock(path=None):
+    """Fixed commands share one nonblocking root-owned account/model lease.
+
+    Taken before any program admission/one-shot claim. The existing journal
+    and quota locks are distinct and remain nested inside it. External Claude
+    sessions are outside this lock's authority.
+    """
+    if os.geteuid() != 0:
+        raise FableError("run as root (the operator's sudo)")
+    path = ACCOUNT_MODEL_LOCK if path is None else path
+    protected_run_chain(path.parent)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or info.st_mode & 0o077 or info.st_nlink != 1):
+            raise FableError("account/model lock is not a protected root-owned regular file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+        else:
+            yield True
+    finally:
+        os.close(fd)
+
+
+def needs_account_model_lock(command, payload=None):
+    return command in ("preflight", "audit", "consult") or (
+        command == "program" and isinstance(payload, dict)
+        and payload.get("operation") in ("audit", "consult", "quota-resume"))
+
+
+def load_program_support():
+    support = Path("/opt/aiops/lib/program")
+    for directory in (support, *support.parents):
+        info = os.lstat(directory)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise FableError("program support must have a protected root-owned directory chain")
+    for name in ("control_plane_program_astra.py", "control_plane_program_receipts.py",
+                 "control_plane_program_quota.py", "control_plane_program.py", "control_plane.py"):
+        root_file(support / name)
+    sys.path.insert(0, str(support))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="aiops-fable", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1293,33 +1403,29 @@ def main(argv=None):
             payload = strict_json(raw)
             if not isinstance(payload, dict) or not isinstance(payload.get("github_token"), str):
                 raise FableError("program GitHub token is required on stdin")
-            support = Path("/opt/aiops/lib/program")
-            for directory in (support, *support.parents):
-                info = os.lstat(directory)
-                if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-                    raise FableError("program support must have a protected root-owned directory chain")
-            for name in ("control_plane_program_astra.py", "control_plane_program_receipts.py",
-                         "control_plane_program_quota.py",
-                         "control_plane_program.py", "control_plane.py"):
-                root_file(support / name)
-            sys.path.insert(0, str(support))
-        ctx, version = production_context(need_github=args.command != "preflight",
-                                          github_token=payload["github_token"] if payload is not None else None)
-        if args.command == "preflight":
-            result = preflight(ctx, version)
-        elif args.command in ("program", "program-reconcile"):
-            import control_plane_program_astra as bridge
-            try:
-                result = (bridge.operator_reconcile(ctx, sys.modules[__name__], payload)
-                          if args.command == "program-reconcile"
-                          else bridge.run(ctx, sys.modules[__name__], payload))
-            except (bridge.BridgeError, RuntimeError) as exc:
-                raise FableError(str(exc)) from None
-        elif args.command == "audit":
-            result = audit(ctx, args.repository, args.pr, args.head, args.gate, args.depth,
-                           args.request_comment, args.again, version)
-        else:
-            result = consult(ctx, args.repository, args.issue, args.comment, args.ref, args.again, version)
+            load_program_support()
+        lease = account_model_lock() if needs_account_model_lock(args.command, payload) else nullcontext(True)
+        with lease as acquired:
+            if not acquired:
+                result = {"status": "BUSY", "reason": "account/model is busy; no request admitted"}
+            else:
+                ctx, version = production_context(need_github=args.command != "preflight",
+                                                  github_token=payload["github_token"] if payload is not None else None)
+                if args.command == "preflight":
+                    result = preflight(ctx, version)
+                elif args.command in ("program", "program-reconcile"):
+                    import control_plane_program_astra as bridge
+                    try:
+                        result = (bridge.operator_reconcile(ctx, sys.modules[__name__], payload)
+                                  if args.command == "program-reconcile"
+                                  else bridge.run(ctx, sys.modules[__name__], payload))
+                    except (bridge.BridgeError, RuntimeError) as exc:
+                        raise FableError(str(exc)) from None
+                elif args.command == "audit":
+                    result = audit(ctx, args.repository, args.pr, args.head, args.gate, args.depth,
+                                   args.request_comment, args.again, version)
+                else:
+                    result = consult(ctx, args.repository, args.issue, args.comment, args.ref, args.again, version)
     except (FableError, OSError, ValueError) as exc:
         reason = str(exc)
         for secret in ((payload or {}).get("github_token", "") if isinstance(payload, dict) else "",

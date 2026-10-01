@@ -64,8 +64,12 @@ request is fenced and requires host reconciliation; it is never automatically
 resubmitted. A different binding cannot reuse a passing receipt and is not
 reconciliation of an unresolved prior request. The next completed operation
 chooses the playbook row; a changed plan/task/writer/PR/HEAD invalidates the
-observation. Existing standalone operator audit/consult/preflight behavior is
-unchanged; the operator must serialize those calls with live program requests.
+observation. Fixed standalone operator audit/consult/preflight and program model
+commands also acquire one protected nonblocking account-model lock before context
+creation or admission. A contending command returns BUSY without admitting a run;
+the successful command retains the lease for its full existing duration. Read-only
+check/reconcile operations remain available. Claude sessions outside this fixed
+wrapper are not covered and must still be scheduled separately.
 
 The runtime waits long enough for the existing three-hour Fable model limit plus
 archive preparation/transport. It does not cancel an audit after the old 15-minute
@@ -162,10 +166,17 @@ plan commit for a blocked writer; the approved plan tree accompanies both.
 
 The operation returns the actual protected ANSWERED/USER_REQUIRED result. ANSWERED
 allows the existing same-owner resume path; USER_REQUIRED keeps the User path.
-For delegated nodes, `start` checks protected consultations and audits of the current writer
-attempt. USER_REQUIRED or an unresolved admitted request prevents resume
+For every prior released writer, `start` checks protected consultations and audits
+before changing the issue, pin or writer, including User-only and nondelegated nodes.
+The read-only query validates the proposed plan as an approved default-branch
+descendant with the same canonical program/node. USER_REQUIRED or an unresolved admitted request prevents resume
 even if somebody removes GitHub labels or rewrites a comment. A legitimate User
-scope decision/task revision does not itself reconcile an unresolved execution.
+scope revision with a changed durable approval pointer and changed node definition
+may supersede the exact old semantic USER_REQUIRED binding. An unrelated main commit,
+unchanged approval, or changed specification without new approval cannot. Such a
+revision does not itself reconcile an unresolved execution. Removing delegation
+from the proposed node cannot remove an existing protected execution fence. A
+missing or unqualified protected decision service holds this resume path.
 Deleting a receipt, changing HEAD/plan/tool hash or editing the projection is not
 terminal proof. This guard grants no new authority to Opus. Read-only
 decision-status may inspect an operator-reconciled terminal writer and derive
@@ -212,8 +223,10 @@ insufficient and no source check is represented as host qualification.
    adoption and qualification may the operator apply the exact sudoers candidate
    and validate it with `visudo -cf`; no general root command is added.
 5. Run existing Fable preflight. Require its actual extra-usage rejected evidence.
-   If it returns OVERAGE_NOT_BLOCKED, retain the failure and fix/qualify the account
-   through the already authorized host/operator process; do not weaken the check.
+   OVERAGE_UNVERIFIED means missing or malformed billing proof, not permission to
+   change account settings. OVERAGE_NOT_BLOCKED identifies affirmative contradictory
+   billing evidence. Retain either failure and diagnose the sealed raw archive;
+   do not weaken the check or automatically retry a protective guard stop.
 6. Qualify a canonical no-cost fixture task: valid scope audit, duplicate request,
    stale head/revision, missing reviews, User-only node, USER_REQUIRED resume fence,
    failing CI, RELEASE/contract-change holds, root state/permissions, bounded

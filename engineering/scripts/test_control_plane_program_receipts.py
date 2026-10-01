@@ -89,6 +89,18 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(self.store.read("audit", changed)["status"], "MISSING")
         self.assertEqual(self.store.execute("audit", changed, lambda: self.posted(changed))["status"], "POSTED")
 
+    def test_operator_can_settle_unverified_overage_guard_without_retry_or_pass(self):
+        evidence = self.failure(error_code="OVERAGE_UNVERIFIED", extra_usage=None,
+                                reset_at_epoch_ms=None, limit_type=None,
+                                execution={"guard_stop": {"error_code": "OVERAGE_UNVERIFIED"}})
+        first = self.fail(evidence)
+        original = self.store._path(first["admission"], "outcome").read_bytes()
+        result = self.store.reconcile(first["admission"], first["state_version"], lambda _: evidence)
+        self.assertEqual(result["status"], "RECONCILED_FAILED")
+        self.assertEqual(self.store._path(first["admission"], "outcome").read_bytes(), original)
+        self.assertEqual(self.store.read("audit", self.binding)["status"], "ERROR")
+        self.assertEqual(self.store.execute("audit", self.binding, lambda: self.fail())["status"], "ERROR")
+
     def test_reconciliation_stale_version_and_unknown_process_publication_or_binding_refused(self):
         for change in ({"process_terminated": False}, {"publication_state": "ATTEMPTED"},
                        {"terminal_evidence": "UNKNOWN"}, {"error_code": "RESULT_INVALID"},

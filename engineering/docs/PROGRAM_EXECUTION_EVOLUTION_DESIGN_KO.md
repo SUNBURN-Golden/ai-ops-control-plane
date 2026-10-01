@@ -55,7 +55,8 @@
 | 오류 코드 | 조건 | 허용되는 처리 |
 |---|---|---|
 | `MODEL_RATE_LIMIT` | terminal result의 진짜 bool is_error, 429, 지원 adapter의 제한 종류·reset, 같은 run terminal archive/프로세스 종료 확인 | WAITING_QUOTA 후보; 기존 receipt를 지우지 않음 |
-| `OVERAGE_NOT_BLOCKED` | extra usage 검증 실패·누락·모순 | BLOCKED_POLICY. 계정/billing 변경이나 무한 retry 금지 |
+| `OVERAGE_UNVERIFIED` | extra usage 증거 누락·형식 불명 | 즉시 보호 중단. raw guard/process/publication 증거가 충분할 때만 운영자 TERMINAL_FAILED 정산; 자동 retry 금지 |
+| `OVERAGE_NOT_BLOCKED` | extra usage가 차단되지 않았다는 명시적 증거·모순 | 즉시 보호 중단. 계정/billing 변경이나 무한 retry 금지 |
 | `MODEL_EXECUTION_FAILED` | terminal 실패이나 한도 증거 부족 | BLOCKED_ERROR. 독립된 정확한 사유 보고 |
 | `RESULT_INVALID` | bool 대신 문자열, malformed/중복 terminal, 잘못된 adapter schema | BLOCKED_ERROR; 모호한 실행은 UNKNOWN |
 | `UNKNOWN` | timeout, 실행 생존 여부 불명, archive 유실, comment 게시 여부·성공 결과 durability가 불명 | 기존 protected fence와 host reconciliation 유지; 자동 재실행 금지 |
