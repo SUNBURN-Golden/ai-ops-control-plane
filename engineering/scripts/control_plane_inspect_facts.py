@@ -56,7 +56,8 @@ MAX_EVENT_PAGES = 3
 MAX_PULL_PAGES = 5
 MAX_EXCEPTION_PAGES = 5
 MAX_CHECK_PAGES = 10
-DIRECT_PUSH_PER_PAGE = 30
+DIRECT_PUSH_PER_PAGE = 100
+MAX_COMMIT_PAGES = 5
 RUNTIME_RUNS = 5
 MAX_LEDGER_IDS = 50
 MAX_TEXT = 300
@@ -69,6 +70,8 @@ WINDOW_14D = timedelta(days=14)
 RECHECK_MAX = timedelta(hours=24)
 # A recheck time this close to the last T1 is due at the very next tick.
 NEXT_TICK = timedelta(minutes=1)
+# After a merge, settled post-merge checks are re-read every tick for this long (CI re-runs).
+RERUN_WATCH = timedelta(hours=24)
 
 # Product collection groups (the vocabulary of control_plane_inspect_signals.SIGNAL_DEPS).
 PRODUCT_GROUPS = ("host", "plan", "pulls", "commits", "issues", "delivery", "comments", "files", "checks",
@@ -450,6 +453,7 @@ class _Run:
         self.host_calls = 0
         self.host_down: Optional[str] = None
         self.read_errors: Set[str] = set()
+        self.now: Optional[datetime] = None  # set by collect(); gates reuse of cached check runs
         self.old_cache = {k: _dict(cache.get(k)) for k in ("plan", "files", "checks", "commit_pulls", "control")}
         self.cache: Dict[str, Dict[str, Any]] = {k: {} for k in self.old_cache}
 
@@ -712,14 +716,18 @@ def _checks_final(required: Sequence[str], runs: List[Dict[str, Any]]) -> bool:
     return state == "PASS"
 
 
-def _check_runs(run: _Run, repo: str, sha: str, required: Sequence[str] = ()) -> List[Dict[str, Any]]:
+def _check_runs(run: _Run, repo: str, sha: str, required: Sequence[str] = (),
+                merged_at: Optional[datetime] = None) -> List[Dict[str, Any]]:
     """Check runs at one commit, cached by SHA once final (see ``_checks_final``)."""
     # CONTRACT NOTE: "cache by SHA once all completed" is narrowed to a final answer: a required check
     # not created yet reads PENDING and a FAIL can be re-run, so only a PASS of the current required list
-    # is cached (and a cached list is reused only while it still PASSes that list).
+    # is cached. A PASS can also be re-run into a FAIL at the same SHA, so a cached list is reused only for
+    # a merge older than the 7-day window (and only while it still PASSes the current required list);
+    # inside the window every T1 reads the check runs again.
     key = f"{repo}@{sha}"
     cached = run.cached("checks", key)
-    if isinstance(cached, list) and _checks_final(required, cached):
+    settled = merged_at is not None and run.now is not None and run.now - merged_at > WINDOW_7D
+    if settled and isinstance(cached, list) and _checks_final(required, cached):
         return cached
     run.cache["checks"].pop(key, None)
     # A read token without the Checks permission (INSPECTOR.md §12.7) gets a plain 403 here on every
@@ -818,11 +826,18 @@ def _merged_7d_pulls(run: _Run, repo: str, branch: str, t0_pulls: Dict[str, Any]
     while not reaches and page <= MAX_PULL_PAGES:
         resp = run.get(f"/repos/{repo}/pulls", {"state": "all", "sort": "updated", "direction": "desc",
                                                 "per_page": T0_PULLS_PER_PAGE, "page": page})
-        data = _list(resp.json) if resp.status == 200 else []
+        if resp.status != 200 or not isinstance(resp.json, list):
+            run.note("GITHUB_READ")
+            raise InspectError("GITHUB_READ", f"pulls page {page} unavailable")
+        data = resp.json
         items.extend(p for p in (_reduce_pull(x, run.red) for x in data) if p)
         reaches = len(data) < T0_PULLS_PER_PAGE or any((_dt(_dict(x).get("updated_at")) or now) < cutoff
                                                        for x in data)
         page += 1
+    if not reaches:
+        # CONTRACT NOTE: more pulls were updated in 7 days than MAX_PULL_PAGES pages hold; an unread pull
+        # could be an orphan merge, so "pulls" is UNKNOWN instead of a silent undercount.
+        raise InspectError("PULLS_TRUNCATED", f"more than {MAX_PULL_PAGES} pages of pulls updated in 7 days")
     seen: Dict[int, Dict[str, Any]] = {}
     for pull in items:
         seen.setdefault(pull["number"], pull)
@@ -924,13 +939,14 @@ def _collect_product(run: _Run, repo: str, prefix: str, info: Dict[str, Any], pr
 
     # -- direct pushes on the default branch in 7 days
     def pushes() -> List[Dict[str, Any]]:
-        resp = run.get(f"/repos/{repo}/commits", {"sha": branch, "since": core.iso(now - WINDOW_7D),
-                                                  "per_page": DIRECT_PUSH_PER_PAGE})
-        if resp.status != 200:
-            run.note("GITHUB_READ")
-            raise InspectError("GITHUB_READ", "default branch commits unavailable")
+        commits, truncated = run.pages(f"/repos/{repo}/commits", {"sha": branch, "since": core.iso(now - WINDOW_7D),
+                                                                   "per_page": DIRECT_PUSH_PER_PAGE},
+                                       MAX_COMMIT_PAGES)
+        if truncated:
+            # CONTRACT NOTE: an unread commit could be a direct push: "commits" is UNKNOWN instead.
+            raise InspectError("COMMITS_TRUNCATED", f"more than {MAX_COMMIT_PAGES} pages of commits in 7 days")
         out = []
-        for item in _list(resp.json):
+        for item in commits:
             sha = _sha(_dict(item).get("sha"))
             if sha is None or sha in known_merges:
                 continue
@@ -995,7 +1011,8 @@ def _collect_node(run: _Run, repo: str, program: str, node_id: str, required: Li
                 node["delivery_files"] = _guard(unknown, "files", lambda: _pr_files(run, repo, number, head))
                 if pr.get("merged") and pr.get("merge_commit_sha"):
                     merge_runs = _guard(unknown, "checks",
-                                        lambda: _check_runs(run, repo, pr["merge_commit_sha"], required))
+                                        lambda: _check_runs(run, repo, pr["merge_commit_sha"], required,
+                                                            _dt(pr.get("merged_at"))))
                     node["merge_runs"] = merge_runs
     if complete:
         node["completion"] = cp_program.node_completion(mstatus, repo, rows, pr, required, merge_runs)
@@ -1063,6 +1080,7 @@ def collect(reader: Any, host: Any, config: Dict[str, Any], state: core.StateSto
     red = _Redactor(live_values)
     cache = _dict(state.read(ST_CACHE, None))
     run = _Run(reader, host, budgets, cache, red)
+    run.now = now
     view = probe_result if isinstance(probe_result, dict) else _probe_view(state)
     ctrl = config["control_repository"]
     top_unknown: Set[str] = set()
@@ -1288,6 +1306,13 @@ def next_recheck_at(facts: Dict[str, Any], now: datetime, config: Optional[Dict[
             for when in _dict(node.get("label_since")).values():
                 crossings(_dt(when), buckets["blocked"])
             completion = _dict(node.get("completion"))
+            if completion.get("stage") == "DONE" and completion.get("merge_checks") in ("PASS", "FAIL"):
+                # CONTRACT NOTE: a re-run can turn a settled result around at the same SHA (PASS -> FAIL)
+                # without changing anything the T0 probe reads; CI re-runs come soon after the merge, so
+                # every tick runs T1 for 24 h after it (later re-runs are seen at the next T1).
+                merged_at = _dt(_dict(node.get("delivery_pr")).get("merged_at"))
+                if merged_at is not None and now - merged_at <= RERUN_WATCH:
+                    candidates.append(now + NEXT_TICK)
             if completion.get("stage") == "DONE" and completion.get("merge_checks") == "PENDING":
                 merged_at = _dt(_dict(node.get("delivery_pr")).get("merged_at"))
                 crossings(merged_at, buckets["pending"])

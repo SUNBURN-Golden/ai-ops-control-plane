@@ -621,6 +621,36 @@ class CollectTests(Base):
         pages = [q.get("page") for p, q, _ in w.requests if p == f"/repos/{ZARI}/pulls" and q.get("page")]
         self.assertEqual(pages, ["2"])
 
+    def test_pulls_beyond_the_page_limit_are_unknown(self) -> None:
+        w = full_world()
+        for n in range(1000, 1251):   # 251 pulls updated within 7 days: more than 5 pages of 50
+            w.add_pull(ZARI, n, state="open", updated=ago(minutes=n - 990))
+        _, doc = self.tick(w)
+        self.assertIn("pulls", doc["products"][ZARI]["unknown"])
+
+    def test_direct_pushes_read_past_the_first_page(self) -> None:
+        w = full_world()
+        r = w.repos[ZARI]
+        for i in range(40):           # 40 commits in 7 days; the 31st (oldest) is a direct push
+            c = sha(f"merged-{i}")
+            r["branch_commits"].append({"sha": c, "commit": {"committer": {"date": iso(ago(hours=i + 1))}}})
+            r["commit_pulls"][c] = [{"number": 11}]
+        r["commit_pulls"][sha("merged-39")] = []
+        _, doc = self.tick(w)
+        zari = doc["products"][ZARI]
+        self.assertNotIn("commits", zari["unknown"])
+        self.assertIn(sha("merged-39"), [c["sha"] for c in zari["direct_pushes_7d"]])
+
+    def test_commits_beyond_the_page_limit_are_unknown(self) -> None:
+        w = full_world()
+        r = w.repos[ZARI]
+        for i in range(facts_mod.MAX_COMMIT_PAGES * facts_mod.DIRECT_PUSH_PER_PAGE + 1):
+            c = sha(f"many-{i}")
+            r["branch_commits"].append({"sha": c, "commit": {"committer": {"date": iso(ago(minutes=i + 1))}}})
+            r["commit_pulls"][c] = [{"number": 11}]
+        _, doc = self.tick(w, cfg=None)
+        self.assertIn("commits", doc["products"][ZARI]["unknown"])
+
     def test_exceptions_count(self) -> None:
         w = full_world()
         marker = "ASTRA_CONSULT_V1 result=APPROVED_SMALL_EXCEPTION node=N2"
@@ -685,11 +715,22 @@ class CollectTests(Base):
         w.requests.clear()
         self.tick(w, NOW + timedelta(hours=1))
         paths = [p for p, _, _ in w.requests]
-        self.assertNotIn(f"/repos/{ZARI}/commits/{sha(f'{ZARI}pr11merge')}/check-runs", paths)
+        checks = f"/repos/{ZARI}/commits/{sha(f'{ZARI}pr11merge')}/check-runs"
+        # PR 11 merged 2 days ago: inside the 7-day window its check runs are read again (a re-run can
+        # turn a PASS into a FAIL at the same SHA); files and the plan stay cached by SHA.
+        self.assertIn(checks, paths)
         self.assertNotIn(f"/repos/{ZARI}/pulls/11/files", paths)
         self.assertNotIn(f"/repos/{ZARI}/contents/.aiops/program.json", paths)
         cache = self.state.read("cache")
         self.assertIn(f"{ZARI}@{sha(f'{ZARI}pr11merge')}", cache["checks"])
+        # 8 days after the merge the cached PASS is reused.
+        w.ctrl_main = sha("ctrl-main-3")
+        w.requests.clear()
+        self.tick(w, NOW + timedelta(days=6, hours=2))
+        w.ctrl_main = sha("ctrl-main-4")
+        w.requests.clear()
+        self.tick(w, NOW + timedelta(days=6, hours=3))
+        self.assertNotIn(checks, [p for p, _, _ in w.requests])
 
     def test_collect_from_staged_probe_state(self) -> None:
         w = full_world()
@@ -957,6 +998,28 @@ class ReviewFixTests(Base):
         w.ctrl_main = sha("ctrl-main-4")
         _, doc = self.tick(w, NOW + timedelta(hours=3))
         self.assertEqual(doc["products"][ZARI]["nodes"]["N1"]["completion"]["merge_checks"], "PENDING")
+
+    def test_rerun_fail_after_cached_pass_is_seen(self) -> None:
+        w = full_world()
+        merge = sha(f"{ZARI}pr11merge")
+        _, doc = self.tick(w)
+        self.assertEqual(doc["products"][ZARI]["nodes"]["N1"]["completion"]["merge_checks"], "PASS")
+        self.assertIn(f"{ZARI}@{merge}", self.state.read("cache")["checks"])
+        # The required check is re-run at the same SHA and fails; nothing the probe reads changes.
+        for r in w.repos[ZARI]["check_runs"][merge]:
+            r["id"] += 100
+            r["conclusion"] = "failure"
+        w.ctrl_main = sha("ctrl-main-2")                # the next T1, for any reason
+        _, doc = self.tick(w, NOW + timedelta(hours=1))
+        self.assertEqual(doc["products"][ZARI]["nodes"]["N1"]["completion"]["merge_checks"], "FAIL")
+
+    def test_settled_merge_checks_recheck_every_tick_for_a_day(self) -> None:
+        w = full_world()
+        w.repos[ZARI]["pull_detail"][11]["merged_at"] = iso(NOW - timedelta(hours=1))
+        _, doc = self.tick(w)
+        self.assertEqual(doc["products"][ZARI]["nodes"]["N1"]["completion"]["merge_checks"], "PASS")
+        _, doc = self.tick(w, NOW + timedelta(hours=1))
+        self.assertIsNotNone(doc)                       # re-run watch: T1 although the probe saw no change
 
     def test_pending_merge_checks_recheck_every_tick(self) -> None:
         w = full_world()

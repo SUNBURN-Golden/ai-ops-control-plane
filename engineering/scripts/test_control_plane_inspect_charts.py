@@ -278,7 +278,7 @@ class ChartDataTests(unittest.TestCase):
     def test_dag_choice_and_names(self):
         doc = sample_doc()
         self.assertEqual(charts.dag_choices(doc), ["ZARI", "kix-protocol"])
-        self.assertEqual(charts.dag_file_name("ZARI", doc["dag"]["ZARI"]), "c2_dag_ZARI.png")
+        self.assertEqual(charts.dag_file_name("ZARI", doc["dag"]["ZARI"]), "c2_dag_zari.png")
         self.assertEqual(charts.dag_file_name("BeautifulMind-JT/maeum-gyeol", {}), "c2_dag_maeum-gyeol.png")
         doc["dag"]["kix-protocol"]["nodes"][0]["stage"] = "PLANNED"
         doc["dag"]["maeum-gyeol"]["nodes"].append({"id": "N2", "stage": "PLANNED", "depth": 1, "row": 0})
@@ -415,7 +415,7 @@ class RenderTests(unittest.TestCase):
             result = charts.render(data, first, font_path=font)
             self.assertEqual(result["status"], "OK")
             names = [p["name"] for p in result["pngs"]]
-            self.assertEqual(names, ["c5_scorecard.png", "c1_ladder.png", "c2_dag_ZARI.png", "c2_dag_KIXP.png",
+            self.assertEqual(names, ["c5_scorecard.png", "c1_ladder.png", "c2_dag_zari.png", "c2_dag_kixp.png",
                                      "c3_burnup.png", "c4_lanes.png"])
             manifest = json.loads(Path(first, "render.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest, {"pngs": result["pngs"], "font": result["font"]})

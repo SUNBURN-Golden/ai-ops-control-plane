@@ -889,6 +889,8 @@ class TestDeadman(Base):
         self.slack_t.push("chat.scheduleMessage", InspectError("NET_UNKNOWN"))
         out = self.publisher().deadman(NOW)
         self.assertEqual(out["scheduled"], "UNKNOWN")
+        self.assertEqual(self.publisher().unknown_count(NOW), 1)      # shown as 게시 미확인 1
+        self.assertEqual(self.publisher().unknown_count(NOW + timedelta(hours=25)), 0)
         state = self.store.read("deadman")
         self.assertIsNone(state["current"])
         self.assertEqual(len(state["unknown"]), 1)
@@ -1080,6 +1082,40 @@ class TestReviewFixes(Base):
             client.upload_files(TEST_CHANNEL, "1000.000100", [{"name": "c1_ladder.png", "data": b"\x89PNGx"}])
         self.assertEqual(ctx.exception.outcome, "REFUSED")
         self.assertTrue(ctx.exception.detail.endswith(pub.NOT_CONNECTED))
+
+    def test_stage_switch_never_sends_a_journal_to_the_other_target(self):
+        live = dict(CONFIG, stage="LIVE")
+
+        def live_publisher():
+            writer = gh.GitHubLedgerWriter(GH_TOKEN, CTRL_REPO, 4, transport=self.gh_t)
+            client = pub.SlackClient(SLACK_TOKEN, TEAM, BOT, transport=self.slack_t, live_values=(GH_TOKEN,))
+            return pub.Publisher(self.store, live, writer=writer, slack=client, live_values=(GH_TOKEN, SLACK_TOKEN))
+
+        # DRY comment refused, then the stage switches to LIVE: nothing reaches the live issue or channel.
+        self.gh_t.push("POST", resp({"message": "no"}, 422))
+        publisher = self.publisher()
+        publisher.prepare(make_report(), NOW)
+        self.assertEqual(publisher.advance(NOW)["comment"], "REFUSED")
+        posts = len([c for c in self.gh_t.calls if c["method"] == "POST"])
+        out = live_publisher().advance(NOW + timedelta(hours=1))
+        self.assertEqual(out["comment"], "SUPERSEDED")
+        self.assertEqual(len([c for c in self.gh_t.calls if c["method"] == "POST"]), posts)
+        self.assertNotIn("chat.postMessage", self.slack_t.names())
+        journal = publisher.load(make_report()["run"])
+        self.assertEqual(journal["comment"]["error"], "TARGET_CHANGED")
+        # LIVE card refused, then back to DRY: the live channel gets nothing more.
+        run = "20261001T071700Z-0a1b2c3d-tick"
+        report = pub.build_report(run=run, now=NOW + timedelta(hours=2), stage="LIVE", snapshot=SNAP,
+                                  tool_sha256=TOOL, facts=FACTS, facts_sha256=FACTS_SHA, result=make_result(),
+                                  control_repository=CTRL_REPO, ledger_issue=4, pngs=(), render_dir=None)
+        self.slack_t.push("chat.postMessage", resp({"ok": False, "error": "not_in_channel"}))
+        lp = live_publisher()
+        lp.prepare(report, NOW + timedelta(hours=2))
+        self.assertEqual(lp.advance(NOW + timedelta(hours=2))["card"], "REFUSED")
+        sent = len(self.slack_t.calls)
+        out = self.publisher().advance(NOW + timedelta(hours=3))
+        self.assertEqual(out["card"], "SUPERSEDED")
+        self.assertFalse([c for c in self.slack_t.calls[sent:] if c["name"] == "chat.postMessage"])
 
     # finding 3: daily line, RECOVERED line and heartbeat creation persist a marker before sending
     def test_daily_killed_after_send_is_not_reposted(self):

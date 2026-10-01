@@ -544,9 +544,13 @@ class SignalTests(unittest.TestCase):
         self.assertNotIn("lane:IDLE", got)                  # first snapshot only
         self.assertEqual(self.ev["ctrl"]["verdict"], "AT_RISK")
         f = facts()
-        f["lanes"] = lanes(devin_age_h=5, grok_age_h=6)
+        f["lanes"] = lanes(devin_age_h=5, grok_age_h=5.9)
         self.assertNotIn("lane:DEVIN", subjects(evaluate(f)["ctrl"]["signals"]["S7"]))
         self.assertNotIn("lane:GROK_BUILD", subjects(evaluate(f)["ctrl"]["signals"]["S7"]))
+        # Exactly at a threshold the level is raised: the recheck T1 is scheduled at that very time.
+        f["lanes"] = lanes(devin_age_h=12, grok_age_h=6)
+        got = subjects(evaluate(f)["ctrl"]["signals"]["S7"])
+        self.assertEqual((got["lane:DEVIN"], got["lane:GROK_BUILD"]), ("AT_RISK", "WATCH"))
         # needs-lane-cleanup older than 24 h -> WATCH (GH_TEXT) under CTRL.
         f = facts()
         f["products"][ZARI]["nodes"]["N4"]["issue"]["labels"] = ["needs-lane-cleanup"]
@@ -566,6 +570,8 @@ class SignalTests(unittest.TestCase):
         n4["blocked_since"] = iso(ago(hours=72))
         n4["label_since"] = {"needs-user": iso(ago(hours=72)), "needs-lane-cleanup": iso(ago(hours=1))}
         self.assertNotIn("task:ZARI-N4", subjects(evaluate(f)["ctrl"]["signals"]["S7"]))
+        n4["label_since"]["needs-lane-cleanup"] = iso(ago(hours=24))     # exactly 24 h: WATCH
+        self.assertIn("task:ZARI-N4", subjects(evaluate(f)["ctrl"]["signals"]["S7"]))
         n4["label_since"]["needs-lane-cleanup"] = iso(ago(hours=25))
         cleanup = next(c for c in evaluate(f)["ctrl"]["signals"]["S7"]["candidates"]
                        if c["subject_key"] == "task:ZARI-N4")

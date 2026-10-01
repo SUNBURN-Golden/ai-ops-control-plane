@@ -217,6 +217,7 @@ flowchart TD
 `next_recheck_at`은 다음 시각 중 가장 이른 것이다.
 - 각 CONFIRMED 행, 각 막힘 라벨, 각 제품의 마지막 완료 뒤 날수, 각 대기 중인 병합 후 체크가 다음 문턱 구간을 넘는 시각
 - DONE 노드의 병합 후 체크가 PENDING이고 병합 뒤 7일 안이면(병합 시각을 모르면 포함) 다음 점검. 체크 실행이 끝나도 probe가 읽는 것은 바뀌지 않기 때문이다
+- DONE 노드의 병합 후 체크가 PASS나 FAIL이어도 병합 뒤 24시간 안이면 다음 점검. 같은 SHA에서 다시 실행해 결과가 바뀔 수 있기 때문이다. 병합 뒤 7일 안의 체크 결과는 T1마다 다시 읽고, 그보다 오래된 PASS만 저장본을 쓴다
 - 노는데 대기(S7)가 보였지만 아직 주의 조건(연속 T1 2번, 1시간 이상)에 못 미칠 때, 그 조건을 채울 수 있는 다음 시각. 노는 레인과 대기 노드는 probe가 읽는 것을 바꾸지 않기 때문이다
 - 다음 KST 일일 줄 시각
 - 지금 + 24시간
@@ -325,8 +326,8 @@ flowchart TD
 | S6 | 정체 (주 경로) | R = 완료 아닌 노드. CP = R로 제한한 계획 DAG의 최장 경로(노드 수, 동점은 id 사전순) | materialization이 UNKNOWN 또는 SUBMITTING이거나 writer 행이 UNKNOWN → 위험 | HOST |
 | S6 | 주 경로 막힘 | CP 노드의 `blocked_since` | 24시간 이상 주의 (최대 주의) | GH_TEXT |
 | S6 | 완료 공백 | 마지막 완료(완료 노드 배달 PR의 최근 `merged_at`, 없으면 `plan.committed_at`) 뒤 날수. R이 비지 않고 materialize된 노드가 1개 이상일 때 | ≥ 7일 위험, ≥ 3일 주의 | GH_SYSTEM |
-| S7 | 레인 (CTRL) | CONFIRMED 활성 행의 나이 | 12시간 초과 위험, 6시간 초과 주의 | HOST |
-| S7 | 정리 대기 | `needs-lane-cleanup` 라벨의 나이 | 24시간 초과 주의 | GH_TEXT |
+| S7 | 레인 (CTRL) | CONFIRMED 활성 행의 나이 | 12시간 이상 위험, 6시간 이상 주의 | HOST |
+| S7 | 정리 대기 | `needs-lane-cleanup` 라벨의 나이 | 24시간 이상 주의 | GH_TEXT |
 | S7 | 노는데 대기 | 노는 레인(켜져 있고 활성 행 없음, `active_total < max_active_sessions`) > 0 이고 대기 노드(의존 노드가 모두 완료, 단계 PLANNED 또는 NOT_STARTED) > 0 | 연속 T1 2번, 1시간 이상 이어지면 주의 | HOST |
 | S8 | 결정 연속성 | 1단계에서는 계산하지 않는다 | 항상 미설정, 값 "2단계(모델)에서 구현" | — |
 | S9 | CURSOR canary | 모든 CURSOR writer·reviewer 행을 나열(정보). 같은 head에서 CURSOR REVIEW가 PASS 또는 PASS_WITH_NOTES이고 다른 레인 REVIEW가 FAIL. CURSOR FAILED_PRESTART | 앞의 것 주의, prestart ≥ 2 주의. 처음 본 CURSOR 작업은 정보 줄(발견 아님) | HOST |
@@ -392,7 +393,7 @@ ACK는 1단계에 없다. 발견 사항은 `ack: null`이다. 표시용 ACK는 2
 |---|---|---|
 | C5 성적표 | `c5_scorecard.png` | 행 = 제품, 열 = S0–S9. 칸마다 수준 낱말과 수준 색. 게시된 판정 열은 굵게 |
 | C1 단계 사다리 | `c1_ladder.png` | 제품별 가로 누적 막대: 계획 → 이슈 생성 중 → 시작 전 → 진행 중 → 배달됨 → 완료. 완료는 병합 후 체크 PASS/FAIL/PENDING으로 나눈다. 따로 "계획 밖 병합" 수. 제품마다 고정 글 "배포·실사용 검증: 기록 없음" |
-| C2 계획 DAG | `c2_dag_<prefix>.png` | (깊이, 행) 위치의 노드, 단계 색과 단계 낱말. 주 경로 간선은 굵게. 막힌 노드는 빗금과 시간. 완료 아닌 노드가 가장 많은 제품 2개까지 |
+| C2 계획 DAG | `c2_dag_<prefix 소문자>.png` | (깊이, 행) 위치의 노드, 단계 색과 단계 낱말. 주 경로 간선은 굵게. 막힌 노드는 빗금과 시간. 완료 아닌 노드가 가장 많은 제품 2개까지 |
 | C3 번업 | `c3_burnup.png` | 제품별 완료 수와 계획 수의 계단선 (`history.jsonl` 최근 30일) |
 | C4 레인 | `c4_lanes.png` | 고정 순서 4행(DEVIN, GROK_BUILD, GLM, CURSOR). 구간 막대에 작업 id. 노는데 대기 구간은 빗금. 설명 "DEVIN에 먼저 몰리는 것은 정상(고정 순서)" |
 
@@ -436,6 +437,8 @@ ACK는 1단계에 없다. 발견 사항은 `ack: null`이다. 표시용 ACK는 2
 - GitHub UNKNOWN: 다음 점검들의 `reconcile_unknown()`이 실행 시작 이후의 원장 댓글을 읽는다. 본문 sha256이 journal과 같은 댓글이 보이면 `GH_POSTED`로 바꾼다.
 - 24시간 지나도 보이지 않으면 `GH_ABANDONED_UNKNOWN`. 표시만 하고 다시 보내지 않는다.
 - Slack UNKNOWN: 감리는 Slack을 읽지 않으므로 확인할 수 없다. 하트비트에 "게시 미확인 <m>"으로 보인다.
+  장애 경보 예약(`chat.scheduleMessage`)의 결과를 모를 때도 24시간 동안 "게시 미확인"에 센다.
+- 단계·대상 전환: journal은 준비할 때의 단계(DRY/LIVE), Slack 채널, 원장 이슈를 적는다. 셋 중 하나라도 지금 설정과 다르면 그 journal은 보내지 않고 남은 단계를 SUPERSEDED(`TARGET_CHANGED`)로 둔다. 알리지 못한 변화는 다음 T1이 지금 대상으로 다시 싣는다.
 - 알리지 못한 변화: `findings.json`은 journal을 준비할 때 넘어간다. 그래서 그 journal의 변화와 직전 판정을 `findings.json`의 `unannounced`에 함께 적는다.
   - 그 journal의 원장 댓글이 한 번도 보내지지 않았으면(FAILED, SUPERSEDED, 또는 새 게시가 덮을 PENDING·REFUSED) 다음 T1이 그 변화를 다시 싣는다.
   - FAILED만으로도 다음 T1은 게시한다. Slack은 여전히 GitHub가 POSTED나 UNKNOWN이 된 뒤에만 올린다.
@@ -522,7 +525,7 @@ AIOPS_INSPECT_V1 status=STALE · 감리가 <deadman_hours>시간 넘게 점검�
 | GitHub 읽기 실패 (`GITHUB_5XX`, `GITHUB_READ`, `GITHUB_JSON`, `GITHUB_NOT_FOUND`, `MAX_RESPONSE`) | 그 묶음만 확인 불가(UNKNOWN). T1은 커밋하지만 `t1_dirty`를 둔다. 다음 점검에서 다시 수집하고, 연속 실패로 센다 | 연속 3번이면 `DEGRADED(GITHUB_READ)` | 다음 점검에서 자동 |
 | host 읽기 실패 (`HOST_REFUSED`, `HOST_TIMEOUT`, `HOST_UNAVAILABLE`, `HOST_ARGV`, `HOST_OUTPUT`) | 같음 | 연속 3번이면 `DEGRADED(HOST)` | 자동. 계속되면 sudoers와 helper 확인 |
 | check run 403, 속도 제한 아님 (`CHECKS_FORBIDDEN`) | `checks` 묶음만 확인 불가. 읽기 실패로 세지 않는다. `t1_dirty`도 두지 않는다 | `DEGRADED` 아님 | 읽기 토큰의 Checks 권한(§12.7) |
-| 목록이 상한에서 잘림 (`FILES_TRUNCATED`, `CHECKS_TRUNCATED`, `EVENTS_TRUNCATED`, `EXCEPTIONS_TRUNCATED`), 막힘 라벨의 이벤트 없음 (`EVENTS_MISSING`) | 그 묶음만 확인 불가. 읽기 실패로 세지 않는다 | `DEGRADED` 아님 | — |
+| 목록이 상한에서 잘림 (`FILES_TRUNCATED`, `CHECKS_TRUNCATED`, `EVENTS_TRUNCATED`, `EXCEPTIONS_TRUNCATED`, `PULLS_TRUNCATED`: 7일 안 PR이 5쪽 250개 초과, `COMMITS_TRUNCATED`: 7일 안 기본 브랜치 커밋이 5쪽 500개 초과), 막힘 라벨의 이벤트 없음 (`EVENTS_MISSING`) | 그 묶음만 확인 불가. 읽기 실패로 세지 않는다 | `DEGRADED` 아님 | — |
 | T1 예산 초과 | 같음 | 같음 | 자동 |
 | 한국어 글꼴 없음 (`FONT_MISSING`), 렌더 실패·시간 초과 | 그림 없음 | 글 카드만 | 글꼴 설치 (§12.10) |
 | GitHub 쓰기 거절 (`GITHUB_WRITE_REFUSED`) | REFUSED | — | 처음 보내기를 포함해 최대 3번 시도(다음 점검부터 2번 더), 그 뒤 FAILED. 알리지 못한 변화는 다음 T1이 다시 싣는다(§9.2) |

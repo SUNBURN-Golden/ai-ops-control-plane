@@ -282,11 +282,16 @@ class RenderStub:
 
     def __call__(self, ctx: Any, data_path: Path, out_dir: Path, account: str, font: Optional[str]) -> Dict[str, Any]:
         self.calls.append((data_path, out_dir, account))
-        charts.load_chart_data(data_path)  # signals -> charts schema integration
+        doc = charts.load_chart_data(data_path)  # signals -> charts schema integration
         if self.mode != "OK":
             return {"status": self.mode}
         pngs = []
-        for name in ("c5_scorecard.png", "c1_ladder.png"):
+        # The real chart names, including C2 DAG names (charts.dag_file_name), so a name the tick would
+        # refuse (pub.PNG_NAME_RE) fails here.
+        names = ["c5_scorecard.png", "c1_ladder.png"]
+        names += [charts.dag_file_name(p, doc["dag"][p]) for p in charts.dag_choices(doc)]
+        self.names = names
+        for name in names:
             data = tiny_png()
             (out_dir / name).write_bytes(data)
             pngs.append({"name": name, "sha256": hashlib.sha256(data).hexdigest(), "w": 4, "h": 3})
@@ -402,7 +407,7 @@ class EndToEndTests(Base):
         names = slack.names()
         self.assertEqual(names[0], "auth.test")
         self.assertIn("files.completeUploadExternal", names)
-        self.assertEqual(names.count("UPLOAD"), 2)
+        self.assertEqual(names.count("UPLOAD"), len(self.render.names))  # c5, c1 and the C2 DAG
         self.assertEqual(names[-1], "chat.scheduleMessage")
         posts = slack.texts("chat.postMessage")
         self.assertTrue(any(core.HOST_LINE in t for t in posts))                    # the card
@@ -521,6 +526,16 @@ class EndToEndTests(Base):
         self.assertEqual((result["published"], result["render"]), (True, "FONT_MISSING"))
         self.assertNotIn("files.getUploadURLExternal", self.slack.names())
         self.assertIn("그림 없음 (FONT\\_MISSING)", self.world.ledger[0]["body"])
+
+    def test_dag_charts_are_published_with_their_real_names(self) -> None:
+        result = self.tick()
+        self.assertEqual(result["render"], "OK")
+        dags = [n for n in self.render.names if n.startswith("c2_dag_")]
+        self.assertTrue(dags, "the fixture world must have an unfinished node so a DAG is drawn")
+        for name in self.render.names:
+            self.assertRegex(name, pub.PNG_NAME_RE)
+        uploads = [c for c in self.slack.calls if c["name"] == "files.getUploadURLExternal"]
+        self.assertEqual(sorted(c["params"]["filename"] for c in uploads), sorted(self.render.names))
 
     def test_tampered_png_is_not_published(self) -> None:
         self.render.tamper = True

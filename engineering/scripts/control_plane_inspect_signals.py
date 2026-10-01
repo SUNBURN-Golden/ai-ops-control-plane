@@ -936,8 +936,10 @@ def signal_s7(facts: Dict[str, Any], products: Dict[str, Product], th: Dict[str,
             hours = _hours(now, since)
             if hours is None:
                 continue
-            level = (AT_RISK if hours > th["confirmed_at_risk_h"]
-                     else (WATCH if hours > th["confirmed_watch_h"] else None))
+            # Reached, not exceeded: the same boundary as the facts buckets and next_recheck_at, so the T1
+            # scheduled at exactly start + threshold raises the level (no one-tick or one-day delay).
+            level = (AT_RISK if hours >= th["confirmed_at_risk_h"]
+                     else (WATCH if hours >= th["confirmed_watch_h"] else None))
             if level:
                 limit = th["confirmed_at_risk_h"] if level == AT_RISK else th["confirmed_watch_h"]
                 candidates.append(_candidate("S7", CTRL, f"lane:{lane['lane']}", level, "HOST", "confirmed_age",
@@ -963,7 +965,7 @@ def signal_s7(facts: Dict[str, Any], products: Dict[str, Product], th: Dict[str,
             since = _time(label_since.get(CLEANUP_LABEL) if isinstance(label_since, dict)
                           else node.get("blocked_since"))
             hours = _hours(now, since)
-            if hours is not None and hours > th["cleanup_watch_h"]:
+            if hours is not None and hours >= th["cleanup_watch_h"]:
                 task = product.task_id(node_id)
                 candidates.append(_candidate("S7", CTRL, f"task:{task}", WATCH, "GH_TEXT", "cleanup_label",
                                              [_ev("issue", repo, number=issue.get("number"))], task=_t_task(task),

@@ -1152,12 +1152,29 @@ class Publisher:
             return {"run": runs[-1], "state": "JOURNAL_UNREADABLE"}
         entry = entries[newest]
         self._recover_sending(entry, now)
-        self._advance_github(entry, now)
-        self._advance_slack(entry, now)
+        if self._target_changed(entry):
+            # CONTRACT NOTE: a journal prepared under another stage, channel or ledger issue (a DRY/LIVE
+            # switch) is never sent: its retryable steps are SUPERSEDED, so a DRY report never reaches the
+            # live issue or channel and a LIVE card never reaches it after switching back. The next T1
+            # carries its changes into a new journal for the current target (§9.2).
+            changed = False
+            for step in _all_steps(entry):
+                if step["state"] in RETRYABLE:
+                    step["state"], step["error"], changed = SUPERSEDED, "TARGET_CHANGED", True
+            if changed:
+                self._save(entry)
+        else:
+            self._advance_github(entry, now)
+            self._advance_slack(entry, now)
         return {"run": entry["run"], "state": entry["state"], "comment": entry["comment"]["state"],
                 "issue_body": entry["issue_body"]["state"], "card": entry["card"]["state"],
                 "charts": entry["charts"]["state"], "replies": [r["state"] for r in entry["replies"]],
                 "comment_url": entry["comment"].get("url"), "slack": self._slack_state}
+
+    def _target_changed(self, entry: Dict[str, Any]) -> bool:
+        """True when the journal was prepared for another stage, Slack channel or ledger issue."""
+        return (entry.get("stage") != self.config.get("stage") or entry.get("channel") != self.channel
+                or entry.get("ledger_issue") != core.active_ledger_issue(self.config))
 
     def _recover_sending(self, entry: Dict[str, Any], now: datetime) -> bool:
         changed = False
@@ -1312,6 +1329,11 @@ class Publisher:
         for item in _list(self.store.read("slack_unknown", [])):
             at = _time(_dict(item).get("at"))
             if at is not None and now - at < UNKNOWN_WINDOW and _dict(item).get("kind") != "card":
+                count += 1
+        # Dead-man schedules whose outcome is unknown (kept in deadman.json for fired detection).
+        for item in _list(_dict(self.store.read("deadman", {})).get("unknown")):
+            at = _time(_dict(item).get("at"))
+            if at is None or now - at < UNKNOWN_WINDOW:
                 count += 1
         return count
 

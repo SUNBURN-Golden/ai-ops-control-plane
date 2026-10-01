@@ -717,8 +717,10 @@ def dag_choices(doc: Dict[str, Any]) -> List[str]:
 
 
 def dag_file_name(product: str, graph: Dict[str, Any]) -> str:
+    # Lower case: the published name must match publish.PNG_NAME_RE ([a-z0-9][a-z0-9_.-]*), or the tick
+    # rejects every chart of the run (PNG_INVALID).
     tag = graph.get("prefix") or re.sub(r"[^A-Za-z0-9_-]", "_", product.split("/")[-1])[:40]
-    return f"c2_dag_{tag}.png"
+    return f"c2_dag_{tag.lower()}.png"
 
 
 def _fit_size(lines: List[str], box_w: float, box_h: float, largest: float = 10.5) -> float:
