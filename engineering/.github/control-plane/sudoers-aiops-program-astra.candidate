@@ -1,0 +1,11 @@
+# PA-1 candidate: NEVER install with the ordinary aiops-program example.
+# User A / Option C adoption: docs/PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md,
+# "PA-1 채택 결정 — 2026-10-01 (A, Option C)". Adoption alone is not installation.
+# Install only after the exact final #47 HEAD passes independent A3 re-audit,
+# normal User merge and actual host/service qualification. Activation is separate.
+# Replace RUNNER_USER only with the existing, qualified runner identity.
+# Optional installed path: /etc/sudoers.d/aiops-program-astra (root:root 0440).
+# No env preservation, arbitrary command/path/arguments, shell or builder root.
+# Bounded stdin, protected activation and matching installed service authorization
+# are independently checked by the fixed bridge. Source examples grant nothing.
+RUNNER_USER ALL=(root) NOPASSWD: /opt/aiops/bin/aiops-fable program

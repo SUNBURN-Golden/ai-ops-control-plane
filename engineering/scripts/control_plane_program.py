@@ -130,6 +130,7 @@ def astra_receipt_matches(receipt, expected, gate, floor):
     return isinstance(receipt, dict) and receipt.get("status") == "POSTED" \
         and receipt.get("result") in ("PASS", "PASS_WITH_NOTES") \
         and receipt.get("scope_result") == "WITHIN_APPROVED_PLAN" \
+        and receipt.get("contract_change") == "NO" \
         and receipt.get("program_binding") == expected and receipt.get("binding") == expected \
         and receipt.get("gate") == gate and receipt.get("verified_depth") in AUDIT_FLOORS \
         and AUDIT_FLOORS.index(receipt["verified_depth"]) >= AUDIT_FLOORS.index(floor) \
@@ -1313,7 +1314,12 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
                             "writer_launch": writer["launch_request_id"] if writer else None,
                             "pr": pr_number, "head": head, "gate": gate, "depth": floor}
                 if not astra_receipt_matches(receipt, expected, gate, floor):
-                    astra_receipt_hold = "required current-head protected Fable scope audit is missing or not passing"
+                    if receipt.get("status") == "POSTED" and receipt.get("contract_change") != "NO":
+                        astra_status = "USER_REQUIRED"
+                        astra_receipt_hold = ("protected Fable receipt does not verify contract_change=NO; "
+                                              "Astra/User decision required")
+                    else:
+                        astra_receipt_hold = "required current-head protected Fable scope audit is missing or not passing"
                     reasons.append(astra_receipt_hold)
     elif contract_change:
         reasons.append("a current-head review reports a contract change; Astra/User decision required")

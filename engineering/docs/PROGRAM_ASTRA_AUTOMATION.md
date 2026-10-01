@@ -1,12 +1,14 @@
 # Program Astra automation — scoped audit, consultation and merge receipts
 
-Status: **Option C candidate; User adoption PENDING; end-to-end rollout NOT_READY**.
+Status: **User A / Option C adopted 2026-10-01; install/activation PENDING; end-to-end rollout NOT_READY**.
+The decision is recorded in
+[PA-1](PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md#pa-1-채택-결정--2026-10-01-a-option-c).
 The [exact-HEAD Fable review of #44](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/44#issuecomment-5910103843)
-was DECISION_REQUIRED. This continuation preserves that result and proposes
-restricted corrections; it invents no accepted User decision. M1/M5 and the
-existing manual operator path remain operative until the additional governance
-decision, independent exact-HEAD A3 audit and actual host qualification. No host
-install or activation is claimed.
+was DECISION_REQUIRED; its result is not transferred to this implementation.
+The requested F1–F3 fixes and final #47 exact-HEAD independent A3 re-audit must
+finish before installation. M1/M5 and the existing manual operator path remain
+operative until actual installation, host qualification and protected service
+authorization. No host install or activation is claimed.
 
 ## Problem and resulting behavior
 
@@ -100,9 +102,13 @@ Its bounded JSON stdin carries the operation, target and GitHub token. The token
 does not appear in argv, saved receipt, model input or command output. There is no
 shell evaluation, environment preservation, arbitrary path, model choice or
 caller-supplied verdict. The sudoers rule admits only this exact command, for the
-runner identity; builder identities receive no new root command. This is a
-narrow proposed exception to the existing runner-root prohibition and requires
-its own explicit User security-boundary adoption. It grants no shell, arbitrary
+runner identity; builder identities receive no new root command. This narrow
+exception was adopted in the PA-1 A / Option C User decision, but installation
+still requires the remaining rollout evidence. The ordinary
+`.github/control-plane/sudoers-aiops-program.example` has no runner-root target.
+The exception lives only in
+`.github/control-plane/sudoers-aiops-program-astra.candidate`; the candidate must
+not be copied as part of the ordinary install. It grants no shell, arbitrary
 Python/arguments, init, reconcile, new model or token search permission.
 
 Before GitHub/model operations, the installed service requires protected
@@ -227,10 +233,13 @@ including an empty field. The actual final accepted HEAD still requires its own
 independent A3, User adoption and host qualification; this minimum checkpoint is
 not a PASS or authorization pointer.
 
-1. Record the actual User governance decision for restricted Option C and the
-   runner-root exception; keep its pointer PENDING until then. Audit the new
-   implementation's exact HEAD with ordinary ARCHITECTURE/A3 and obtain normal
-   User merge. #44's old DECISION_REQUIRED is not transferred to a new HEAD.
+1. Check the actual [PA-1 A / Option C decision record](PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md#pa-1-채택-결정--2026-10-01-a-option-c)
+   for the restricted governance and runner-root exception. Finish the requested
+   F1–F3 fixes, re-audit final #47 exact HEAD with ordinary ARCHITECTURE/A3 and
+   obtain normal User merge before installation. Missing/PENDING adoption blocks
+   use of the separate sudoers candidate; the recorded decision alone does not
+   establish an audit, installation, qualification or activation.
+   #44's old DECISION_REQUIRED is not transferred to a new HEAD.
 2. Keep active/UNKNOWN task and model requests fenced during rollout. Install
    the audited `control_plane_fable.py` as `/opt/aiops/bin/aiops-fable` and install
    `control_plane_program_astra.py`, `control_plane_program_receipts.py`,
@@ -251,9 +260,18 @@ not a PASS or authorization pointer.
    Root bridge host calls use the existing installed helper and ledger. No builder
    adapter, actor identity, credential or existing host admission gate is replaced.
 4. Qualify rejection of missing/PENDING service authorization and stale code,
-   config/profile/policy hashes, including direct stdin entry. Only after actual
-   adoption and qualification may the operator apply the exact sudoers candidate
-   and validate it with `visudo -cf`; no general root command is added.
+   config/profile/policy hashes, including direct stdin entry. Use
+   `.github/control-plane/sudoers-aiops-program.example` for the ordinary install
+   and verify its runner rules have no root target. Only after the recorded PA-1
+   adoption, final #47 exact-HEAD A3 re-audit and actual qualification may the
+   operator use `.github/control-plane/sudoers-aiops-program-astra.candidate`.
+   Replace only the qualified runner identity, validate the candidate with
+   `visudo -cf`, and install it separately as `/etc/sudoers.d/aiops-program-astra`
+   (root:root 0440). Compare that file exactly with the same accepted commit's
+   rendered candidate; compare `/etc/sudoers.d/aiops-program` only with the ordinary
+   example. Missing/PENDING adoption forbids both candidate installation and its
+   installation verification. No wildcard copies or general root command are added.
+   Installation does not activate the protected service.
 5. Run existing Fable preflight. Installation's blocked-billing qualification
    still requires actual extra-usage rejected evidence; the narrow ordinary
    subscription-warning exception above does not supply that evidence.

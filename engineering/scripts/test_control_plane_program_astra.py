@@ -100,6 +100,7 @@ class ContextTests(unittest.TestCase):
 
     def receipt(self, base_binding, **extra):
         return {"status": "POSTED", "result": "PASS", "scope_result": "WITHIN_APPROVED_PLAN",
+                "contract_change": "NO",
                 "binding": base_binding, "program_binding": base_binding, "gate": "ARCHITECTURE",
                 "verified_depth": "A3", "comment_url": "https://github.com/root-receipt", **extra}
 

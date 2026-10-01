@@ -34,7 +34,7 @@ pointers.
 | Role | Job | Must not |
 |---|---|---|
 | USER | Final authority: product scope, consequential architecture choice, risk acceptance, merge | Be silently substituted by an agent |
-| ASTRA | Principal Architect / Design Authority; architecture exceptions; explicitly required milestone, architecture and release audits. Held by Claude Fable (M5), run through `aiops-fable audit` and `aiops-fable consult`; the protected `aiops-fable program` path is a separately adopted and qualified candidate (§13) | Become the routine ticket manager or default A1/A2 reviewer; implement audit fixes; audit a change it authored or modified; write code or documents; run outside the fixed tool |
+| ASTRA | Principal Architect / Design Authority; architecture exceptions; explicitly required milestone, architecture and release audits. Held by Claude Fable (M5), run through `aiops-fable audit` and `aiops-fable consult`; the protected `aiops-fable program` policy is adopted but its installation/qualification is pending (§13) | Become the routine ticket manager or default A1/A2 reviewer; implement audit fixes; audit a change it authored or modified; write code or documents; run outside the fixed tool |
 | GROK | Optional human-facing command relay to the mechanical control plane; host operator, including running the fixed `aiops-fable` commands (M5) | Engineer, architect, reviewer, semantic router, event bus, polling daemon; edit an Astra prompt, argument meaning or result |
 | BUILDER | One configured autonomous writer: DEVIN, GROK_BUILD, GLM or CURSOR; investigate → implement → test/debug → PR/evidence | Change approved architecture silently; write outside the assigned task/worktree; merge |
 | REVIEWER | Configured non-author read-only reviewer; may be a different builder lane or User-designated external lane | Modify the reviewed change or become a second writer |
@@ -353,11 +353,14 @@ launch when an owner exists or launch state is UNKNOWN.
 
 ## 13. Merge
 
-Program Astra automation (`docs/PROGRAM_ASTRA_AUTOMATION.md`) is an unadopted
-Option C candidate. It is not an accepted amendment to M1/M5. A separately
-recorded User decision, exact-HEAD independent A3 review and actual host
+User recorded A / restricted Option C policy adoption on 2026-10-01 in
+`docs/PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md`, §“PA-1 채택 결정 — 2026-10-01 (A, Option C)”.
+Existing M1/M4/M5 records remain intact. Program Astra automation
+(`docs/PROGRAM_ASTRA_AUTOMATION.md`) is still a deployment candidate: the F1–F3
+fixes, final #47 exact-HEAD independent re-audit, actual installation and host
 qualification are required before its fixed `astra-audit` and `astra-consult`
-operations or scoped Astra merge delegation become operative. The protected
+operations or scoped Astra merge delegation become operative. Until then use the
+operational M5 Slack request/operator consultation path. The protected
 service authorization record must bind that adoption to the accepted runtime,
 installed code/config/profile hashes and qualification evidence; missing or
 PENDING authorization refuses direct entry as well as workflow entry.

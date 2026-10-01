@@ -2,14 +2,17 @@
 
 This document is the only instruction set the COORDINATOR follows. The coordinator is a Claude Sonnet Routine session (`docs/PROGRAM_MODE.md` §8). Its authority limits are in `AGENTS.md` §2.
 
-The Astra bridge rows below are an unadopted Option C candidate. Existing manual
-operator policy remains operative until separate User adoption, exact-HEAD A3
-review and protected service authorization. The coordinator never decides that a
-host is qualified: the fixed operation verifies the installed authorization
-record. Missing/PENDING authorization is a blocker, not a fallback permission.
+User recorded A / Option C policy adoption on 2026-10-01 in
+`PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md`, §“PA-1 채택 결정 — 2026-10-01 (A, Option C)”.
+The Astra bridge rows below remain deployment candidates: #47 final exact-HEAD
+re-audit, actual installation/host qualification and protected service
+authorization must precede use. The operational M5 Slack consultation path in §4
+remains in force until then. The coordinator never decides that a host is
+qualified: the fixed operation verifies the installed authorization record.
+Missing/PENDING authorization is a blocker, not a fallback permission.
 The bounded receipt recovery implementation is a source candidate only
 (`docs/PROGRAM_FABLE_RECOVERY.md`); end-to-end automation remains NOT_READY until
-its final independent audit, adoption and actual host qualification.
+its final independent audit and actual host qualification.
 
 It is a decision table, not a judgment aid. Rows have explicit top-to-bottom
 priority; every row includes the condition that no earlier row applies. When no
@@ -62,8 +65,8 @@ Every operation is a `workflow_dispatch` of `control-plane-runtime.yml` on `main
 | `reap` | `{"launch_request_id","evidence"}` + `issue_number` |
 | `merge-check` | `{"pr_number"}` + `issue_number` |
 | `merge` | `{"pr_number"}` + `issue_number` (M1: merges only a computed READY_FOR_MERGE, pinned to that head) |
-| `astra-audit` | `{"pr_number","head"}` + `issue_number`; protected current-head gate audit |
-| `astra-consult` | `{"question_comment_id"}` + `issue_number`; protected canonical decision question |
+| `astra-audit` (deployment candidate only) | `{"pr_number","head"}` + `issue_number`; protected current-head gate audit; requires recorded adoption, final #47 re-audit, installation/qualification and current service authorization |
+| `astra-consult` (deployment candidate only) | `{"question_comment_id"}` + `issue_number`; protected canonical decision question; same adoption/install/qualification/authorization conditions; use M5 Slack request in §4 until those are met |
 | `lanes` | `{}` |
 
 Read the completed operation result before acting again on the same task. Astra
@@ -106,7 +109,7 @@ retain a green DONE from a merge/closure event.
 | 13q | All required current-head reviews PASS, and there is no completed `merge-check` result for the current plan/task/writer/PR/head binding | `merge-check` only. Its returned `astra_status`, `astra_result`, `scope_result` and `ready` choose the following rows on the next wake. Never infer protected receipt state from a comment. |
 | 13a | Current computed `merge-check` has `astra_status=MISSING` or `BUSY` and `astra_audit_allowed=true` | `astra-audit` with exact delivered PR/head. The boolean requires every ordinary CI/review/dependency/body/authority condition; BUSY is unadmitted and may be retried on the next event/heartbeat. Do not repeatedly recheck in this session. |
 | 13b | Current computed result has `astra_status=POSTED` and `astra_result=FAIL` | Link its actual findings, then same-owner `start` for fixes. No automatic audit resubmission at the same binding. |
-| 13c | Current computed result has `astra_status=RUNNING`, `UNKNOWN` or `ERROR`, or `astra_result=DECISION_REQUIRED`, or `scope_result=USER_REQUIRED` | User/operator path; do not merge or resume over the protected blocker. Only ERROR may enter the separately adopted and installed Recovery candidate rows below, where the root service computes quota eligibility. A model that may be running is not cancelled or resubmitted. |
+| 13c | Current computed result has `astra_status=RUNNING`, `UNKNOWN`, `ERROR` or `USER_REQUIRED`, or `astra_result=DECISION_REQUIRED`, or `scope_result=USER_REQUIRED` | User/operator path; do not merge or resume over the protected blocker. Only ERROR may enter the separately adopted and installed Recovery candidate rows below, where the root service computes quota eligibility. A model that may be running is not cancelled or resubmitted. |
 | 13d | Current computed result has `ready=false` and is not covered by 13a–13c or the exact envelope-repair condition in 14a | Post the exact computed reasons once per binding and use the named User/operator path. Missing/PENDING service authorization, declared RELEASE, contract change and User-only holds cannot be bypassed. |
 | 14 | Current computed `merge-check` has `ready=true` and either `astra_status=NOT_REQUIRED`, or `astra_status=POSTED` with `astra_result=PASS`/`PASS_WITH_NOTES` and `scope_result=WITHIN_APPROVED_PLAN` | `merge` (M1 executor). It recomputes all gates and pins that head. `NOT_READY` returns reasons; a changed binding invalidates the cached observation. |
 | 14a | `merge-check` reports "task issue body differs" | `review` with slot 1 (it restores the envelope; an answered slot returns `REVIEW_EXISTS`, an A0 task reports that no slot is required), then `merge-check` again |
@@ -118,16 +121,25 @@ retain a green DONE from a merge/closure event.
    - `ANSWERED` or `APPROVED_SMALL_EXCEPTION`: row 8 applies on the next run.
 3. **Astra** (Claude Fable, User decision M5). On `ESCALATE_ASTRA`:
    - label the issue `consult-astra`;
-   - call the candidate `astra-consult` with the canonical question comment id
-     only through its fixed operation. That operation checks protected service
-     authorization; the coordinator makes no qualification judgment. A reviewer question must carry the verified
-     `ASTRA_REVIEW_QUESTION_V1` reference described in PROGRAM_ASTRA_AUTOMATION.md;
-   - consume the actual protected operation result. The tool posts the human
-     projection; never write an Astra answer marker yourself;
-   - missing/PENDING authorization or a protected error goes to the operator.
-     Existing manual fixed-tool consultation remains available only under its
-     existing explicit operator authorization; the coordinator cannot silently
-     substitute it for a rejected automated operation.
+   - **current operational M5 path:** post exactly
+     `ASTRA_CONSULT_REQUEST repo=<repository> issue=<number> comment=<question comment id>`
+     to the Slack decision channel. User or Slack relays that request to the host
+     operator (Grok); the operator runs the fixed `aiops-fable consult` with those
+     same values under M5. Do not treat the Slack request as an Astra answer;
+   - the fixed tool posts the actual
+     `ASTRA_CONSULT_V1 result=<ANSWERED|USER_REQUIRED> by=ASTRA_FABLE` answer on the
+     canonical issue. Wait for the actual answer; never write that marker yourself;
+   - **deployment candidate, not the current route:** only after the PA-1 adoption
+     record above, #47 final exact-HEAD re-audit, actual installation/qualification
+     and current protected service authorization, use `astra-consult` with the
+     canonical question comment id through its fixed operation. A reviewer
+     question must carry the verified `ASTRA_REVIEW_QUESTION_V1` reference in
+     PROGRAM_ASTRA_AUTOMATION.md. Consume the actual protected operation result;
+     the coordinator makes no qualification judgment;
+   - once using that qualified automatic route, missing/PENDING authorization or
+     a protected error goes to the operator. Do not silently fall back to a manual
+     invocation to bypass the automatic operation's rejection. The existing M5
+     route before deployment is an authorized operating path, not that fallback.
 4. **User.** If Astra answers `USER_REQUIRED`, label the issue `needs-user` and notify the User. Never answer for the User.
 
 Receipt ERROR/UNKNOWN has no qualified automatic reconcile operation in this

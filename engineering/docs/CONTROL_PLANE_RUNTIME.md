@@ -50,9 +50,11 @@ runner의 sudo 허용은 고정 helper의 `launch`, 정확한 세 builder별
 host-preflight와 모든 재시도가 fail-closed로 거부된다. shell, 임의 Python, 임의 인수,
 `init`, `reconcile`, 일반 root 실행을 허용하지 않는다. builder에는 이 sudo 권한이 없다.
 추가 `aiops-fable program` root 예외는 아래 후보 절에서 별도로 정의하며,
-실제 User security-boundary 채택과 독립 exact-HEAD A3/host qualification,
-protected service authorization 전에는 기존 금지가 적용된다. 후보 example을
-추가한 사실은 설치·허가가 아니다. 예외가 채택되어도 shell·임의 Python/인수,
+2026-10-01 User A / Option C 채택은
+[PA-1 결정 기록](PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md#pa-1-채택-결정--2026-10-01-a-option-c)에 남긴다.
+채택 기록만으로 설치하거나 활성화하지 않는다. 이번 F1–F3 수정의 최종 #47 HEAD에 대한
+독립 A3 재감사와 실제 host qualification, protected service authorization 전에는 기존 금지가 적용된다.
+별도 후보 파일을 추가한 사실은 설치·허가가 아니다. 예외가 채택되어도 shell·임의 Python/인수,
 init/reconcile나 builder root를 허용하지 않는다.
 관리자만 DB를 최초 `init`한다. 손실된 DB를 빈 DB로 재생성해 복구하지 않는다.
 원 ledger와 외부 session을 대사하기 전 dispatch를 재개하지 않는다.
@@ -74,14 +76,29 @@ UNKNOWN·SUBMITTING·ABANDONED의 ID도 보존해 반환하며, 이슈 projectio
 plan에서 해당 ID를 없애거나 이름을 바꿔 fence를 회피할 수 없다. 완료 판정·원장 수정·
 임의 파일 읽기 권한은 주지 않는다.
 
-program mode의 sudoers 원문은 `.github/control-plane/sudoers-aiops-program.example`이다.
+program mode의 일반 설치 sudoers 원문은 `.github/control-plane/sudoers-aiops-program.example`이다.
+이 파일의 runner 규칙에는 root 실행 대상이 없다. 별도 PA-1 후보 파일을 일반 설치에 합치거나
+`*.candidate`를 일괄 복사하지 않는다.
+
 - 설치 위치는 `/etc/sudoers.d/aiops-program`이고, root:root 0440이다. 파일 이름에 점(`.`)이 있으면 sudo가 읽지 않는다.
 - 바꾸는 곳은 `RUNNER_USER` 하나다. 기존 `status --launch-request-id` 규칙의 사용자 칸을 그대로 쓴다.
 - 인수는 sudo 1.9.10 이상의 정규식(`^...$`)으로 제한한다. helper의 인수 검증과 같은 모양이다.
 - runner 규칙은 `reap`의 `--pin-stdin` 형식만 허용한다. `migrate`, `reconcile`, `init`, `materialize-resolve`는 허용하지 않는다.
 - control identity는 각 레인 adapter의 `--quiescence`만 레인 계정으로 실행한다. root로는 실행하지 않는다.
 - program mode 테스트는 런타임이 helper에 보내는 모든 인수가 이 규칙에 맞는지 검사한다. 새 helper 호출을 더하면 이 파일도 같이 고쳐야 한다.
+- 설치·검증에서는 일반 예시에 runner root 대상이 없음을 확인하고, 실제 runner 계정만 치환한 바이트를 `visudo -cf`로 검사한다.
 - 설치 후 확인: `diff <(sed 's/^RUNNER_USER /<runner 계정> /' sudoers-aiops-program.example) /etc/sudoers.d/aiops-program`
+
+PA-1 root 예외의 원문은 **`.github/control-plane/sudoers-aiops-program-astra.candidate`**에만 있다.
+[PA-1 A / Option C 채택 결정 기록](PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md#pa-1-채택-결정--2026-10-01-a-option-c)을
+먼저 확인하고, F1–F3 수정의 최종 #47 HEAD 독립 A3 재감사와 정상 User 병합,
+실제 host/service qualification 및 protected authorization을 충족한 경우에만 그 후보 파일을 쓴다.
+하나라도 없거나 PENDING이면 후보 설치·검증을 진행하지 않고 일반 예시만 유지한다.
+조건이 충족되면 같은 accepted commit의 후보를 runner 계정만 치환하여 `visudo -cf`로 검사하고,
+별도 `/etc/sudoers.d/aiops-program-astra`(root:root 0440)에 설치한다. 후보 파일과 이 설치 파일을
+동일 치환 후 정확히 비교한다. 이 검증은 일반 `/etc/sudoers.d/aiops-program` 비교와 분리한다.
+설치 성공도 활성화 승인이나 실제 서비스 qualification을 대신하지 않는다.
+`control_plane_install.py`의 disabled pin 설치는 sudoers를 복사하거나 PA-1 예외를 설치하지 않는다.
 
 host policy 모양은 `.github/control-plane/host-policy.example.json`에 있다.
 예시는 UID=0 / 빈 repo / PENDING evidence라서 그대로는 실행되지 않는다.
@@ -373,13 +390,17 @@ python3 scripts/control_plane.py validate-repo
 
 The protected `aiops-fable program` path, scoped audit receipts and automatic
 consult invocation are a restricted Option C candidate in
-[PROGRAM_ASTRA_AUTOMATION.md](PROGRAM_ASTRA_AUTOMATION.md). Its additional User
-governance/security-boundary decision is PENDING; existing M1/M5 do not already
-grant it. A declared RELEASE gate, current reviewer contract-change YES and
+[PROGRAM_ASTRA_AUTOMATION.md](PROGRAM_ASTRA_AUTOMATION.md). The User's A / Option C
+governance/security-boundary adoption of 2026-10-01 is recorded in
+[PA-1](PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md#pa-1-채택-결정--2026-10-01-a-option-c).
+Its final #47 F1–F3 fixes and exact-HEAD independent A3 re-audit must precede
+installation; actual host qualification and activation remain pending. A declared RELEASE gate, current reviewer contract-change YES and
 User-only node always hold automatic merge regardless of a scope receipt.
 
-The proposed runner sudoers exception permits only the exact
-`/opt/aiops/bin/aiops-fable program` command. Bounded stdin is validated by the
+The separate `.github/control-plane/sudoers-aiops-program-astra.candidate`
+permits only the exact `/opt/aiops/bin/aiops-fable program` command after the
+recorded adoption and rollout conditions above. The ordinary install example
+has no runner-root rule. Bounded stdin is validated by the
 protected service, not a coordinator interpretation. Before GitHub/model work,
 the service requires root-protected `program-astra-authorization.json` beside
 its installed config. It binds accepted runtime commit, actual decision/audit/
@@ -393,9 +414,10 @@ PROGRAM_ASTRA_AUTOMATION and the adoption proposal) beneath the installed
 `/opt/aiops/lib` root, together with the protected support/config/profile files.
 Copied support is not assumed to be a git checkout. The privileged entry's
 service attestation is separate from the normal checkout activation check;
-both need actual qualification. Only an authorized operator installs sudoers,
-and the exact example/source comparison above must include this adopted
-exception rather than leave an undocumented extra root rule.
+both need actual qualification. Only an authorized operator installs sudoers.
+The ordinary example/source comparison above excludes the root exception;
+conditional candidate installation requires its own separate exact comparison
+and never becomes an undocumented extra root rule.
 
 The candidate leaves activation unchanged and has no qualified protected Fable
 receipt reconciler. Full automation remains NOT_READY until that separate

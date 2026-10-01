@@ -48,6 +48,56 @@ class PolicyTests(unittest.TestCase):
             self.r.gh.checks[runtime.HEAD][0]["conclusion"] = "failure"
             self.assertFalse(prog.merge_check(issue, 7)["astra_audit_allowed"])
 
+    def scope_receipt(self):
+        self.r.gh.contents[runtime.PLAN1] = runtime.plan([runtime.node(floor="A3", astra_auto_merge=True)])
+        issue, _ = self.r.released_writer()
+        self.r.reviewed(issue, slot=1, depth="A2"); self.r.reviewed(issue, slot=2, depth="A2")
+        binding, *_ = bridge.request_context(self.r.gh, self.r.cfg, issue, 7, runtime.HEAD)
+        return issue, binding, {"status": "POSTED", "result": "PASS", "scope_result": "WITHIN_APPROVED_PLAN",
+                               "binding": binding, "program_binding": binding, "gate": "ARCHITECTURE",
+                               "verified_depth": "A3", "comment_url": "https://github.com/root-receipt"}
+
+    def test_fable_receipt_contract_change_yes_requires_user_even_with_reviewers_no(self):
+        issue, binding, receipt = self.scope_receipt()
+        receipt["contract_change"] = "YES"
+        self.assertFalse(prog.astra_receipt_matches(receipt, binding, "ARCHITECTURE", "A3"))
+        with patch.object(prog, "fable_program", return_value=receipt):
+            answer = prog.merge_check(issue, 7)
+        self.assertFalse(answer["ready"])
+        self.assertEqual(answer["astra_status"], "USER_REQUIRED")
+        self.assertFalse(answer["astra_audit_allowed"])
+
+    def test_fable_receipt_missing_contract_change_requires_user(self):
+        issue, binding, receipt = self.scope_receipt()
+        self.assertFalse(prog.astra_receipt_matches(receipt, binding, "ARCHITECTURE", "A3"))
+        with patch.object(prog, "fable_program", return_value=receipt):
+            answer = prog.merge_check(issue, 7)
+        self.assertFalse(answer["ready"])
+        self.assertEqual(answer["astra_status"], "USER_REQUIRED")
+        self.assertFalse(answer["astra_audit_allowed"])
+
+    def test_fable_receipt_requires_exact_no_not_unknown_or_false(self):
+        issue, binding, receipt = self.scope_receipt()
+        for value in (None, False, "", "no", "UNKNOWN"):
+            with self.subTest(value=value):
+                bad = {**receipt, "contract_change": value}
+                self.assertFalse(prog.astra_receipt_matches(bad, binding, "ARCHITECTURE", "A3"))
+                with patch.object(prog, "fable_program", return_value=bad):
+                    self.assertEqual(prog.merge_check(issue, 7)["astra_status"], "USER_REQUIRED")
+        good = {**receipt, "contract_change": "NO"}
+        self.assertTrue(prog.astra_receipt_matches(good, binding, "ARCHITECTURE", "A3"))
+        with patch.object(prog, "fable_program", return_value=good):
+            self.assertTrue(prog.merge_check(issue, 7)["ready"])
+
+    def test_missing_or_running_audit_is_not_a_posted_contract_decision(self):
+        issue, _, _ = self.scope_receipt()
+        for status in ("MISSING", "BUSY", "RUNNING", "UNKNOWN", "ERROR"):
+            with self.subTest(status=status), patch.object(prog, "fable_program", return_value={"status": status}):
+                answer = prog.merge_check(issue, 7)
+                self.assertEqual(answer["astra_status"], status)
+                self.assertFalse(answer["ready"])
+                self.assertEqual(answer["astra_audit_allowed"], status in ("MISSING", "BUSY"))
+
     def test_read_only_status_can_check_reconciled_writer_and_edited_body(self):
         self.r.gh.contents[runtime.PLAN1] = runtime.plan([runtime.node(floor="A3", astra_auto_merge=True)])
         issue, writer = self.r.released_writer()
