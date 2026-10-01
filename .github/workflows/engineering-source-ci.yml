@@ -44,7 +44,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python3 -m pip install --disable-pip-version-check pyyaml==6.0.2
+      - run: python3 -m pip install --disable-pip-version-check pyyaml==6.0.2 pyte==0.8.2 wcwidth==0.9.1 cryptography==46.0.0
       - run: python3 -m unittest discover -s tests -v
       - run: python3 -m unittest discover -s engineering/scripts -p 'test_control_plane*.py'
       - run: bash -n engineering/scripts/control_plane_boundary_hook.sh && bash -n engineering/scripts/control_plane_boundary_probe.sh

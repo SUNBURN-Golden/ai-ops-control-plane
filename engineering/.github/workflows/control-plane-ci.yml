@@ -25,6 +25,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: python3 -m pip install --disable-pip-version-check pyte==0.8.2 wcwidth==0.9.1 cryptography==46.0.0
       - name: Compile
         run: python -m py_compile scripts/control_plane.py scripts/control_plane_host.py
       - name: Self-test
