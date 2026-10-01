@@ -32,8 +32,10 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import time
+from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -61,10 +63,78 @@ ASTRA_GATES = ("NONE", "MILESTONE", "ARCHITECTURE", "RELEASE")
 DELIVERABLE_MODES = ("PR",)  # program mode completes a node only through a host-pinned, merged PR
 REQUIRED_REVIEWS = {"A0": 0, "A1": 1, "A2": 2, "A3": 2}
 BLOCKING_LABELS = {"needs-user", "blocked", "decision-required"}
+FABLE_PROGRAM_COMMAND = ("/usr/bin/sudo", "-n", "/opt/aiops/bin/aiops-fable", "program")
 
 
 class ProgramError(cp.ControlPlaneError):
     pass
+
+
+def fable_program(operation: str, issue_number: int, **fields) -> Dict[str, Any]:
+    """The root-owned bridge recomputes authority; only its stdout is a receipt.
+
+    No token in argv, env preservation, free-form shell, model choice, file path,
+    comment verdict or unlimited retry. Model audits may take up to three hours;
+    check is a short receipt read. An interrupted admitted request stays UNKNOWN.
+    """
+    cfg = cp.load_config()
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise ProgramError("GITHUB_TOKEN is required")
+    payload = {"operation": operation, "repository": cfg["repository"], "issue": issue_number,
+               "github_token": token, **fields}
+    try:
+        result = subprocess.run(FABLE_PROGRAM_COMMAND, input=json.dumps(payload), text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                                env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+                                timeout=28800 if operation == "quota-resume" else 14400 if operation in ("audit", "consult") else 120)
+    except subprocess.TimeoutExpired:
+        raise ProgramError("program Astra request timed out; reconcile it on the host; do not resubmit") from None
+    except OSError:
+        raise ProgramError("program Astra transport/cancellation failed; its root request may still be running; "
+                           "reconcile it on the host; do not resubmit") from None
+    try:
+        answer = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        raise ProgramError("protected program Astra bridge returned no valid JSON; do not resubmit") from None
+    if result.returncode or not isinstance(answer, dict) or answer.get("status") == "ERROR":
+        reason = cp.program_error_reason(answer.get("reason", "inspect its host receipt"), (token,)) \
+            if isinstance(answer, dict) else "inspect its host receipt"
+        raise ProgramError("protected program Astra bridge failed: " + reason)
+    return answer
+
+
+def astra_audit(issue_number: int, pr_number: int, head: str) -> Dict[str, Any]:
+    cp.require_runtime_enabled()
+    return fable_program("audit", issue_number, pr=pr_number, head=head)
+
+
+def quota_operation(operation: str, issue_number: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+    cp.require_runtime_enabled()
+    if set(fields) - {"pr_number", "head", "question_comment_id"}:
+        raise ProgramError("quota operations accept only the original delivery or question selector")
+    question = fields.get("question_comment_id")
+    if question is not None:
+        if "pr_number" in fields or "head" in fields:
+            raise ProgramError("quota target cannot mix delivery and consultation")
+        return fable_program(operation, issue_number, question=question)
+    return fable_program(operation, issue_number, pr=fields.get("pr_number"), head=fields.get("head"))
+
+
+def astra_consult(issue_number: int, question: int) -> Dict[str, Any]:
+    cp.require_runtime_enabled()
+    return fable_program("consult", issue_number, question=question)
+
+
+def astra_receipt_matches(receipt, expected, gate, floor):
+    return isinstance(receipt, dict) and receipt.get("status") == "POSTED" \
+        and receipt.get("result") in ("PASS", "PASS_WITH_NOTES") \
+        and receipt.get("scope_result") == "WITHIN_APPROVED_PLAN" \
+        and receipt.get("contract_change") == "NO" \
+        and receipt.get("program_binding") == expected and receipt.get("binding") == expected \
+        and receipt.get("gate") == gate and receipt.get("verified_depth") in AUDIT_FLOORS \
+        and AUDIT_FLOORS.index(receipt["verified_depth"]) >= AUDIT_FLOORS.index(floor) \
+        and isinstance(receipt.get("comment_url"), str) and bool(receipt["comment_url"].strip())
 
 
 # --------------------------------------------------------------------------- GitHub
@@ -160,6 +230,14 @@ def load_plan(api: cp.GithubApi, cfg: Dict[str, Any], plan_commit: str) -> Dict[
         plan = json.loads(base64.b64decode(content["content"]).decode("utf-8"))
     except (KeyError, TypeError, ValueError) as exc:
         raise ProgramError(f"{PLAN_PATH} at {plan_commit} is unreadable") from exc
+    if isinstance(plan, dict) and "registration_scope" in plan:
+        # This marker identifies an expanded candidate requiring full-scope
+        # approval. Schema v1 has no adopted reader for its manifest. Neither an
+        # edited state string nor an inherited approval pointer can activate it.
+        raise ProgramError("program registration_scope is a candidate; full-scope registration reader "
+                           "is not adopted; do not materialize or dispatch")
+    if isinstance(plan, dict) and "PENDING" in str(plan.get("approval_pointer", "")).upper():
+        raise ProgramError("program scope/start approval is pending; do not dispatch")
     return validate_plan(plan, cfg)
 
 
@@ -189,6 +267,11 @@ def validate_plan(plan: Any, cfg: Dict[str, Any]) -> Dict[str, Any]:
         deps = node.get("depends_on", [])
         if not isinstance(deps, list) or any(dep not in ids or dep == node["id"] for dep in deps):
             raise ProgramError(f"node {node['id']} has invalid depends_on")
+        # Schema v1 has no adopted cross-repository completion reader. Even an
+        # empty field must not look like supported/consumed dependency evidence.
+        if "depends_on_external" in node:
+            raise ProgramError(f"node {node['id']}: depends_on_external is not supported by active schema v1; "
+                               "keep cross-repository dependencies in the pending catalogue until adopted")
         node.setdefault("audit_floor", "A1")
         node.setdefault("astra_gate", "NONE")
         node.setdefault("deliverable_mode", "PR")
@@ -196,11 +279,19 @@ def validate_plan(plan: Any, cfg: Dict[str, Any]) -> Dict[str, Any]:
             raise ProgramError(f"node {node['id']} has an invalid gate field")
         if node["deliverable_mode"] not in DELIVERABLE_MODES:
             raise ProgramError(f"node {node['id']}: program mode supports deliverable_mode PR only")
+        for flag in ("user_merge", "astra_auto_merge"):
+            if flag in node and type(node[flag]) is not bool:
+                raise ProgramError(f"node {node['id']} has invalid {flag}")
+        if node.get("user_merge") is True and node.get("astra_auto_merge") is True:
+            raise ProgramError(f"node {node['id']}: User-only merge cannot also delegate its Astra merge")
+        # Check the declared gate before A3 normalizes it to ARCHITECTURE.
+        if node["astra_gate"] == "RELEASE" and node.get("astra_auto_merge") is True:
+            raise ProgramError(f"node {node['id']}: RELEASE merge cannot be delegated")
         if node["audit_floor"] == "A0":
             # Program mode has no A0 qualification path (DISPATCH section 16: authorization pointer,
             # path contract, attestation), so A0 is promoted to A1 and gets its independent review.
             node["audit_floor"] = "A1"
-        if node["audit_floor"] == "A3":
+        if node["audit_floor"] == "A3" and node["astra_gate"] != "RELEASE":
             node["astra_gate"] = "ARCHITECTURE"  # AGENTS section 8: A3 implies the architecture gate
     # Reject dependency cycles.
     graph = {node["id"]: set(node.get("depends_on", [])) for node in nodes}
@@ -244,6 +335,92 @@ def require_on_default_branch(api: cp.GithubApi, commit: str) -> None:
     comparison = api._request("GET", f"/compare/{branch}...{commit}")
     if (comparison or {}).get("status") not in ("behind", "identical"):
         raise ProgramError(f"PLAN_NOT_MERGED: {commit} is not on the default branch {branch}")
+
+
+def latest_default_plan(api: cp.GithubApi, cfg: Dict[str, Any]) -> tuple:
+    """Read the latest default-branch plan change, including merged stack commits.
+
+    An ancestor being merged is not scope approval. Always inspect the current
+    plan-file revision before admission so historical unmarked plans cannot
+    bypass a later full-scope registration hold.
+    """
+    branch = default_branch(api)
+    revisions = api._request("GET", f"/commits?sha={quote(branch, safe='')}&path={quote(PLAN_PATH, safe='')}&per_page=1")
+    if not isinstance(revisions, list) or len(revisions) != 1 or not isinstance(revisions[0], dict) \
+            or not SHA.fullmatch(str(revisions[0].get("sha", ""))):
+        raise ProgramError("latest default-branch program plan commit is unknown")
+    commit = revisions[0]["sha"]
+    require_on_default_branch(api, commit)
+    return commit, load_plan(api, cfg, commit)
+
+
+def require_current_plan(api: cp.GithubApi, cfg: Dict[str, Any], requested: str,
+                         recorded: Optional[str] = None) -> Dict[str, Any]:
+    require_on_default_branch(api, requested)
+    latest, latest_plan = latest_default_plan(api, cfg)
+    # Revisions always use the current plan-file commit, rather than a caller's
+    # arbitrary merged ancestor or an unrelated later commit.
+    if requested != latest:
+        raise ProgramError(f"STALE_PLAN: requested plan {requested} is not latest default-branch plan {latest}")
+    if recorded is not None:
+        require_descendant(api, recorded, requested)
+    try:
+        recorded_nodes = host(["materialize-list", "--repository", cfg["repository"],
+                               "--program", latest_plan["program"]])
+    except cp.ControlPlaneError as exc:
+        raise ProgramError(str(exc)) from exc
+    rows = recorded_nodes.get("rows")
+    if (recorded_nodes.get("repository"), recorded_nodes.get("program")) != \
+            (cfg["repository"], latest_plan["program"]) or not isinstance(rows, list) or len(rows) > 10000 \
+            or not all(isinstance(row, dict) and isinstance(row.get("node"), str) for row in rows):
+        raise ProgramError("host canonical materialization list is malformed")
+    missing = sorted({row["node"] for row in rows} - {node["id"] for node in latest_plan["nodes"]})
+    if missing:
+        raise ProgramError(f"USER_REQUIRED: plan removes or renames canonical materialized nodes {missing}; "
+                           "identity/fence migration is not adopted")
+    return latest_plan
+
+
+def node_definition_sha256(node: Dict[str, Any]) -> str:
+    """Digest the validated definition, ignoring string-edge whitespace."""
+    def normalize(value):
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if isinstance(value, dict):
+            return {key: normalize(item) for key, item in value.items()}
+        return value
+    return hashlib.sha256(json.dumps(normalize(node), ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+PROGRAM_POLICY_PATHS = {PLAN_PATH, "AGENTS.md", "RUNBOOKS/DISPATCH.md", "docs/PROGRAM_MODE.md",
+                        "docs/CONTROL_PLANE_RUNTIME.md", "docs/COORDINATOR_PLAYBOOK.md",
+                        "docs/PROGRAM_ASTRA_AUTOMATION.md", "docs/PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md",
+                        "docs/PROGRAM_FABLE_RECOVERY.md", "docs/DEVIN_EXECUTION_PLAN.md"}
+PROGRAM_POLICY_PREFIXES = (".aiops/", ".github/", "docs/aiops/", "docs/decisions/", "RUNBOOKS/")
+
+
+def changed_paths(api: cp.GithubApi, pr: Dict[str, Any], pr_number: int) -> set:
+    files = paginate(api, f"/pulls/{pr_number}/files")
+    if type(pr.get("changed_files")) is not int or len(files) != pr["changed_files"] \
+            or not all(isinstance(item, dict) and isinstance(item.get("filename"), str) for item in files):
+        raise ProgramError("PR changed-path inventory is incomplete or unknown")
+    return {path for item in files for path in (item.get("filename"), item.get("previous_filename")) if path}
+
+
+def program_policy_path(path: str, plan: Optional[Dict[str, Any]] = None) -> bool:
+    # Semicolon-separated local authority pointers are immutable contracts at
+    # the approved plan revision. External-repository/URL pointers do not name
+    # this PR's files. Trailing human annotations do not erase the local path.
+    authority_paths = set()
+    for pointer in str((plan or {}).get("authoritative_doc_pointers", "")).split(";"):
+        candidate = pointer.strip().split(" ", 1)[0]
+        if re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", candidate) and "." in candidate:
+            authority_paths.add(candidate)
+    return path in PROGRAM_POLICY_PATHS or path in authority_paths or path.startswith(PROGRAM_POLICY_PREFIXES) \
+        or path.rsplit("/", 1)[-1] == "AGENTS.md"
 
 
 # --------------------------------------------------------------------------- task body
@@ -351,7 +528,10 @@ def materialize(program: str, node_id: str, plan_commit: str) -> Dict[str, Any]:
     cfg = cp.load_config()
     cp.require_runtime_enabled()
     api = api_for(cfg)
-    plan = load_plan(api, cfg, plan_commit)
+    plan = require_current_plan(api, cfg, plan_commit)
+    prior = host(["materialize-status", "--program", program, "--node", node_id])
+    if prior.get("plan_commit") is not None:
+        require_descendant(api, prior["plan_commit"], plan_commit)
     if plan["program"] != program:
         raise ProgramError("plan program key does not match the request")
     node = plan_node(plan, node_id)
@@ -458,10 +638,119 @@ def effective_floor(plan_floor: str, verdicts: List[tuple]) -> str:
 
 
 def merged_delivery(api: cp.GithubApi, pin: Optional[Dict[str, Any]]) -> bool:
+    """Merge existence only, never a dependency/completion predicate."""
     if pin is None:
         return False
     pr = api._request("GET", f"/pulls/{pin['pr']}")
     return pr.get("merged") is True and (pr.get("head") or {}).get("sha") == pin["head"]
+
+
+def post_merge_workflow_runs(api: cp.GithubApi, branch: str, merge_sha: str) -> List[Dict[str, Any]]:
+    """Actual main/push runs, not mutable evidence prose or PR checks at another SHA."""
+    result, page = [], 1
+    while True:
+        value = api._request("GET", f"/actions/runs?event=push&branch={branch}&head_sha={merge_sha}"
+                             f"&per_page=100&page={page}")
+        runs = value.get("workflow_runs") if isinstance(value, dict) else None
+        if not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs):
+            raise ProgramError("post-merge workflow list is malformed")
+        result.extend(run for run in runs if run.get("event") == "push" and run.get("head_branch") == branch
+                      and run.get("head_sha") == merge_sha)
+        if len(runs) < 100:
+            return result
+        page += 1
+
+
+def delivery_completion(api: cp.GithubApi, cfg: Dict[str, Any], pin: Optional[Dict[str, Any]],
+                        task_id: str) -> Dict[str, Any]:
+    """Project completion and readiness at an exact delivery/merge, DISPATCH §20.
+
+    There is no adopted protected post-merge failure/follow-up issuer yet. A
+    failed KIX verification therefore holds the original and downstream here;
+    E04 can later expose the independently recorded failure+corrective task for
+    original-task closure without granting downstream product readiness.
+    """
+    if pin is None:
+        return {"status": "NOT_MERGED"}
+    pr = api._request("GET", f"/pulls/{pin['pr']}")
+    if pr.get("merged") is not True:
+        return {"status": "NOT_MERGED"}
+    merge_sha = pr.get("merge_commit_sha")
+    branch = default_branch(api)
+    reasons = []
+    if (pr.get("head") or {}).get("sha") != pin["head"]:
+        reasons.append("merged PR head differs from the host-pinned delivery")
+    if ((pr.get("head") or {}).get("repo") or {}).get("full_name") != cfg["repository"] \
+            or (pr.get("head") or {}).get("ref") != branch_for(task_id) \
+            or (pr.get("base") or {}).get("ref") != branch:
+        reasons.append("merged delivery does not name this task/repository/default target")
+    if not isinstance(merge_sha, str) or not SHA.fullmatch(merge_sha):
+        reasons.append("merged delivery has no exact merge commit")
+    else:
+        try:
+            require_on_default_branch(api, merge_sha)
+        except ProgramError:
+            reasons.append("merged delivery commit is not on the default target lineage")
+    result = {"status": "MERGED_POST_VERIFY", "pr": pin["pr"], "head": pin["head"],
+              "merge_commit": merge_sha, "reasons": reasons}
+    if reasons:
+        return result  # an already merged task must not be redispatched either
+    if cfg["repository"] != "BeautifulMind-JT/kix-protocol":
+        return {**result, "status": "DONE"}  # no required post-merge phase for these products
+    checks = latest_check_runs(all_check_runs(api, merge_sha))
+    statuses = api._request("GET", f"/commits/{merge_sha}/status") or {}
+    if any(check.get("status") == "completed" and check.get("conclusion")
+           not in ("success", "neutral", "skipped") for check in checks) \
+            or statuses.get("statuses") and statuses.get("state") in ("failure", "error"):
+        return {**result, "status": "POST_MERGE_FAILED",
+                "reasons": ["KIX post-merge CI failed; durable failure and corrective task evidence required"]}
+    reasons.extend(verification_reasons(api, cfg, merge_sha,
+                                        required_checks_key="program_post_merge_required_checks"))
+    push_runs = post_merge_workflow_runs(api, branch, merge_sha)
+    newest = {}
+    for run in push_runs:
+        key = run.get("workflow_id", run.get("path"))
+        order = (run.get("run_number", 0), run.get("run_attempt", 1), run.get("id", 0))
+        if key not in newest or order > newest[key][0]:
+            newest[key] = (order, run)
+    push_runs = [run for _, run in newest.values()]
+    if any(run.get("status") == "completed" and run.get("conclusion")
+           not in ("success", "neutral", "skipped") for run in push_runs):
+        return {**result, "status": "POST_MERGE_FAILED",
+                "reasons": ["KIX exact main/push workflow failed; corrective task evidence required"]}
+    verified_suites = {run.get("check_suite_id") for run in push_runs
+                       if run.get("status") == "completed" and run.get("conclusion") == "success"
+                       and type(run.get("check_suite_id")) is int}
+    post_merge_checks = cfg.get("program_post_merge_required_checks")
+    for name in post_merge_checks if isinstance(post_merge_checks, list) else []:
+        required = [check for check in checks if check.get("name") == name]
+        if not required or any((check.get("check_suite") or {}).get("id") not in verified_suites
+                               for check in required):
+            reasons.append(f"KIX post-merge required check {name!r} lacks successful exact main/push origin")
+    # Expected blobs are reviewed profile bytes bound by the installed runtime;
+    # never parse attacker-editable AGENTS or accept caller-selected baselines.
+    locked = cfg.get("program_post_merge_locked_blobs")
+    locked_paths = {"runtime/crates/kix-kernel/src/lib.rs",
+                    "runtime/crates/kix-kernel/tests/quarantine_capacity.rs"}
+    if not isinstance(locked, dict) or set(locked) != locked_paths or not all(
+            isinstance(path, str) and re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", path)
+            and all(part not in (".", "..") for part in path.split("/"))
+            and isinstance(blob, str) and SHA.fullmatch(blob) for path, blob in (locked or {}).items()):
+        reasons.append("KIX protected post-merge locked-blob baseline is missing or invalid")
+    else:
+        for path, blob in locked.items():
+            value = api._request("GET", f"/contents/{path}?ref={merge_sha}")
+            try:
+                raw = base64.b64decode("".join(value["content"].split()), validate=True)
+                actual = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+                valid = value.get("type") == "file" and value.get("encoding") == "base64" \
+                    and value.get("sha") == blob and actual == blob
+            except (KeyError, TypeError, ValueError):
+                valid = False
+            if not valid:
+                return {**result, "status": "POST_MERGE_FAILED",
+                        "reasons": [f"KIX post-merge locked blob differs at {path}"]}
+    return {**result, "status": "MERGED_POST_VERIFY" if reasons else "DONE", "reasons": reasons}
 
 
 def task_context(api: cp.GithubApi, cfg: Dict[str, Any], issue_number: int):
@@ -499,12 +788,12 @@ def rendered_body(issue: Dict[str, Any], plan: Dict[str, Any], node: Dict[str, A
 
 
 def dependency_done(api: cp.GithubApi, cfg: Dict[str, Any], plan: Dict[str, Any], node_id: str) -> bool:
-    """DONE: the node's host-pinned delivery PR was merged at its delivered head."""
+    """Downstream readiness, including the product's required post-merge phase."""
     status = host(["materialize-status", "--program", plan["program"], "--node", node_id])
     if status.get("status") != "CREATED" or status.get("repository") != cfg["repository"]:
         return False
-    return merged_delivery(api, pin_of(current_writer(task_rows(cfg, task_id_for(plan["program"], node_id))),
-                                       "DELIVERY"))
+    tid = task_id_for(plan["program"], node_id)
+    return delivery_completion(api, cfg, pin_of(current_writer(task_rows(cfg, tid)), "DELIVERY"), tid)["status"] == "DONE"
 
 
 def pending_dependencies(api: cp.GithubApi, cfg: Dict[str, Any], plan: Dict[str, Any],
@@ -525,20 +814,20 @@ def start(issue_number: int, program: str, node_id: str, plan_commit: str, packe
         raise ProgramError("program node has no CREATED canonical issue matching issue_number")
     # Validate the new plan fully first; the host plan commit advances only right before the
     # envelope is rewritten, so a refused or waiting start never strands a stale body.
-    plan = load_plan(api, cfg, plan_commit)
+    plan = require_current_plan(api, cfg, plan_commit, status["plan_commit"])
     node = plan_node(plan, node_id)
     require_on_default_branch(api, plan_commit)
-    if status["plan_commit"] != plan_commit:
-        require_descendant(api, status["plan_commit"], plan_commit)
     issue = api.issue(issue_number)
     if issue.get("state") != "open" or issue_key(issue) != (program, node_id, status["request"]):
         raise ProgramError("canonical issue is closed or its task key does not match the host record")
     require_single_canonical(api, cfg, program, node_id, issue_number)
     tid = task_id_for(program, node_id)
-    if merged_delivery(api, pin_of(current_writer(task_rows(cfg, tid)), "DELIVERY")):
-        # The pinned delivery is merged at its delivered head: the node is DONE, never redispatched.
+    completion = delivery_completion(api, cfg, pin_of(current_writer(task_rows(cfg, tid)), "DELIVERY"), tid)
+    if completion["status"] != "NOT_MERGED":
+        # Merge is terminal for the writer. Incomplete/failed post-merge
+        # verification holds successors and never restarts the original writer.
         cp.write_github_output("launch_required", "false")
-        return {"status": "DONE", "issue": issue_number}
+        return {**completion, "issue": issue_number}
     pending = pending_dependencies(api, cfg, plan, node)
     if pending:
         cp.write_github_output("launch_required", "false")
@@ -548,6 +837,16 @@ def start(issue_number: int, program: str, node_id: str, plan_commit: str, packe
     if active_rows_for_task(board, cfg["repository"], tid):
         cp.write_github_output("launch_required", "false")
         return {"status": "TASK_ACTIVE", "issue": issue_number}
+    previous_writer = current_writer(task_rows(cfg, tid))
+    terminal_writer = bool(previous_writer) and previous_writer.get("state") == "RECONCILED" \
+        and previous_writer.get("resolution") in cp.TERMINAL_RELEASES
+    if terminal_writer:
+        # Ask before advancing the host plan/body or reserving a lane. The root
+        # bridge validates a proposed approved revision; execution ambiguity is
+        # fenced across revisions, while a semantic User decision is exact-scope.
+        decision = fable_program("decision-status", issue_number, plan_commit=plan_commit)
+        if decision.get("status") != "CLEAR":
+            raise ProgramError("Fable decision is unresolved or USER_REQUIRED; an approved plan revision is required")
     attempt = None
     if record is not None:
         state = record["launch_state"]
@@ -902,6 +1201,32 @@ def latest_check_runs(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [run for _, run in newest.values()]
 
 
+def verification_reasons(api, cfg, head, *, required_checks_key="program_required_checks"):
+    """Exact-head CI predicate; merge/quota use premerge checks by default.
+
+    Post-merge completion explicitly selects the protected postmerge check list.
+    """
+    reasons = []
+    runs = latest_check_runs(all_check_runs(api, head)) if head else []
+    if any(r.get("status") != "completed" or r.get("conclusion") not in ("success", "neutral", "skipped")
+           for r in runs):
+        reasons.append("verification gate: a check run is incomplete or failing on the head")
+    required_checks = cfg.get(required_checks_key)
+    if not isinstance(required_checks, list) or not required_checks \
+            or not all(isinstance(name, str) and name.strip() for name in required_checks):
+        reasons.append(f"verification gate: the product's required checks are not declared ({required_checks_key})")
+    else:
+        for name in required_checks:
+            named = [r for r in runs if r.get("name") == name]
+            if not named or not all(r.get("status") == "completed" and r.get("conclusion") == "success"
+                                    for r in named):
+                reasons.append(f"verification gate: required check {name!r} has not succeeded on the head")
+    combined = api._request("GET", f"/commits/{head}/status") if head else {}
+    if (combined or {}).get("statuses") and (combined or {}).get("state") != "success":
+        reasons.append(f"verification gate: commit statuses are {combined.get('state')}")
+    return reasons
+
+
 def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     """DISPATCH section 18, computed from host pins, the plan and live PR state. Anything not
     computable makes the PR not ready."""
@@ -937,29 +1262,21 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     labels = {label.get("name") for label in issue.get("labels", [])}
     if labels & BLOCKING_LABELS:
         reasons.append(f"unresolved blocker labels: {sorted(labels & BLOCKING_LABELS)}")
-    runs = latest_check_runs(all_check_runs(api, head)) if head else []
-    if any(r.get("status") != "completed" or r.get("conclusion") not in ("success", "neutral", "skipped")
-           for r in runs):
-        reasons.append("verification gate: a check run is incomplete or failing on the head")
-    required_checks = cfg.get("program_required_checks")
-    if not isinstance(required_checks, list) or not required_checks \
-            or not all(isinstance(name, str) and name.strip() for name in required_checks):
-        reasons.append("verification gate: the product's required checks are not declared (program_required_checks)")
-    else:
-        for name in required_checks:
-            named = [r for r in runs if r.get("name") == name]
-            if not named or not all(r.get("status") == "completed" and r.get("conclusion") == "success"
-                                    for r in named):
-                reasons.append(f"verification gate: required check {name!r} has not succeeded on the head")
-    combined = api._request("GET", f"/commits/{head}/status") if head else {}
-    if (combined or {}).get("statuses") and (combined or {}).get("state") != "success":
-        reasons.append(f"verification gate: commit statuses are {combined.get('state')}")
+    try:
+        protected_paths = sorted(path for path in changed_paths(api, pr, pr_number) if program_policy_path(path, plan))
+        if protected_paths:
+            reasons.append(f"program delivery changes plan/policy paths {protected_paths}; "
+                           "a separate User-merged plan/policy PR is required")
+    except ProgramError as exc:
+        reasons.append(str(exc))
+    reasons.extend(verification_reasons(api, cfg, head))
     if any(row.get("role") == "REVIEWER" and row.get("state") in ("SUBMITTING", "CONFIRMED", "UNKNOWN")
            for row in rows):
         reasons.append("a review session of this task is still active or unresolved")
     verdicts = current_verdicts(cfg, tid, rows, writer, head) if delivery is not None and head else []
     floor = effective_floor(node["audit_floor"], verdicts)
-    gate = "ARCHITECTURE" if floor == "A3" else node["astra_gate"]  # DISPATCH section 13 promotion
+    gate = node["astra_gate"] if node["astra_gate"] == "RELEASE" else \
+        "ARCHITECTURE" if floor == "A3" else node["astra_gate"]  # never conceal a release reservation
     needed_depth = min(AUDIT_FLOORS.index(floor), 2)
     owners = writer_lanes(rows)
     passing_lanes, contract_change = set(), False
@@ -973,16 +1290,52 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     if len(passing_lanes) < REQUIRED_REVIEWS[floor]:
         reasons.append(f"{len(passing_lanes)} of {REQUIRED_REVIEWS[floor]} required independent reviews at effective "
                        f"floor {floor} (host-pinned verdicts from distinct non-writer lanes) PASS at this head")
-    if contract_change:
-        reasons.append("a current-head review reports a contract change; Astra/User decision required")
+    if node.get("user_merge") is True:
+        reasons.append("approved plan reserves this node's merge to the User")
+    astra_status, astra_result, scope_result, astra_receipt_hold = "NOT_REQUIRED", None, None, None
+    delegated_astra = node.get("astra_auto_merge") is True and node.get("user_merge") is not True \
+        and node.get("astra_gate") != "RELEASE"
     if gate != "NONE" or floor == "A3":
-        reasons.append(f"Astra gate {gate} is not machine-verifiable here; User merges")
+        if not delegated_astra:
+            astra_status = "USER_REQUIRED"
+            reasons.append(f"Astra gate {gate} is not delegated by this approved plan; User merges")
+        else:
+            try:
+                receipt = fable_program("check", issue_number, pr=pr_number, head=head)
+            except ProgramError as exc:
+                astra_status = "ERROR"
+                reasons.append(str(exc))
+            else:
+                astra_status = receipt.get("status", "ERROR")
+                astra_result, scope_result = receipt.get("result"), receipt.get("scope_result")
+                expected = {"repository": cfg["repository"], "issue": issue_number,
+                            "program": plan["program"], "node": node["id"], "plan_commit": mstatus["plan_commit"],
+                            "task_revision": writer["task_revision"] if writer else None,
+                            "writer_launch": writer["launch_request_id"] if writer else None,
+                            "pr": pr_number, "head": head, "gate": gate, "depth": floor}
+                if not astra_receipt_matches(receipt, expected, gate, floor):
+                    if receipt.get("status") == "POSTED" and receipt.get("contract_change") != "NO":
+                        astra_status = "USER_REQUIRED"
+                        astra_receipt_hold = ("protected Fable receipt does not verify contract_change=NO; "
+                                              "Astra/User decision required")
+                    else:
+                        astra_receipt_hold = "required current-head protected Fable scope audit is missing or not passing"
+                    reasons.append(astra_receipt_hold)
+    elif contract_change:
+        reasons.append("a current-head review reports a contract change; Astra/User decision required")
+    if contract_change:
+        message = "a current-head review reports a contract change; Astra/User decision required"
+        if message not in reasons:
+            reasons.append(message)
     pending = pending_dependencies(api, cfg, plan, node)
     if pending:
         reasons.append(f"dependencies are not DONE: {pending}")
     if cfg.get("program_merge_policy") != "STANDARD":
         reasons.append("project merge prerequisites are not declared machine-computable (program_merge_policy)")
-    return {"ready": not reasons, "head": head, "pr": pr_number, "issue": issue_number, "reasons": reasons}
+    return {"ready": not reasons, "head": head, "pr": pr_number, "issue": issue_number, "reasons": reasons,
+            "astra_status": astra_status, "astra_result": astra_result, "scope_result": scope_result,
+            "astra_audit_allowed": delegated_astra and astra_status in ("MISSING", "BUSY")
+                and not any(reason != astra_receipt_hold for reason in reasons)}
 
 
 def merge(issue_number: int, pr_number: int) -> Dict[str, Any]:
@@ -1010,7 +1363,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("lanes")
-    for name in ("materialize", "start", "review", "finalize-review", "reap", "merge-check", "merge"):
+    for name in ("materialize", "start", "review", "finalize-review", "reap", "merge-check", "merge", "astra-audit", "astra-consult", "quota-readiness", "quota-resume"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--args-json", default="{}")
         cmd.add_argument("--issue-number", type=int)
@@ -1035,6 +1388,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             result = {"state": finalize_review(args.issue_number, args.result, args.launch_request_id)}
         elif args.command == "reap":
             result = reap(args.issue_number, extra.get("launch_request_id", ""), extra.get("evidence", ""))
+        elif args.command == "astra-audit":
+            result = astra_audit(args.issue_number, int(extra.get("pr_number", 0)), extra.get("head", ""))
+        elif args.command == "astra-consult":
+            result = astra_consult(args.issue_number, int(extra.get("question_comment_id", 0)))
+        elif args.command in ("quota-readiness", "quota-resume"):
+            result = quota_operation(args.command, args.issue_number, extra)
         elif args.command == "merge":
             result = merge(args.issue_number, int(extra.get("pr_number", 0)))
         else:

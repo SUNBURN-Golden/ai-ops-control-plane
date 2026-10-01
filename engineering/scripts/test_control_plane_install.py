@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
 import control_plane_install as ci
+import control_plane as cp
 
 SHA = "edbeea2966fea1f574c20c6cf65f9adc84652472"
 OTHER_SHA = "6d543a7c4540f42d099294d9da0679a9548b1817"
@@ -124,6 +126,44 @@ class TestApplyAndVerify(InstallCase):
                       "--pin-path", str(self.pin), "--activation-path", str(self.activation)])
         self.assertEqual(rc, 2)
         self.assertEqual(self.pin.read_text().strip(), OTHER_SHA)
+
+
+class TestProgramSudoersSeparation(unittest.TestCase):
+    """The ordinary install cannot accidentally grant PA-1 runner root access."""
+    source = ci.ROOT / ".github/control-plane/sudoers-aiops-program.example"
+    candidate = ci.ROOT / ".github/control-plane/sudoers-aiops-program-astra.candidate"
+    decision_anchor = "PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md#pa-1-채택-결정--2026-10-01-a-option-c"
+
+    def test_ordinary_install_runner_rules_have_no_root_target(self):
+        text = self.source.read_text(encoding="utf-8").replace("\\\n", " ")
+        runner_rules = [line for line in text.splitlines() if line.startswith("RUNNER_USER ")]
+        self.assertTrue(runner_rules)
+        for rule in runner_rules:
+            match = re.fullmatch(r"RUNNER_USER\s+ALL=\(([^)]*)\)\s+NOPASSWD:.*", rule)
+            self.assertIsNotNone(match, rule)
+            self.assertEqual(match.group(1), "astra-control", rule)
+        self.assertNotIn("/opt/aiops/bin/aiops-fable program", text)
+
+    def test_only_separate_attested_candidate_has_exact_root_command(self):
+        active_lines = [line for line in self.candidate.read_text(encoding="utf-8").splitlines()
+                        if line.strip() and not line.lstrip().startswith("#")]
+        self.assertEqual(active_lines,
+                         ["RUNNER_USER ALL=(root) NOPASSWD: /opt/aiops/bin/aiops-fable program"])
+        self.assertIn(str(self.candidate.relative_to(ci.ROOT)), cp.RUNTIME_PATHS)
+        self.assertIn(str(self.source.relative_to(ci.ROOT)), cp.RUNTIME_PATHS)
+
+    def test_install_and_verification_document_separate_conditional_candidate(self):
+        for path in ("docs/CONTROL_PLANE_RUNTIME.md", "docs/PROGRAM_ASTRA_AUTOMATION.md"):
+            with self.subTest(path=path):
+                text = (ci.ROOT / path).read_text(encoding="utf-8")
+                self.assertIn(str(self.source.relative_to(ci.ROOT)), text)
+                self.assertIn(str(self.candidate.relative_to(ci.ROOT)), text)
+                self.assertIn(self.decision_anchor, text)
+                self.assertIn("/etc/sudoers.d/aiops-program-astra", text)
+                self.assertIn("visudo -cf", text)
+                self.assertIn("PENDING", text)
+                self.assertIn("#47", text)
+                self.assertIn("qualification", text)
 
 
 if __name__ == "__main__":

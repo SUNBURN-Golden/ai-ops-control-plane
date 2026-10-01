@@ -28,6 +28,10 @@ on:
           - reap
           - merge-check
           - merge
+          - astra-audit
+          - astra-consult
+          - quota-readiness
+          - quota-resume
       target_repository:
         description: "Consumer product repository profile (projects.json)"
         required: true
@@ -63,7 +67,7 @@ on:
         required: false
         type: string
       program_args:
-        description: "Program-mode JSON arguments (program, node, plan_commit, slot, launch_request_id, evidence, pr_number)"
+        description: "Program-mode JSON arguments (program, node, plan_commit, slot, launch_request_id, evidence, pr_number, head, question_comment_id)"
         required: false
         type: string
         default: "{}"
@@ -90,7 +94,7 @@ jobs:
   control:
     if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: [self-hosted, astra-control-plane]
-    timeout-minutes: 15
+    timeout-minutes: ${{ inputs.operation == 'quota-resume' && 490 || contains(fromJSON('["astra-audit","astra-consult"]'), inputs.operation) && 245 || 15 }}
     env:
       ASTRA_TARGET_REPOSITORY: ${{ inputs.target_repository }}
       ISSUE_NUMBER: ${{ inputs.issue_number }}
@@ -164,7 +168,7 @@ jobs:
           --result "$RUNNER_TEMP/astra-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-result.json"
 
       - name: Validate program input
-        if: ${{ contains(fromJSON('["start","review","reap","merge-check","merge"]'), inputs.operation) }}
+        if: ${{ contains(fromJSON('["start","review","reap","merge-check","merge","astra-audit","astra-consult","quota-readiness","quota-resume"]'), inputs.operation) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -250,8 +254,32 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
         run: python3 -I engineering/scripts/control_plane_program.py merge --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
 
+      - name: Program Astra audit (protected exact-head scope receipt)
+        if: ${{ inputs.operation == 'astra-audit' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+        run: python3 -I engineering/scripts/control_plane_program.py astra-audit --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+
+      - name: Program Astra consultation (protected canonical decision request)
+        if: ${{ inputs.operation == 'astra-consult' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+        run: python3 -I engineering/scripts/control_plane_program.py astra-consult --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+
+      - name: Program quota readiness (protected evidence only)
+        if: ${{ inputs.operation == 'quota-readiness' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+        run: python3 -I engineering/scripts/control_plane_program.py quota-readiness --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+
+      - name: Program quota resume (one fresh preflight and linked attempt)
+        if: ${{ inputs.operation == 'quota-resume' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ASTRA_CONTROL_GITHUB_TOKEN }}
+        run: python3 -I engineering/scripts/control_plane_program.py quota-resume --issue-number "$ISSUE_NUMBER" --args-json "$PROGRAM_ARGS"
+
       - name: Wake the coordinator (best effort, never changes the outcome)
-        if: ${{ always() && contains(fromJSON('["materialize","start","review","reap","merge"]'), inputs.operation) }}
+        if: ${{ always() && contains(fromJSON('["materialize","start","review","reap","merge","astra-audit","astra-consult","quota-resume"]'), inputs.operation) }}
         continue-on-error: true
         env:
           ROUTINE_TOKEN: ${{ secrets.ASTRA_COORDINATOR_ROUTINE_TOKEN }}
@@ -280,3 +308,4 @@ jobs:
           except Exception as exc:  # best effort: the hourly heartbeat covers a lost wake
               print(f"coordinator wake failed: {type(exc).__name__}")
           PY
+

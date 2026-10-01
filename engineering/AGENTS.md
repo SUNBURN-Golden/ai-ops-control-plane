@@ -34,12 +34,12 @@ pointers.
 | Role | Job | Must not |
 |---|---|---|
 | USER | Final authority: product scope, consequential architecture choice, risk acceptance, merge | Be silently substituted by an agent |
-| ASTRA | Principal Architect / Design Authority; architecture exceptions; explicitly required milestone, architecture and release audits. Held by Claude Fable (M5), run only through `aiops-fable audit` and `aiops-fable consult` | Become the routine ticket manager or default A1/A2 reviewer; implement audit fixes; audit a change it authored or modified; write code or documents; run outside the fixed tool |
+| ASTRA | Principal Architect / Design Authority; architecture exceptions; explicitly required milestone, architecture and release audits. Held by Claude Fable (M5), run through `aiops-fable audit` and `aiops-fable consult`; the protected `aiops-fable program` policy is adopted but its installation/qualification is pending (§13) | Become the routine ticket manager or default A1/A2 reviewer; implement audit fixes; audit a change it authored or modified; write code or documents; run outside the fixed tool |
 | GROK | Optional human-facing command relay to the mechanical control plane; host operator, including running the fixed `aiops-fable` commands (M5) | Engineer, architect, reviewer, semantic router, event bus, polling daemon; edit an Astra prompt, argument meaning or result |
 | BUILDER | One configured autonomous writer: DEVIN, GROK_BUILD, GLM or CURSOR; investigate → implement → test/debug → PR/evidence | Change approved architecture silently; write outside the assigned task/worktree; merge |
 | REVIEWER | Configured non-author read-only reviewer; may be a different builder lane or User-designated external lane | Modify the reviewed change or become a second writer |
 | CHEAP_WORKER | Explicitly authorized mechanical work | Become a second writer on a substantive task |
-| COORDINATOR | Program mode only (Claude Sonnet): follow `docs/COORDINATOR_PLAYBOOK.md`; call fixed operations (materialize, start, review, reap, merge-check, merge); route questions; post progress | Write or review code; judge design; choose a lane (the mechanical layer computes it); create task issues directly; touch the host; merge other than through `operation=merge` (User decision M1) |
+| COORDINATOR | Program mode only (Claude Sonnet): follow `docs/COORDINATOR_PLAYBOOK.md`; call fixed operations (materialize, start, review, reap, merge-check, merge); after separate policy adoption and protected service authorization, call the candidate astra-audit/astra-consult operations; route questions; post progress | Write or review code; judge design or service qualification; choose a lane (the mechanical layer computes it); create task issues directly; touch the host; merge other than through `operation=merge` (User decision M1) |
 | OPUS | Program mode only (Claude Opus): first answerer for DECISION_REQUIRED; may approve a *small design exception* (`docs/PROGRAM_MODE.md` §5) | Author code in the task it rules on; audit a design it drafted; approve anything outside the small-exception definition |
 | MECHANICAL_LAYER | Actor validation, task serialization, builder dispatch, durable control record, event dedupe, gate aggregation, lane selection in the fixed order | Perform semantic engineering or architecture judgment |
 | SLACK | Command/status/decision cockpit | Persistent source of technical truth |
@@ -212,7 +212,10 @@ A task also carries ASTRA_GATE:
 - ARCHITECTURE — Astra performs the architecture gate for the exact task/head;
 - RELEASE — Astra performs the explicitly scoped release gate.
 
-A3 always implies ASTRA_GATE=ARCHITECTURE regardless of a weaker task default.
+A3 requires architecture-depth audit regardless of a weaker task default;
+ordinary gates promote to ARCHITECTURE. A declared RELEASE gate stays RELEASE,
+retains its A3 depth when applicable and remains User-reserved. Promotion never
+erases that release authority.
 
 The writer's TOUCHED_AREAS and CONTRACT_CHANGE_REQUIRED fields are advisory.
 The independent reviewer must inspect the actual diff/evidence and report the
@@ -245,6 +248,13 @@ keeps the Astra → User path below.
 Approved consequential contract must change:
 stop → Astra analysis → User decision → durable GitHub decision/task revision
 → resume.
+
+A current-head review with VERIFIED_CONTRACT_CHANGE_REQUIRED=YES blocks automatic
+merge even when a plan node has `astra_auto_merge=true` and its scope audit passes.
+Record the consequential decision and revise the task through the authorized
+path; a Fable receipt alone cannot settle that decision. RELEASE-gated nodes
+cannot delegate their merge. Check the original declared gate before A3 promotion
+so ARCHITECTURE normalization cannot erase the release reservation.
 
 ## 9. Review and audit results
 
@@ -343,6 +353,36 @@ launch when an owner exists or launch state is UNKNOWN.
 
 ## 13. Merge
 
+User recorded A / restricted Option C policy adoption on 2026-10-01 in
+`docs/PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md`, §“PA-1 채택 결정 — 2026-10-01 (A, Option C)”.
+Existing M1/M4/M5 records remain intact. Program Astra automation
+(`docs/PROGRAM_ASTRA_AUTOMATION.md`) is still a deployment candidate: the F1–F3
+fixes, final #47 exact-HEAD independent re-audit, actual installation and host
+qualification are required before its fixed `astra-audit` and `astra-consult`
+operations or scoped Astra merge delegation become operative. Until then use the
+operational M5 Slack request/operator consultation path. The protected
+service authorization record must bind that adoption to the accepted runtime,
+installed code/config/profile hashes and qualification evidence; missing or
+PENDING authorization refuses direct entry as well as workflow entry.
+
+After adoption, a plan node must explicitly set `astra_auto_merge=true` to
+delegate the executor for its already approved ordinary scope. Its current-head
+protected Fable PASS/PASS_WITH_NOTES and WITHIN_APPROVED_PLAN, all required
+independent reviews and computed verification/product gates remain mandatory.
+`user_merge=true`, a declared RELEASE gate, or any current-head reviewer
+contract-change YES forbids this automatic merge, regardless of the receipt.
+Unspecified flags preserve the User merge requirement for Astra-gated work.
+No User choice outside the approved scope is delegated.
+
+The candidate's runner-root command is a narrow exception requiring its own
+User security-boundary adoption and protected authorization, not a general
+root/shell/Python grant. Admitted ERROR/UNKNOWN requests remain fenced. The
+protected receipt journal and bounded operator terminal-failure reconciler are
+source candidates documented in `docs/PROGRAM_FABLE_RECOVERY.md`. Unproven
+UNKNOWN remains fenced; no generic operator override or PASS is created. They
+are not installed or qualified. End-to-end automation stays NOT_READY until the
+accepted recovery/runtime scope is independently audited and actually qualified. A new plan, HEAD, tool hash or deleted projection is not reconciliation.
+
 Grok never merges.
 A reviewer PASS or required Astra PASS is not a merge command.
 Only User authorizes merge. Program mode decision M1 (User, 2026-09-29) delegates
@@ -409,4 +449,3 @@ task throughput, per-builder cost, Astra usage, Grok usage, User interventions,
 review findings and rework separately; do not claim savings without observations.
 
 ---
-
