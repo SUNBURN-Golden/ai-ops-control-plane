@@ -69,6 +69,7 @@ RUNTIME_PATHS = (
     "adapters/imported/astra-devin-supervisor", "adapters/imported/astra-grok-supervisor",
     "adapters/imported/astra-glm-supervisor", "adapters/imported/SHA256SUMS.supervisors",
     ".github/control-plane/sudoers-aiops-program.example",
+    ".github/control-plane/sudoers-aiops-inspector.example",
     "adapters/cursor/astra-builder-cursor", "adapters/cursor/astra-cursor-adapter",
     "adapters/cursor/astra-cursor-supervisor", "adapters/cursor/SHA256SUMS",
     "scripts/control_plane_boundary.py", "scripts/control_plane_boundary_hook.sh",

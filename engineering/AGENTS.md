@@ -1,7 +1,7 @@
 # AI Engineering Control Plane
 
-NO STANDING ROUTINES (sole exception: the program-mode coordinator, event-triggered plus one hourly heartbeat).
-NO POLLING (the heartbeat recomputes state from GitHub; it does not watch sessions).
+NO STANDING ROUTINES (exceptions: the program-mode coordinator, event-triggered plus one hourly heartbeat; and the read-only program inspector of User decision M7, docs/INSPECTOR.md: one root-owned host loop, at most hourly, never a gate).
+NO POLLING (the heartbeat and the inspector tick recompute state from GitHub and the host ledger; neither watches sessions or reads transcripts).
 NO REASONING WHEN A RULE CAN DECIDE.
 ONE NORMALIZED EVENT → ONE SHORT ACTION → END SESSION.
 
@@ -41,6 +41,7 @@ pointers.
 | CHEAP_WORKER | Explicitly authorized mechanical work | Become a second writer on a substantive task |
 | COORDINATOR | Program mode only (Claude Sonnet): follow `docs/COORDINATOR_PLAYBOOK.md`; call fixed operations (materialize, start, review, reap, merge-check, merge); route questions; post progress | Write or review code; judge design; choose a lane (the mechanical layer computes it); create task issues directly; touch the host; merge other than through `operation=merge` (User decision M1) |
 | OPUS | Program mode only (Claude Opus): first answerer for DECISION_REQUIRED; may approve a *small design exception* (`docs/PROGRAM_MODE.md` §5) | Author code in the task it rules on; audit a design it drafted; approve anything outside the small-exception definition |
+| INSPECTOR | Advisory only (User decision M7, `docs/INSPECTOR.md`): the fixed host tool `aiops-inspect` reports program-mode progress to the User in its own Slack channel and the "AIOPS Program Health" issue. Any change to `scripts/control_plane_inspect*.py`, the inspector sudoers example, the normative sections of `docs/INSPECTOR.md` (§3–§11, §14) or the installed inspector files needs a Fable A3 audit at the exact head and a User merge; grokbot installs only digests listed from a User-merged commit | Merge; dispatch; choose a lane; create or label tasks; comment on task issues or PRs; feed or satisfy any gate; instruct any role; hold a merge or dispatch credential; use paid usage or any model before its stage PR; run any mutating host command |
 | MECHANICAL_LAYER | Actor validation, task serialization, builder dispatch, durable control record, event dedupe, gate aggregation, lane selection in the fixed order | Perform semantic engineering or architecture judgment |
 | SLACK | Command/status/decision cockpit | Persistent source of technical truth |
 | GITHUB | Persistent source of truth and durable control-record projection | Be treated as an atomic lock merely because comments exist |
@@ -111,6 +112,12 @@ Grok may:
 - run `aiops-fable audit` or `aiops-fable consult` with exactly the arguments a
   request names, and relay the result the tool posts, literally (User decision M5).
   Running the tool is not code review by Grok: Grok reads no diff and forms no verdict;
+- install `aiops-inspect` (accounts, files, digests, sudoers, secrets and `/etc/aiops/inspect.json`
+  exactly as `docs/INSPECTOR.md` §12 specifies), change that config or remove the tool only as a
+  User comment in this repository specifies, start it after a host restart, and run its fixed
+  `preflight`, `status`, `start`, `stop` and `resume` commands on the User's instruction, plus
+  `probe` once during installation acceptance (counts and hashes only, `docs/INSPECTOR.md` §13.1)
+  (User decision M7). Grok never runs, relays, reads or summarizes inspector ticks or findings;
 - post one short status or receipt;
 - end the session.
 
@@ -319,6 +326,10 @@ separate GitHub identities, so a lane token can merge or push directly. User
 accepts that residual (`docs/PROGRAM_MODE.md` §13). No gate reads GitHub text
 as authority; gates read host pins, the host-recorded plan and live PR state
 (`docs/PROGRAM_MODE.md` §4.2).
+The inspector's own read-only GitHub token, its ledger token (issues of this repository
+only) and its Slack bot are an inspector-only exception to the single-token decision,
+held by the root tool `aiops-inspect` and never used to dispatch or merge. User decision
+M7 authorizes their standing use by `aiops-inspect` (L3 secrets use, standing, until revoked).
 
 Repo-scoped credentials are preferred over one all-repositories write token.
 
@@ -405,8 +416,9 @@ See `docs/CONTROL_PLANE_RUNTIME.md` (Astra on the host); `docs/ASTRA_SLACK.md` k
 the Slack sender, whose ChatGPT receiver M5 retired.
 
 Keep existing repository-specific review and safety gates. Measure validated
-task throughput, per-builder cost, Astra usage, Grok usage, User interventions,
-review findings and rework separately; do not claim savings without observations.
+task throughput, per-builder cost, Astra usage, Grok usage, inspector usage (ticks,
+cards, degraded/halted counts), User interventions, review findings and rework
+separately; do not claim savings without observations.
 
 ---
 

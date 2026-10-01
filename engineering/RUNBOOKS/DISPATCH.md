@@ -8,6 +8,8 @@ NO POLLING.
 NO BACKGROUND MONITORING.
 NO SECOND SEMANTIC REASONING PASS.
 
+Scope: these rules govern dispatch. The read-only program inspector (AGENTS §2, User decision M7, docs/INSPECTOR.md) is outside this runbook: it never dispatches, gates or instructs, and its output never enters a dispatch, review or merge decision.
+
 ## 1. Project map
 
 Shared source owner: BeautifulMind-JT/ai-ops-control-plane.

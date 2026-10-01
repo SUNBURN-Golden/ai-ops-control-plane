@@ -5,3 +5,9 @@ routines:
     owner: CS
     status: ACTIVE
     notes: Desktop\\CS watched folders; stay quiet if empty
+  - id: program-inspection
+    name: 프로그램 감리
+    schedule: "17 * * * * Asia/Seoul (root loop; T1 only on change; daily line 09:17)"
+    owner: 감리
+    status: CREATED_NOT_VALIDATED
+    notes: machine-only in stage 1; posts only to its own Slack channel and ledger issue

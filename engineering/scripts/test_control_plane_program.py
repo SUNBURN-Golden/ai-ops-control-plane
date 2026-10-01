@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -1136,6 +1137,260 @@ class ProgramModeTests(unittest.TestCase):
             prog.validate_plan(plan([node("n1", deliverable_mode="NON_CODE_EVIDENCE")]), self.cfg)
         a3 = prog.validate_plan(plan([{"id": "a", "title": "t", "spec": "s", "audit_floor": "A3"}]), self.cfg)
         self.assertEqual(a3["nodes"][0]["astra_gate"], "ARCHITECTURE")
+
+
+
+def old_dependency_done(api, cfg, plan_doc, node_id):
+    """dependency_done as it was before the central completion functions (origin/main 7de954f)."""
+    status = prog.host(["materialize-status", "--program", plan_doc["program"], "--node", node_id])
+    if status.get("status") != "CREATED" or status.get("repository") != cfg["repository"]:
+        return False
+    pin = prog.pin_of(prog.current_writer(prog.task_rows(cfg, prog.task_id_for(plan_doc["program"], node_id))),
+                      "DELIVERY")
+    if pin is None:
+        return False
+    pr = api._request("GET", f"/pulls/{pin['pr']}")
+    return pr.get("merged") is True and (pr.get("head") or {}).get("sha") == pin["head"]
+
+
+def released_row(kind="DELIVERY", pr=7, head=HEAD, role="WRITER", lane="DEVIN", **extra):
+    return {"role": role, "lane": lane, "state": "RECONCILED", "resolution": cp.VERIFIED_RELEASE,
+            "pin": {"kind": kind, "pr": pr, "head": head}, **extra}
+
+
+def check_run(name, status="completed", conclusion="success", run_id=1, app=1):
+    return {"id": run_id, "name": name, "status": status, "conclusion": conclusion, "app": {"id": app}}
+
+
+class CompletionEquivalenceTests(unittest.TestCase):
+    """User decision M7: dependency_done now goes through node_completion with identical external behaviour."""
+
+    # Borrow the program-mode fixtures (fake GitHub, real host ledger) without re-running their tests.
+    setUp = ProgramModeTests.setUp
+    fake_api, file, record = ProgramModeTests.fake_api, ProgramModeTests.file, ProgramModeTests.record
+    materialized, launch_writer = ProgramModeTests.materialized, ProgramModeTests.launch_writer
+    pr, deliver, released_writer = ProgramModeTests.pr, ProgramModeTests.deliver, ProgramModeTests.released_writer
+    rows = ProgramModeTests.rows
+
+    def compare(self, node_id, cfg=None, expected=None):
+        cfg = cfg or self.cfg
+        plan_doc = {"program": "zari"}
+        results, calls = [], []
+        for function in (old_dependency_done, prog.dependency_done):
+            log = []
+            real_request, real_host = self.gh._request, self.host
+
+            def request(method, path, payload=None, log=log, real=real_request):
+                log.append(("github", method, path))
+                return real(method, path, payload)
+
+            def host_call(arguments, document=None, log=log, real=real_host):
+                log.append(("host", tuple(arguments)))
+                return real(arguments, document)
+
+            with patch.object(self.gh, "_request", side_effect=request), patch.object(cp, "host_call", host_call):
+                results.append(function(self.gh, cfg, plan_doc, node_id))
+            calls.append(log)
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(calls[0], calls[1])
+        if expected is not None:
+            self.assertIs(results[1], expected)
+        return calls[1]
+
+    def test_not_materialized_node_reads_only_the_materialization(self):
+        calls = self.compare("n1", expected=False)
+        self.assertEqual(calls, [("host", ("materialize-status", "--program", "zari", "--node", "n1"))])
+
+    def test_materialized_node_without_writer(self):
+        self.materialized()
+        calls = self.compare("n1", expected=False)
+        self.assertEqual([c[0] for c in calls], ["host", "host"])  # no PR fetch without a pin
+
+    def test_writer_in_progress(self):
+        issue = self.materialized()
+        self.launch_writer(issue)
+        calls = self.compare("n1", expected=False)
+        self.assertNotIn("github", [c[0] for c in calls])
+
+    def test_delivered_not_merged(self):
+        self.released_writer()
+        calls = self.compare("n1", expected=False)
+        self.assertEqual([c for c in calls if c[0] == "github"], [("github", "GET", "/pulls/7")])
+
+    def test_delivered_and_merged_at_the_head_is_done(self):
+        self.released_writer()
+        self.gh.pulls[7].update(merged=True, state="closed")
+        calls = self.compare("n1", expected=True)
+        self.assertEqual([c for c in calls if c[0] == "github"], [("github", "GET", "/pulls/7")])
+
+    def test_merged_at_another_head_is_not_done(self):
+        self.released_writer()
+        self.gh.pulls[7].update(merged=True, state="closed",
+                                head={"sha": "b" * 40, "ref": "astra/zari-n1", "repo": {"full_name": REPO}})
+        self.compare("n1", expected=False)
+
+    def test_other_repository_returns_false_without_task_status(self):
+        self.released_writer()
+        self.gh.pulls[7].update(merged=True, state="closed")
+        calls = self.compare("n1", cfg={**self.cfg, "repository": "BeautifulMind-JT/other"}, expected=False)
+        self.assertEqual(calls, [("host", ("materialize-status", "--program", "zari", "--node", "n1"))])
+
+    def test_merged_delivery_keeps_one_get(self):
+        _, writer = self.released_writer()
+        pin = prog.pin_of(prog.current_writer(self.rows()), "DELIVERY")
+        self.gh.pulls[7].update(merged=True, state="closed")
+        with patch.object(self.gh, "_request", wraps=self.gh._request) as request:
+            self.assertTrue(prog.merged_delivery(self.gh, pin))
+            self.assertFalse(prog.merged_delivery(self.gh, None))
+        self.assertEqual([c.args for c in request.call_args_list], [("GET", "/pulls/7")])
+
+    def test_node_completion_on_real_ledger_rows(self):
+        self.assertEqual(prog.node_completion(self.host.ledger.materialize_status("zari", "n1"), REPO, None,
+                                              None)["stage"], "PLANNED")
+        issue = self.materialized()
+        mstatus = self.host.ledger.materialize_status("zari", "n1")
+        self.assertEqual(prog.node_completion(mstatus, REPO, self.rows(), None)["stage"], "NOT_STARTED")
+        self.launch_writer(issue)
+        self.assertEqual(prog.node_completion(mstatus, REPO, self.rows(), None)["stage"], "IN_PROGRESS")
+        prog.reap(issue, prog.current_writer(self.rows())["launch_request_id"],
+                  self.deliver(issue, {"packet": json.loads(self.file("packet.json").read_text())}))
+        pr = self.gh.pulls[7]
+        delivered = prog.node_completion(mstatus, REPO, self.rows(), pr, ["offline"])
+        self.assertEqual((delivered["stage"], delivered["merge_checks"]), ("DELIVERED", "N/A"))
+        self.assertEqual(delivered["delivery"], {"kind": "DELIVERY", "pr": 7, "head": HEAD})
+        pr = {**pr, "merged": True, "state": "closed"}
+        done = prog.node_completion(mstatus, REPO, self.rows(), pr, ["offline"], [check_run("offline")])
+        self.assertEqual((done["stage"], done["done"], done["merge_checks"]), ("DONE", True, "PASS"))
+
+
+class NodeCompletionTests(unittest.TestCase):
+    CREATED = {"status": "CREATED", "repository": REPO, "issue": 12}
+    MERGED = {"merged": True, "state": "closed", "head": {"sha": HEAD}}
+
+    def stage(self, mstatus, rows=None, pr=None, repository=REPO):
+        return prog.node_completion(mstatus, repository, rows, pr)["stage"]
+
+    def test_stage_constants(self):
+        self.assertEqual(prog.COMPLETION_STAGES,
+                         ("PLANNED", "MATERIALIZING", "NOT_STARTED", "IN_PROGRESS", "DELIVERED", "DONE"))
+        self.assertEqual(prog.POST_MERGE_NOT_RECORDED, "NOT_RECORDED")
+
+    def test_every_stage(self):
+        writer = {"role": "WRITER", "lane": "DEVIN", "state": "CONFIRMED"}
+        cases = [
+            ("PLANNED", None, None, None),
+            ("PLANNED", {"status": "NOT_FOUND"}, None, None),
+            ("MATERIALIZING", {"status": "SUBMITTING", "repository": REPO}, None, None),
+            ("MATERIALIZING", {"status": "UNKNOWN", "repository": REPO}, None, None),
+            ("MATERIALIZING", {**self.CREATED, "repository": "BeautifulMind-JT/other"}, [released_row()], self.MERGED),
+            ("NOT_STARTED", self.CREATED, None, None),
+            ("NOT_STARTED", self.CREATED, [], None),
+            ("NOT_STARTED", self.CREATED, [{"role": "WRITER", "lane": "DEVIN", "state": "FAILED_PRESTART"}], None),
+            ("NOT_STARTED", self.CREATED, [released_row(kind="REVIEW", role="REVIEWER")], None),
+            ("IN_PROGRESS", self.CREATED, [writer], None),
+            ("IN_PROGRESS", self.CREATED, [released_row(), writer], self.MERGED),  # a newer attempt owns the task
+            ("IN_PROGRESS", self.CREATED, [released_row(kind="BLOCKED")], None),
+            ("DELIVERED", self.CREATED, [released_row()], None),
+            ("DELIVERED", self.CREATED, [released_row()], {"merged": False, "head": {"sha": HEAD}}),
+            ("DELIVERED", self.CREATED, [released_row()], {"merged": True, "head": {"sha": "b" * 40}}),
+            ("DELIVERED", self.CREATED, [released_row()], {"merged": "true", "head": {"sha": HEAD}}),
+            ("DONE", self.CREATED, [released_row()], self.MERGED),
+            ("DONE", self.CREATED, [writer, released_row()], self.MERGED),
+        ]
+        for expected, mstatus, rows, pr in cases:
+            with self.subTest(expected=expected, mstatus=mstatus, rows=rows, pr=pr):
+                self.assertEqual(self.stage(mstatus, rows, pr), expected)
+                self.assertIn(expected, prog.COMPLETION_STAGES)
+
+    def test_output_shape(self):
+        done = prog.node_completion(self.CREATED, REPO, [released_row()], self.MERGED)
+        self.assertEqual(done, {"stage": "DONE", "done": True, "delivery": {"kind": "DELIVERY", "pr": 7, "head": HEAD},
+                                "merge_checks": "NOT_CONFIGURED", "deployed": "NOT_RECORDED",
+                                "verified": "NOT_RECORDED"})
+        planned = prog.node_completion(None, REPO, None, None, ["ci"])
+        self.assertEqual((planned["done"], planned["delivery"], planned["merge_checks"]), (False, None, "N/A"))
+
+    def test_merge_checks_only_for_done_with_runs(self):
+        runs = [check_run("ci", conclusion="failure")]
+        done = prog.node_completion(self.CREATED, REPO, [released_row()], self.MERGED, ["ci"], runs)
+        self.assertEqual(done["merge_checks"], "FAIL")
+        self.assertEqual(prog.node_completion(self.CREATED, REPO, [released_row()], self.MERGED, ["ci"])
+                         ["merge_checks"], "N/A")  # DONE but runs not collected
+        self.assertEqual(prog.node_completion(self.CREATED, REPO, [released_row()], None, ["ci"], runs)
+                         ["merge_checks"], "N/A")  # not DONE
+        self.assertEqual(prog.node_completion(self.CREATED, REPO, [released_row()], self.MERGED, (), runs)
+                         ["merge_checks"], "NOT_CONFIGURED")
+        self.assertEqual(prog.node_completion(self.CREATED, REPO, [released_row()], None, iter(["ci"]))
+                         ["merge_checks"], "N/A")  # a one-shot iterable is read once
+
+    def test_delivery_merged(self):
+        pin = {"kind": "DELIVERY", "pr": 7, "head": HEAD}
+        self.assertTrue(prog.delivery_merged(pin, self.MERGED))
+        for bad_pin, pr in ((None, self.MERGED), (pin, None), (pin, {"merged": True}),
+                            (pin, {"merged": False, "head": {"sha": HEAD}}),
+                            ({"kind": "DELIVERY", "pr": 7}, {"merged": True, "head": {}}),
+                            ({"kind": "DELIVERY", "pr": 7, "head": None}, {"merged": True, "head": {"sha": None}}),
+                            (pin, {"merged": True, "head": "garbage"}), ("pin", self.MERGED), (pin, [])):
+            with self.subTest(pin=bad_pin, pr=pr):
+                self.assertFalse(prog.delivery_merged(bad_pin, pr))
+
+    def test_the_module_imports_without_environment(self):
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("GITHUB_", "ASTRA_", "AIOPS_"))}
+        done = subprocess.run([sys.executable, "-c", "import control_plane_program as p; print(p.COMPLETION_STAGES[-1])"],
+                              cwd=Path(prog.__file__).parent, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, "DONE"), done.stderr)
+
+
+class RequiredChecksStateTests(unittest.TestCase):
+    def state(self, required, runs):
+        return prog.required_checks_state(required, runs)
+
+    def test_not_configured(self):
+        for required in ([], (), None, "ci", [""], ["  "], [3], ["ci", None]):
+            with self.subTest(required=required):
+                self.assertEqual(self.state(required, [check_run("ci")]), "NOT_CONFIGURED")
+
+    def test_pass(self):
+        self.assertEqual(self.state(["ci"], [check_run("ci")]), "PASS")
+        self.assertEqual(self.state(("ci", "lint"), [check_run("lint", run_id=2), check_run("ci", run_id=3),
+                                                     check_run("other", conclusion="failure", run_id=4)]), "PASS")
+
+    def test_missing_name_is_pending(self):
+        self.assertEqual(self.state(["ci", "lint"], [check_run("ci")]), "PENDING")
+
+    def test_empty_run_list_is_pending(self):
+        self.assertEqual(self.state(["ci"], []), "PENDING")
+        self.assertEqual(self.state(["ci"], None), "PENDING")
+
+    def test_incomplete_run_is_pending(self):
+        self.assertEqual(self.state(["ci"], [check_run("ci", status="in_progress", conclusion=None)]), "PENDING")
+        self.assertEqual(self.state(["ci"], [check_run("ci", status="queued", conclusion=None)]), "PENDING")
+
+    def test_failure(self):
+        for conclusion in ("failure", "cancelled", "timed_out", "neutral", "skipped", "action_required", None):
+            with self.subTest(conclusion=conclusion):
+                self.assertEqual(self.state(["ci"], [check_run("ci", conclusion=conclusion)]), "FAIL")
+
+    def test_failure_beats_pending(self):
+        runs = [check_run("ci", conclusion="failure"), check_run("lint", status="in_progress", conclusion=None, run_id=2)]
+        self.assertEqual(self.state(["ci", "lint", "missing"], runs), "FAIL")
+
+    def test_newest_run_wins(self):
+        failed_then_passed = [check_run("ci", conclusion="failure", run_id=5), check_run("ci", run_id=9)]
+        self.assertEqual(self.state(["ci"], failed_then_passed), "PASS")
+        passed_then_rerun = [check_run("ci", run_id=9), check_run("ci", status="in_progress", conclusion=None, run_id=5),
+                             check_run("ci", status="in_progress", conclusion=None, run_id=12)]
+        self.assertEqual(self.state(["ci"], passed_then_rerun), "PENDING")
+        passed_then_failed = [check_run("ci", run_id=3), check_run("ci", conclusion="failure", run_id=4)]
+        self.assertEqual(self.state(["ci"], passed_then_failed), "FAIL")
+
+    def test_same_name_from_two_apps_must_both_pass(self):
+        runs = [check_run("ci", app=1), check_run("ci", conclusion="failure", app=2, run_id=2)]
+        self.assertEqual(self.state(["ci"], runs), "FAIL")
+
+    def test_non_dict_runs_are_ignored(self):
+        self.assertEqual(self.state(["ci"], ["x", None, check_run("ci")]), "PASS")
 
 
 class SudoersExampleTests(unittest.TestCase):

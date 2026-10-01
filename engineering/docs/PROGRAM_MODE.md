@@ -3,8 +3,8 @@
 v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. v2는 v1(`52ad415`) 재검토에서 남은 F4(불명 생성 요청)와 구현 확인 항목 2개를 반영하고, 호스트 조사 결과(§15)를 더했다. 대응표는 §14에 있다.
 
 상태: **설계 초안**. 코드, 호스트, 활성화 기록은 바꾸지 않는다. 이 문서는
-`RUNTIME_PATHS`에 들어 있지 않다. 구현 전에 Astra A3 설계 감사와 User 승인이
-필요하다. 아래 §10의 규칙 변경은 구현 PR에서 반영하고, 그 PR도 별도로 감사한다.
+`RUNTIME_PATHS`에 들어 있다(`control_plane.py`). 그래서 이 문서를 바꾸려면 Astra A3 감사와
+활성화 재결합(rebind)이 필요하다. 아래 §10의 규칙 변경은 구현 PR에서 반영하고, 그 PR도 별도로 감사한다.
 
 목표: User가 "청사진대로 개발 시작"이라고 한 번 지시하면, 등록된 모든 제품이
 승인된 계획의 끝까지 진행되게 한다. 설계 결정, 화면 승인, 출시처럼 User만 할
@@ -46,6 +46,24 @@ v1은 v0(`892b189`)에 대한 Astra A3 FAIL(F1~F5)을 반영했다. v2는 v1(`52
   4. 현장 소장이 판정 결과를 텍스트로 주장해서는 병합할 수 없다(§18: "computed, never accepted as arbitrary text").
 
 **결정 M6 (User, 2026-09-30): CURSOR를 지금 켠다.** 네 제품(kix-protocol, ZARI, film, kix-commerce-apps)의 `enabled_builders`에 CURSOR를 더한다. `BUILDER_LANES.md`의 CURSOR 인수 4~7단계(격리 증명, 레인 자격 판정, adapter 독립 검토, 진단 canary)는 하지 않고, 그 위험을 User가 감수한다. 첫 CURSOR 작업이 canary가 된다. 마음결은 그대로 DEVIN만 쓴다.
+
+**결정 M7 (User, 2026-09-30): 독립된 읽기 전용 프로그램 감리를 둔다.** 세션: https://claude.ai/code/session_01R56yQzeU25A4nsAmRZJw7z
+- User 원문(그대로 옮김):
+  - "감리 실행은 grokbot computer 에서 제일 토큰 안드는 방향으로 코덱스건 터미널이건 뭐 그런 하네스는 걍 그록봇 토큰 가장 안들어가는걸 골라서 진행하라고 하면 되고, 읽기전용 자문으로 하고 월한도는 지금 구독하는 chatGPT 서비스에서 단 1원도 추가비용이 안나오는 선에서"
+  - "유저 점검명령은 따로 없이 하고 싶음."
+  - "그림을 직접 만들어야지 사람이 보고 아 이렇게 진행되고 있구나 체크하는거 아니니?"
+  - "전부 알아서 해" (남은 선택을 위임했다: 단계 조건, 전용 토큰과 Slack 봇, 원장 읽기 계정, 채널 이름. `INSPECTOR.md`에 적은 권장 기본값을 따른다.)
+- **권한:** 읽기 전용 자문이다. 게이트가 아니다. 발송, 병합, 레인 선택, 리뷰, 감사의 어떤 판단에도 들어가지 않는다(`AGENTS.md` §2 INSPECTOR, `docs/INSPECTOR.md`).
+- **단계:**
+  - 1단계는 기계 감리다(이 PR). 모델을 쓰지 않는다.
+  - 2단계 모델 자문과 3단계 모델 그림 코드는 각각 별도 PR과 조건 뒤에만 켠다.
+  - 조건: 설치된 버전에서 모델 도구가 아예 없음을 확인한다. 추가 과금 차단을 기계로 확인할 수 없으면 모델을 켜지 않는다. 그림 코드는 격리를 증명한 뒤에 쓰는 선택 기능이다.
+- **실행:** 그록봇 컴퓨터의 root 고정 도구 `aiops-inspect`가 매시간 한 번 돈다. 그록봇 토큰은 쓰지 않는다(0). User 점검 명령은 없다.
+- **완료 기준:** 중앙 함수 하나(`control_plane_program.node_completion`)만 쓴다. 감리가 따로 계산하지 않는다. 배포와 실사용 검증은 중앙 기록이 생길 때까지 "기록 없음"으로 보인다.
+- **게시 불명:** 게시 결과를 알 수 없으면 UNKNOWN으로 적고, 같은 내용을 다시 올리지 않는다.
+- **자격 증명:** 감리 전용 GitHub 읽기 토큰, 기록 토큰(이 저장소의 원장 이슈만), Slack 봇을 둔다. 단일 토큰 결정의 감리 한정 예외다. `aiops-inspect`의 상시 사용을 승인한다(`AGENTS.md` §11).
+- **철회:** User가 멈추라고 하면 그록봇이 `aiops-inspect stop`을 실행한다. 감리 토큰 2개와 Slack 봇 토큰을 폐기하고, 이 결정은 되돌리는 PR로 거둔다.
+- 남는 위험은 §13 "감리 (M7)"에 적는다.
 
 **결정 M5 (User, 2026-09-30): 설계 권한과 감사(Astra)를 Claude Fable로 바꾸고, 그록봇이 실행한다.**
 - Astra 역할은 그대로 두고, 맡는 모델만 ChatGPT에서 Claude Fable(`claude-fable-5-1`)로 바꾼다.
@@ -334,7 +352,7 @@ adapter의 `status.json`은 참고용이다.
 - 기록이 `SUBMITTING`이나 `UNKNOWN`이어도 host가 그 요청을 `FAILED_PRESTART`나 `RECONCILED`로 막아 둔 상태라면, `start`는 새 attempt로 재개한다.
 - **의존 노드**
   - `start`와 merge-check은 `depends_on` 노드가 DONE인지 기계적으로 확인한다.
-  - DONE은 그 노드에 고정된 전달 PR이 전달된 head 그대로 병합된 경우다. PR이 없는 노드는 이슈가 completed로 닫힌 경우다.
+  - DONE은 중앙 함수 `control_plane_program.node_completion`이 정한다: 그 노드에 고정된 전달 PR이 전달된 head 그대로 병합된 경우뿐이다. PR이 없는 노드는 이슈가 completed로 닫혀도 DONE이 아니다(`COORDINATOR_PLAYBOOK.md` §3 행 1b, 운영자 확인).
 
 **host `reap --launch-request-id <id> --evidence <URL> [--pin-stdin]`** (서명 줄은 stdin의 `{"pin": "<line>"}`)
 - runner가 sudo로 호출할 수 있는 새 명령이다. 인수 형식은 status와 같이 제한한다.
@@ -581,7 +599,7 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
   - 레인 프로세스는 helper의 launch에서 시작된다.
   - 앞의 두 가지는 reap마다 확인하고, 맞지 않으면 거부한다. 세 번째는 supervisor 가져오기(P3)에서 확인한다.
   - subuid/subgid는 `/etc/subuid`와 `/etc/subgid`만 읽는다. NSS나 libsubid로 범위를 주는 호스트라면 그 설정이 없음을 P3에서 확인한다.
-  - 레인 UID로 cron, at 같은 예약 실행이 없어야 한다(P3 확인). helper의 트리 밖에서 시작된 프로세스라도 helper와 같은 namespace라면 보이지만, 레인이 예약을 걸 수 없어야 운영 전제가 성립한다.
+  - 레인 UID로 cron, at 같은 예약 실행이 없어야 한다(P3 확인). helper의 트리 밖에서 시작된 프로세스라도 helper와 같은 namespace라면 보이지만, 레인이 예약을 걸 수 없어야 운영 전제가 성립한다. 감리 계정(aiops-inspect-ledger, aiops-plot)은 레인이 아니며 builder_uids에 없다. 감리의 예약 실행은 root 루프 하나다(M7).
 - **동시성 상향:** 동시 세션이 1개에서 4개로 늘어, 실패도 동시에 여러 건 날 수 있다. ledger, boundary, 제품별 직렬화는 그대로 유지한다.
 - **Routine API와 실행 한도:** API는 실험 기능이다. 사건 유실이나 실행 거절이 생길 수 있어 지연을 보장하지 않는다(§8.1). 상태 기반 실행과 STALE 표시로 안전하게 멈추게 한다.
 - **스스로 끝나지 않는 세션:** 그 레인만 막힌다(§3.3). 운영자가 처리한다.
@@ -595,6 +613,13 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
   - **도구 변경:** `aiops-fable`을 바꾸면 그 변경도 감사받는다. 도구 파일은 `RUNTIME_PATHS`에 있어서 활성화 재결합이 필요하다.
   - **대체 모델 없음:** Fable을 쓸 수 없으면 감사는 기다린다. 다른 모델로 바꾸지 않는다(`AGENTS.md` §12). 거절 시 자동 전환도 끄고, 결과에 다른 모델이 섞이면 올리지 않는다.
   - **추가 과금:** 도구는 Claude가 "초과 사용 막힘"이라고 알릴 때만 실행을 이어 간다. 계정의 추가 사용량(usage credits)과 자동 충전은 User가 claude.ai 설정에서 끈다. 이것이 꺼져 있어야 현장 소장 Routine을 설정한다.
+- **감리 (M7):** User가 감수한다(2026-09-30).
+  - **감리 전용 자격 증명:** 읽기 토큰, 원장 기록 토큰, Slack 봇 토큰이 root 소유 파일(0600)로 호스트에 있다. 새면 여섯 저장소 읽기, 이 저장소 모든 이슈의 댓글과 수정, 봇 이름으로 봇이 들어간 채널과 워크스페이스 구성원의 앱 DM에 게시, 봇 자신의 글 수정·삭제가 가능하다. 발송·병합 권한은 없다.
+  - **GitHub 글 기반 신호는 위조될 수 있다(M4 단일 토큰):** 라벨, 이슈 닫힘 이유, 댓글은 같은 토큰으로 바꿀 수 있다. 이런 신호는 "GitHub 글 기준"으로 표시하고 주의(WATCH)까지만 올린다.
+  - **감리가 틀리거나 멈출 수 있다:** 자문일 뿐 게이트가 아니므로 제품 진행은 막지 않는다. 멈추면 하트비트와 장애 경보(dead-man)로 User에게 보인다.
+  - **읽기 권한의 경계는 sudoers 파일이다:** helper는 빌더·control·runner가 아닌 호출자를 모든 동사에 허용한다. 감리 계정을 읽기 3개로 묶는 것은 `sudoers-aiops-inspector.example`이다.
+  - **배포·실사용 검증:** 중앙 기록이 없어 "기록 없음"으로만 보인다. 완료는 병합까지만 뜻한다.
+  - **도구 변경:** 감리 도구를 바꾸면 Fable A3 감사와 User 병합이 필요하다. 그록봇은 User가 병합한 커밋의 digest만 설치한다.
 
 ## 14. v0 A3 감사(FAIL) 대응
 
