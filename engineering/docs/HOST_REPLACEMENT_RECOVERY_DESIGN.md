@@ -3,9 +3,19 @@
 Status: **DRAFT / NOT_ADOPTED / NOT_READY**. This is a builder-authored proposal,
 not an Astra verdict, a new host authorization, or an installation instruction.
 
+Repository-relative paths in this document are relative to `engineering/`.
+Paths beginning with `/` are literal host paths. Links to upstream evidence pin
+an inspected commit; they do not authorize adopting that commit.
+
 ## 1. User-selected outcome and scope
 
-On 2026-10-01 the User selected these four outcomes in the current conversation:
+The User's direction selection is recorded in
+[HR-D1](HOST_REPLACEMENT_RECOVERY_DECISION_KO.md#hr-d1--2026-10-01).
+Its source is the User's 2026-10-01 13:55:08 KST message in this ChatGPT thread,
+quoting the four requirements and answering 「이게 좋을듯」. HR-D1 records scope;
+it is not cryptographic actor proof or a protected deployment grant.
+
+The selected outcomes are:
 
 1. Keep installation steps in code and reproduce the approved version and hashes.
 2. Before an AIOPS command, check installation, restore missing components,
@@ -30,8 +40,9 @@ Its `docs/CONTROL_PLANE_RUNTIME.md` already forbids rebuilding a lost ledger emp
 Its installer `scripts/control_plane_install.py` is a **disabled-install** tool;
 it is not an active-host recovery installer and must not be silently repurposed.
 
-The pending program recovery candidate inspected is PR #47 at
-`15f7fe67726c04efd5a6d289ef985041f40c511a`, based on the pending #44–#46 stack.
+The pending program recovery candidate inspected is
+[PR #47](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/47) at
+`754fae0136fdb1237bc863f026d7303de531dae0`, based on the pending #44–#46 stack.
 Its `docs/PROGRAM_FABLE_RECOVERY.md`, section "Durable host state and migration",
 requires all journals, receipts, quota claims, run archives, host ledger and
 service authorization to survive restart. Neither that PR nor this proposal is
@@ -52,9 +63,13 @@ each SQLite/journal write before an abrupt replacement. A same-overlay `findmnt`
 result also cannot by itself establish which paths the platform restores.
 
 Host qualification must prove the actual backing and restore behavior. If that
-cannot satisfy section 4, keep the host NOT_READY. This proposal does not waive
-#47's "reboot-resetting VM is unsuitable" rule: retained, protected, current
-canonical state is the prerequisite for qualifying a replacement-capable VM.
+cannot satisfy section 4, keep the host NOT_READY. The inspected upstream
+[durability rule](https://github.com/BeautifulMind-JT/ai-ops-control-plane/blob/754fae0136fdb1237bc863f026d7303de531dae0/engineering/docs/PROGRAM_FABLE_RECOVERY.md#durable-host-state-and-migration)
+states: "A reboot-resetting Grok VM is not a suitable program-mode host."
+That prohibition remains in force. This draft does not reinterpret it as a
+conditional deployment permission. A future exception or a determination that
+a particular host is outside that prohibited class requires independent Astra
+analysis, actual storage/restore evidence and an explicit User decision.
 
 ## 3. Installation manifest and bootstrap trust
 
@@ -88,6 +103,24 @@ staging directory, reject links/special files and path traversal, and atomically
 install. Hash-check-then-reopen is not adequate against a replacement race.
 No `curl | sh`, `latest`, package auto-update, new CLI/model fallback, general shell
 sudo rule or caller-selected destination is introduced.
+
+### Privileged executor and cold-start limit
+
+Only the **User-designated host operator**, using already authorized host
+installation privileges, may restore root-owned files, accounts and mounts.
+The runner, coordinator, auditor and builder lanes do not become installers.
+The operator invokes an accepted fixed recovery helper from its root-protected
+installed location, with fixed arguments and verified input descriptors.
+
+If replacement also removed that helper or its approved privilege route, there
+is no automatic root bootstrap under the present authority. The operator must
+perform a separately authorized trusted initial installation through the
+existing host installation procedure; the workspace cache is not executable
+root authority. Platform availability of `sudo` alone supplies no deployment
+approval. Missing operator authority returns `PRIVILEGED_EXECUTOR_UNAVAILABLE`
+and admits no model or task. HR-D1 does not grant new sudo rules or a platform hook.
+An unattended cold-start executor remains an A3/User decision, not an assumed
+feature of this on-command design. No standing daemon is added to bridge the gap.
 
 Missing artifacts may be restored. Existing files with different bytes, modes,
 principals or approval bindings are drift and block, rather than being silently
@@ -165,7 +198,31 @@ Old-host death, fencing of every potential sender and external provider session
 status must be accounted for. Hostname changes, local PID absence, a reused PID,
 timeout, GitHub issue closure or a new VM are not sufficient terminal evidence.
 Retain unresolved prior admissions/owners; do not infer that remote sessions died
-when the old guest disappeared. Existing reconciliation permissions still apply.
+when the old guest disappeared.
+
+### Replacement and rollback invalidate legacy release evidence
+
+At inspected main, `scripts/control_plane_host.py` method `Ledger.reap` validates
+the CONFIRMED reservation, terminal evidence and applicable signed pin, and then
+uses `lane_quiescence` on the current host before writing
+`RECONCILED/SESSION_TERMINAL_VERIFIED`. It is not an absence-of-processes-only
+check, but its local census does not establish old-host or remote-session
+termination after replacement. Even a valid retained delivery pin does not do so.
+
+For an old, changed or unverified host epoch, **block legacy `reap` and every
+release/reconciliation path**, including operator `reconcile`, program terminal
+settlement and quota-child settlement. Do not carry their old release
+preconditions into a new epoch. Existing actor roles are retained, but their
+old permission is not sufficient cross-instance release authority. No automatic
+release, new admission or retry follows from local quiescence on the new guest.
+
+A future replacement-aware reconciliation must bind the original request,
+session/owner, old and new epochs, current complete state, independently verified
+provider terminal/cancellation evidence, and fencing of every old sender. Its
+mechanism and operator grant need their own accepted A3/User decision. Until
+they exist, cross-instance holds remain even if a legacy operator command would
+otherwise succeed. Absence of a qualified release path means NOT_READY; this
+draft changes no installed helper and therefore provides no runtime enforcement.
 
 ## 6. On-command guard and outcomes
 
@@ -175,6 +232,11 @@ is bypassable: the installed fixed helpers must reject calls without a current
 qualified recovery generation/epoch. Read-only diagnostics remain available.
 Recovery adds no alternate dispatch route: execution still follows the approved
 workflow serialization and route fence in `CONTROL_PLANE_RUNTIME.md`.
+
+The replacement hold must also apply before any legacy release command; section
+5's restriction is a required change, not an assertion that current main already
+enforces host epochs. Complete entrypoint coverage, including runner-originated
+calls, remains to be demonstrated in the implementation/A3 review.
 
 | Step | Required behavior |
 | --- | --- |
@@ -251,6 +313,9 @@ for this documentation proposal.
 | T16 | Pending/unmerged #47, old audit, changed hash or activation | Reject; no install-latest or carried-over approval |
 | T17 | Recovery-only command without operation authorization | No model, launch, retry, merge or enable |
 | T18 | Actual stopped canary through normal platform replacement | Whole state inventory, generations, owners, limits, consumed claims and bindings survive; no test/provider launch caused by recovery |
+| T19 | Retained CONFIRMED request and valid terminal pin; new guest has no lane processes | Legacy `reap` blocked across old/unverified epoch; reservation retained |
+| T20 | Operator invokes legacy reconcile/settlement after replacement or rollback | Old actor permission alone cannot release; replacement-aware evidence/authority required |
+| T21 | Cold replacement removed root helper/privilege route | `PRIVILEGED_EXECUTOR_UNAVAILABLE`; operator handoff, no workspace sudo/bootstrap fallback |
 
 Synthetic fixtures cannot establish T18, real provider billing, actual Unix
 isolation or platform snapshot durability. Record actual qualification evidence
@@ -262,7 +327,9 @@ three-hour audit just to test recovery.
 First perform HR-01 read-only feasibility work. Keep this proposal DRAFT until
 the protected durable backing, authenticated bootstrap anchor, independent
 freshness witness and epoch handoff have a concrete reviewed implementation.
-No storage scheme earns READY merely because `/workspace` usually retains files.
+No storage scheme earns READY merely because platform files are designed to
+survive normal updates and recovery. That design intent is not measured
+durability, protected ownership, freshness or a guarantee against snapshot loss.
 
 The reported Grok instance already lost its `/opt`, `/etc`, accounts and
 `/var/lib` installation/state. This proposal cannot retroactively recover data
@@ -281,3 +348,27 @@ senders; it never rolls the canonical ledger back to a convenient older backup.
 
 This draft changes no runtime code, activation, host pin, sudoers, account,
 secret, billing setting, provider session, product repository or KIX CI.
+
+## 10. Open adoption questions and incomplete review follow-up
+
+The User supplied an unfinished intermediate review. It is not a final review
+or an independent exact-HEAD Astra verdict. The following questions remain open;
+the clarifications above do not claim to resolve their mechanisms:
+
+- Old-host/network-partition fencing: specify the actual enforcement point and
+  sender revocation, including external provider sessions.
+- Freshness witness: define its contents, write-ahead/local durability ordering,
+  interrupted transitions and recovery of authorization, not just a counter.
+- Manifest trust: choose a non-circular bootstrap verifier and specify replay,
+  rollback, revocation and all runner entry paths.
+- Platform/CLI qualification: determine the actual replacement lifecycle,
+  restoration race behavior and whether fresh host authentication can use a
+  non-model check. If it cannot, existing separately authorized qualification is
+  required; do not claim an unsupported non-model authentication operation.
+
+Still-unconfirmed review candidates require original-source/adversarial checking
+before a finding or resolution is assigned: full command coverage (including
+merge, reap, materialize and preflight), READY/use-time races, result-code/test
+coverage, HR-01–05 sequencing, accepted/approved/adopted terminology, and backup
+inventory/T10/T14/T18 expectations. They remain follow-up candidates rather than
+verified defects, waived conditions or completed acceptance tests.
