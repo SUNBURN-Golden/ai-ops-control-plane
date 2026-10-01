@@ -163,28 +163,55 @@ class Quota:
         if not self._claimed(ticket):
             return None
         child = self._child(ticket)
+        terminal_path = self._path(ticket["incident"]) / "terminal.json"
+        terminal = None
+        if os.path.lexists(terminal_path):
+            terminal = self.store._read(terminal_path)
+            fields = {"schema_version", "incident", "status", "reason"}
+            consumed_fields = fields | {"resolution", "preflight_sha256"}
+            if set(terminal) not in (fields, consumed_fields) \
+                    or type(terminal.get("schema_version")) is not int or terminal["schema_version"] != 1 \
+                    or terminal.get("incident") != ticket["incident"] \
+                    or terminal.get("status") not in ("UNKNOWN", "BLOCKED_POLICY", "BLOCKED_ERROR", "STALE_CONTEXT"):
+                raise journal.ReceiptError("quota terminal event is invalid")
+            # Terminal events are written only before an audit/consult child is
+            # created. A conflicting child cannot turn a no-child proof into a
+            # PASS or an execution-fence release.
+            if child is not None:
+                raise journal.ReceiptError("quota child contradicts its preflight terminal")
+            if set(terminal) == consumed_fields:
+                if terminal["resolution"] != "CONSUMED_NO_CHILD" or terminal["status"] == "UNKNOWN" \
+                        or terminal["preflight_sha256"] != self._preflight_proof(ticket)["preflight_sha256"]:
+                    raise journal.ReceiptError("quota childless completion proof is invalid")
+            elif terminal["status"] != "UNKNOWN":
+                # Earlier source versions did not bind terminal events to a
+                # completed preflight. Preserve those admissions as UNKNOWN;
+                # migration never fabricates the missing proof.
+                terminal = {**terminal, "terminal_status": terminal["status"], "status": "UNKNOWN"}
         result = child.read(ticket["action"], ticket["binding"]) if child else {"status": "MISSING"}
         if result.get("status") == "MISSING":
-            terminal_path = self._path(ticket["incident"]) / "terminal.json"
-            if os.path.lexists(terminal_path):
-                terminal = self.store._read(terminal_path)
-                if set(terminal) != {"schema_version", "incident", "status", "reason"} \
-                        or terminal.get("schema_version") != 1 or terminal.get("incident") != ticket["incident"] \
-                        or terminal.get("status") not in ("UNKNOWN", "BLOCKED_POLICY", "BLOCKED_ERROR", "STALE_CONTEXT"):
-                    raise journal.ReceiptError("quota terminal event is invalid")
+            if terminal is not None:
                 result = terminal
             else:
                 result = {"status": "UNKNOWN", "reason": "claimed quota wake has no durable terminal result"}
         elif result.get("status") == "RUNNING":
             result = {**result, "status": "UNKNOWN"}
         if result.get("status") == "POSTED":
-            proof = self.store._read(self._path(ticket["incident"]) / "preflight.json")
-            if set(proof) != {"schema_version", "incident", "preflight_sha256"} \
-                    or type(proof.get("schema_version")) is not int or proof["schema_version"] != 1 \
-                    or proof.get("incident") != ticket["incident"] \
-                    or not journal.HEX.fullmatch(str(proof.get("preflight_sha256", ""))):
-                raise journal.ReceiptError("quota retry has no bound protected preflight")
+            self._preflight_proof(ticket)
         return {**result, "quota_attempt": ticket["incident"], "parent_admission": ticket["parent_admission"]}
+
+    def _preflight_proof(self, ticket):
+        proof = self.store._read(self._path(ticket["incident"]) / "preflight.json")
+        if set(proof) != {"schema_version", "incident", "preflight_sha256"} \
+                or type(proof.get("schema_version")) is not int or proof["schema_version"] != 1 \
+                or proof.get("incident") != ticket["incident"] \
+                or not journal.HEX.fullmatch(str(proof.get("preflight_sha256", ""))):
+            raise journal.ReceiptError("quota retry has no bound protected preflight")
+        return proof
+
+    @staticmethod
+    def _consumed_no_child(result):
+        return result is not None and result.get("resolution") == "CONSUMED_NO_CHILD"
 
     def operator_store(self, incident, admission):
         """Derive a child journal for the separate root-only reconciliation API.
@@ -228,7 +255,7 @@ class Quota:
             if self.store.scope(action, binding) != self.store.scope(ticket["action"], ticket["binding"]):
                 continue
             result = self._effective_ticket(ticket)
-            if result is None or result.get("status") == "POSTED":
+            if result is None or result.get("status") == "POSTED" or self._consumed_no_child(result):
                 continue
             child = self._child(ticket)
             if child:
@@ -266,7 +293,7 @@ class Quota:
                 add(admission["action"], admission["binding"], key)
         for ticket in tickets:
             result = self._effective_ticket(ticket)
-            if result is None or result.get("status") == "POSTED":
+            if result is None or result.get("status") == "POSTED" or self._consumed_no_child(result):
                 continue
             child = self._child(ticket)
             if child:
@@ -339,8 +366,16 @@ class Quota:
                 "parent_admission": key, "incident": ticket["incident"],
                 "reset_at_epoch_ms": ticket["reset_at_epoch_ms"]}
 
-    def _terminal(self, ticket, status, reason):
+    def _terminal(self, ticket, status, reason, *, completed_preflight=None):
         result = {"schema_version": 1, "incident": ticket["incident"], "status": status, "reason": reason}
+        if completed_preflight is not None:
+            if status not in ("BLOCKED_POLICY", "BLOCKED_ERROR", "STALE_CONTEXT") \
+                    or self._child(ticket) is not None:
+                raise journal.ReceiptError("quota childless completion cannot release this state")
+            digest = journal.digest(completed_preflight)
+            self.store._append(self._path(ticket["incident"]) / "preflight.json", {
+                "schema_version": 1, "incident": ticket["incident"], "preflight_sha256": digest})
+            result.update(resolution="CONSUMED_NO_CHILD", preflight_sha256=digest)
         self.store._append(self._path(ticket["incident"]) / "terminal.json", result)
         return {**result, "quota_attempt": ticket["incident"], "parent_admission": ticket["parent_admission"]}
 
@@ -380,22 +415,29 @@ class Quota:
                         verified = self.verify(failure.get("run")) == failure
                     except Exception:
                         verified = False
-                    terminal = failure.get("terminal_evidence") == "VERIFIED" \
+                    terminal = failure.get("schema") == "FABLE_FAILURE_V1" \
+                        and type(failure.get("schema_version")) is int and failure["schema_version"] == 1 \
+                        and failure.get("archive_state") == "SEALED" \
+                        and failure.get("terminal_evidence") == "VERIFIED" \
                         and failure.get("process_terminated") is True and failure.get("publication_state") == "NOT_STARTED" \
                         and failure.get("kind") == "preflight" and verified
                     status = "UNKNOWN" if not terminal else "BLOCKED_POLICY" \
                         if failure.get("error_code") == "OVERAGE_NOT_BLOCKED" else "BLOCKED_ERROR"
-                    return self._terminal(ticket, status, "fresh protected preflight did not pass")
-                if not isinstance(preflight, dict) or preflight.get("status") != "PASS" \
-                        or not isinstance(preflight.get("extra_usage"), dict) \
+                    return self._terminal(ticket, status, "fresh protected preflight did not pass",
+                                          completed_preflight=failure if terminal else None)
+                if not isinstance(preflight, dict) or preflight.get("status") != "PASS":
+                    return self._terminal(ticket, "UNKNOWN", "fresh preflight returned no completed result")
+                if not isinstance(preflight.get("extra_usage"), dict) \
                         or preflight["extra_usage"].get("overageStatus") != "rejected" \
                         or preflight["extra_usage"].get("isUsingOverage", False) is not False:
-                    return self._terminal(ticket, "BLOCKED_POLICY", "fresh preflight has no blocked extra-usage proof")
+                    return self._terminal(ticket, "BLOCKED_POLICY", "fresh preflight has no blocked extra-usage proof",
+                                          completed_preflight=preflight)
                 # Store a digest, not caller- or model-supplied prose/credentials.
                 self.store._append(directory / "preflight.json", {"schema_version": 1,
                                    "incident": ticket["incident"], "preflight_sha256": journal.digest(preflight)})
                 if not self._current(action, binding, self.store.tool_sha):
-                    return self._terminal(ticket, "STALE_CONTEXT", "authority changed during fresh preflight")
+                    return self._terminal(ticket, "STALE_CONTEXT", "authority changed during fresh preflight",
+                                          completed_preflight=preflight)
                 current = self._candidate(key)
                 if current is None or current[0] != ticket or current[1] != settlement:
                     return self._terminal(ticket, "UNKNOWN", "parent quota evidence changed during fresh preflight")

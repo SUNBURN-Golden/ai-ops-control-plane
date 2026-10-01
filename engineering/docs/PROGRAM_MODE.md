@@ -355,18 +355,20 @@ adapter의 `status.json`은 참고용이다.
 - **revision 결속 (구현 A3 1차 지적 3 반영).** host 행은 packet의 `task_revision`을 보여 준다.
   - 리뷰 발송과 merge-check은 현재 작성자 시도의 revision이 host 기록 `plan_commit`과 그 레인으로 만든 현재 revision과 같을 때만 전달과 리뷰를 인정한다.
   - `start`가 plan을 올린 뒤 발송이 실패해도, 예전 전달과 리뷰로 새 요구사항이 준비됨이 되지 않는다.
-- **병합된 작업 (지적 7).** 고정된 전달 PR이 전달된 head 그대로 병합됐으면 `start`는 `DONE`을 돌려주고 다시 발송하지 않는다.
+  - 종료 writer에 관한 decision-only 조회는 그 writer의 신뢰된 `p<plan SHA 앞 12자리>-<lane>` revision을 원래 정확한 plan SHA에 결합한다. host plan이 이미 앞으로 갔으면 원래 plan이 merged이며 현재 host plan이 그 후손인지 확인한다. 이 읽기 전용 조회는 이슈 본문·receipt·writer를 새로 만들지 않고, 새 발송의 revision 요구도 완화하지 않는다.
+- **병합된 작업 (지적 7).** `start`는 고정된 전달 PR의 정확한 head·병합 SHA·default branch 계보와 제품의 병합 후 조건을 `delivery_completion`으로 계산한다. 결과가 `DONE`일 때만 완료다. `MERGED_POST_VERIFY`는 검증 대기, `POST_MERGE_FAILED`는 운영자/대표님 경로이며, 병합된 원래 writer는 어느 경우에도 다시 발송하지 않는다. 두 보류 상태에서는 이슈를 완료로 닫거나 후속 작업을 풀지 않는다. 실패 이슈의 종료에는 영속적인 실패 기록과 별도 수정 작업 연결이 먼저 필요하며, 그 종료 자체는 후속 준비나 계산된 DONE의 증거가 아니다.
 - **A0 (지적 4).** program mode에는 A0 자격 확인 경로가 없다(`DISPATCH.md` §16). 그래서 plan의 A0는 A1로 올린다.
 - **필수 체크 (지적 5).** 제품 profile은 `program_merge_policy: STANDARD`와 함께 `program_required_checks`(필수 check run 이름 목록)를 선언한다.
   - merge-check은 목록의 각 체크가 head에서 success인지 확인한다. 선언이 없으면 준비 안 됨이다.
   - 관측된 체크가 진행 중이거나 실패여도 준비 안 됨이다.
+  - KIX의 병합 전 exact-head 필수 검사는 `protocol`, `kernel`이다. 병합 후에는 별도의 보호된 `program_post_merge_required_checks: ["protocol"]`을 사용한다. `kernel`은 push workflow가 아니므로 병합 SHA의 가짜 kernel push 증거를 요구하거나 만들지 않는다. 병합 후 검사는 정확한 merge SHA의 성공한 main/push check-suite 출처와 보호된 locked Git blob 검증을 함께 요구한다.
 - reap이 어느 작업의 세션을 해제하는지는 이슈의 task key와 host materialization으로 정한다. control record의 `task_id`는 쓰지 않는다.
 - 이슈 본문은 host 기록과 plan으로 정해진다. 본문이 바뀌어 있으면 `operation=review`가 원래 envelope로 되돌린다. merge-check은 읽기만 하고, 본문이 다르면 준비 안 됨으로 보고한다. 메모는 본문이 아니라 댓글로 남긴다.
 - `start`는 plan commit을 envelope를 다시 쓰기 직전에만 올린다. 작업이 바쁘거나 빈 레인이 없어서 멈춘 `start`는 plan을 바꾸지 않는다.
 - 기록이 `SUBMITTING`이나 `UNKNOWN`이어도 host가 그 요청을 `FAILED_PRESTART`나 `RECONCILED`로 막아 둔 상태라면, `start`는 새 attempt로 재개한다.
 - **의존 노드**
   - `start`와 merge-check은 `depends_on` 노드가 DONE인지 기계적으로 확인한다.
-  - DONE은 그 노드에 고정된 전달 PR이 전달된 head 그대로 병합된 경우다. PR이 없는 노드는 이슈가 completed로 닫힌 경우다.
+  - DONE은 `delivery_completion.status=DONE`으로만 판단한다. 이슈가 completed로 닫혔거나 PR이 병합됐다는 사실만으로는 충족되지 않는다. KIX 병합 후 대기/실패는 후속 노드를 계속 막는다. Program Board의 완료색, Slack 진행률의 분자, 코디네이터 materialize 행도 같은 계산 결과를 사용한다.
 
 **host `reap --launch-request-id <id> --evidence <URL> [--pin-stdin]`** (서명 줄은 stdin의 `{"pin": "<line>"}`)
 - runner가 sudo로 호출할 수 있는 새 명령이다. 인수 형식은 status와 같이 제한한다.

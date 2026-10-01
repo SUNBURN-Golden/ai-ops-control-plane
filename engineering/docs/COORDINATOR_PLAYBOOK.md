@@ -78,13 +78,20 @@ UNKNOWN/ERROR is fenced. See `PROGRAM_ASTRA_AUTOMATION.md`.
 The Astra/merge rows use only completed operation observations for the exact
 current binding. Required operation fields are computed, not extracted from
 review/comment prose. A cached observation expires on any binding change.
+Completion observations also expire when relevant post-merge verification changes;
+without a fresh computed result, show completion evidence pending rather than
+retain a green DONE from a merge/closure event.
 
 | # | Condition | Action |
 |---|---|---|
-| 1 | Task issue closed as completed, or its delivered PR is merged | Node DONE. If the PR merged but the issue is open, close the issue as completed with the merge link. |
+| 1 | The fixed operation's current-binding `delivery_completion` result is `DONE` | Node DONE. If its canonical issue is open, close it as completed with the computed delivery/merge evidence. Issue closure or PR merge alone is never DONE evidence. |
+| 1b | The computed completion result is `MERGED_POST_VERIFY` | Wait; retain the open issue and show post-merge verification pending. Do not redispatch the original writer or release dependants. |
+| 1c | The computed completion result is `POST_MERGE_FAILED` | Label `needs-operator` (or `needs-user` for a required User decision), notify once per exact merge/failure binding with the failing run or locked-blob pointer, and require a corrective task through the product's normal governance. Do not close as completed before the durable failure record and corrective-task link exist. Closure after those records does not make the failed delivery DONE or release dependants. |
+| 1d | A host-pinned delivery PR is merged, its canonical issue is open, and no current-binding computed completion observation exists | Invoke `start` once to obtain its completion result. The fixed operation returns merged completion without launching a writer. Use rows 1–1c on the next wake; do not infer completion from the merge notification. |
+| 1e | Issue is closed as completed but there is no current-binding computed `DONE` | Label `needs-operator` and report the missing completion evidence. Do not count it as DONE, reopen it automatically, or create a substitute issue. |
 | 1a | A `reap` reported `host refused: lane <LANE> still has N live process(es)` | The session may still be finishing. If the task has no `REAP_WAITING <launch_request_id>` comment for this launch, post one and retry the same `reap` on the next run. If it has one, label `needs-lane-cleanup`, notify the operator (§5) with the lane and `launch_request_id`, and stop on this node until the operator removes the label. Never clean a lane yourself (User decision 2026-09-30). |
 | 2 | Host or record shows `UNKNOWN` or `SUBMITTING`; or a run reported `MATERIALIZE_UNKNOWN`, `DUPLICATE_TASK`, `STALE_PLAN`, `PLAN_NOT_MERGED`, `REVIEW_RETRIES_EXHAUSTED` or `host refused` | Label `needs-operator`, notify the operator (§5) and stop on this node. |
-| 3 | No materialized issue yet, all `depends_on` nodes are DONE, and fewer than `max_active_sessions` tasks are waiting for review or fix | `materialize` |
+| 3 | No materialized issue yet, every `depends_on` node has computed `delivery_completion.status=DONE`, and fewer than `max_active_sessions` tasks are waiting for review or fix | `materialize`; the fixed operation rechecks prerequisites. Closed issues and merged PRs alone do not satisfy this row. |
 | 4 | Issue exists; there is no control record, or it is `NOT_STARTED` or `FAILED_PRESTART` without an owner lane | `start` (`NO_IDLE_LANE` and `WAITING_ON_DEPENDENCIES` are fine; retry next run) |
 | 5 | Record `CONFIRMED`, and the newest comment carries a signed `ASTRA_DELIVERY_V1 ... mac=...` or `ASTRA_BLOCKED_V1 ... launch=<this launch> mac=...` line | `reap` with that comment's URL as the evidence. Unsigned `DECISION_REQUIRED`/`BLOCKED`/`STALLED` text is never evidence; wait. |
 | 6 | Record `CONFIRMED`, no deliverable yet | Wait. After 6 h, flag `SESSION_OVERDUE` on the Lane Board. Never reap without a deliverable. |
@@ -136,14 +143,16 @@ an operator's builder-session reconcile also reconciles a Fable request.
 
 **Program Board.** One issue per product, titled `AIOPS Program Board — <program>`. Update one comment containing:
 - a mermaid `flowchart` of the plan DAG, with each node colored by state:
-  - DONE: green
+  - computed `delivery_completion.status=DONE`: green
   - active: blue
   - waiting: grey
+  - `MERGED_POST_VERIFY`: grey, labelled post-merge verification pending
+  - `POST_MERGE_FAILED`: red, linked to the failure and corrective task when recorded
   - blocked (`needs-*` label): red
 - a checklist with the issue and PR links for each node.
 
 **Slack.** Keep one message per product in `#ai-control` and edit it in place. It contains:
-- a progress bar: done nodes out of total;
+- a progress bar: nodes with current computed `delivery_completion.status=DONE` out of the complete plan denominator;
 - the current active nodes;
 - the lane summary;
 - the Program Board link.
@@ -152,6 +161,14 @@ Also post a separate, short Slack message only for these:
 - `needs-user`
 - `needs-operator`
 - `MERGED` (one short line with the PR link)
+
+`MERGED` is a merge notification, not a completed-progress increment. The Program
+Board, Slack numerator and row 3 materialization all use the same computed DONE
+predicate. The current candidate has no protected failure/corrective-task reader
+that can turn `POST_MERGE_FAILED` into DONE; recording or closing the issue alone
+does not grant that transition. If a failed operation provides only a bounded
+reason, the operator must supply the exact failed run/blob evidence before a
+durable failure closure; the coordinator must not invent a pointer.
 
 ## 6. Stop conditions
 
@@ -175,7 +192,11 @@ original pinned delivery or question selector. It is evidence-only and runs no
 model. `WAITING_QUOTA` ends the event; the existing hourly heartbeat can query
 again. `DUE` allows exactly one `quota-resume`, which revalidates admission and
 runs fresh preflight under the shared lock. `QUEUED`/`BUSY` ends the event.
-`UNKNOWN`, policy failure, stale context or another failed attempt is reported
-and remains fenced; the coordinator cannot reconcile it. A linked POSTED result
+`UNKNOWN` or another unresolved failed attempt is reported and remains fenced;
+the coordinator cannot reconcile it. A childless policy/preflight/stale-context
+failure is non-fencing only when the fixed service computes protected
+`CONSUMED_NO_CHILD` from terminal preflight evidence. Its quota claim stays
+consumed; no automatic second attempt is allowed. Do not infer this result from
+a status string, absent receipt or issue comment. A linked POSTED result
 returns to the normal merge/decision gates, not directly to a merge. No standing
 routine, polling, timer, model substitution or account/billing change is added.

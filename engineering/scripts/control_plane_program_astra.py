@@ -113,14 +113,36 @@ def request_context(api, cfg, issue_number, pr_number=None, head=None, *, decisi
     writer = prog.current_writer(rows)
     terminal = prog.released(writer) or (decision_only and bool(writer) and writer.get("state") == "RECONCILED"
                                         and writer.get("resolution") in cp.TERMINAL_RELEASES)
-    if not writer or not terminal or writer.get("task_revision") != prog.expected_revision(status, writer):
+    if not writer or not terminal:
+        raise BridgeError("current writer is not terminal at the host-recorded plan revision")
+    context_commit = status["plan_commit"]
+    if decision_only:
+        # start can advance the canonical plan before prepare/admission fails.
+        # Query the released writer's immutable revision, not that newer host
+        # projection, so a failed prestart cannot strand semantic reconciliation.
+        revision = re.fullmatch(r"p([0-9a-f]{12})-" + re.escape(writer["lane"]),
+                                str(writer.get("task_revision", "")))
+        if not revision:
+            raise BridgeError("terminal writer has no canonical program revision")
+        if not context_commit.startswith(revision.group(1)):
+            resolved = api._request("GET", f"/commits/{revision.group(1)}")
+            context_commit = (resolved or {}).get("sha")
+            if not prog.SHA.fullmatch(str(context_commit)) or not context_commit.startswith(revision.group(1)):
+                raise BridgeError("terminal writer plan revision is unknown or ambiguous")
+            prog.require_on_default_branch(api, context_commit)
+            prog.require_descendant(api, context_commit, status["plan_commit"])
+            plan = prog.load_plan(api, cfg, context_commit)
+            node = prog.plan_node(plan, node["id"])
+            if plan["program"] != status["program"]:
+                raise BridgeError("terminal writer plan changes the canonical program")
+    elif writer.get("task_revision") != prog.expected_revision(status, writer):
         raise BridgeError("current writer is not terminal at the host-recorded plan revision")
     if any(row.get("state") in ("SUBMITTING", "CONFIRMED", "UNKNOWN") for row in rows):
         raise BridgeError("task has an active or unresolved session")
     if not decision_only and issue.get("body", "") != prog.rendered_body(issue, plan, node, status, writer["lane"]):
         raise BridgeError("canonical task body differs from the host-recorded plan")
     binding = {"repository": cfg["repository"], "issue": issue_number, "program": plan["program"],
-               "node": node["id"], "plan_commit": status["plan_commit"],
+               "node": node["id"], "plan_commit": context_commit,
                "task_revision": writer["task_revision"], "writer_launch": writer["launch_request_id"]}
     if node.get("astra_gate") == "RELEASE" and node.get("astra_auto_merge") is True:
         raise BridgeError("RELEASE authority cannot be delegated")
@@ -196,6 +218,64 @@ def operator_reconcile(ctx, fable, payload):
                            lambda run: fable.verify_failure_evidence(ctx, run))
 
 
+def superseding_user_decision(api, cfg, issue, binding, old_node, proposed, proposed_plan, proposed_node, writer):
+    """Validate an explicit node/digest decision in a separate merged plan PR.
+
+    Program delivery cannot merge policy edits. Under the accepted shared-token
+    boundary a separate plan PR is User-reserved; this does not cryptographically
+    distinguish a malicious actor who already holds that privileged token.
+    Arbitrary comment text, URL shape and whitespace edits are never decisions.
+    """
+    old_digest, new_digest = prog.node_definition_sha256(old_node), prog.node_definition_sha256(proposed_node)
+    if old_digest == new_digest:
+        return False
+    records = proposed_plan.get("superseding_decisions", [])
+    if not isinstance(records, list) or len(records) > 10000:
+        raise BridgeError("superseding decision records must be a bounded list")
+    pointer = proposed_plan["approval_pointer"]
+    expected = {"schema_version": 1, "repository": cfg["repository"], "program": binding["program"],
+                "node": binding["node"], "issue": binding["issue"], "writer_launch": binding["writer_launch"],
+                "previous_plan_commit": binding["plan_commit"], "previous_definition_sha256": old_digest,
+                "definition_sha256": new_digest, "decision_pointer": pointer}
+    matched = [record for record in records if record == expected]
+    if len(matched) != 1:
+        return False
+    match = re.fullmatch(r"https://github\.com/" + re.escape(cfg["repository"]) + r"/pull/([1-9][0-9]*)", pointer)
+    if not match or pointer == issue.get("html_url"):
+        return False
+    number = int(match.group(1))
+    delivery = prog.pin_of(writer, "DELIVERY")
+    if delivery and number == delivery.get("pr"):
+        return False
+    pr = api._request("GET", f"/pulls/{number}")
+    head = (pr.get("head") or {}).get("sha")
+    if pr.get("merged") is not True or pr.get("state") != "closed" \
+            or (pr.get("base") or {}).get("ref") != prog.default_branch(api) \
+            or ((pr.get("head") or {}).get("repo") or {}).get("full_name") != cfg["repository"] \
+            or (pr.get("head") or {}).get("ref") == prog.branch_for(prog.task_id_for(binding["program"], binding["node"])) \
+            or not prog.SHA.fullmatch(str(head)) or not prog.SHA.fullmatch(str(pr.get("merge_commit_sha", ""))):
+        return False
+    prog.require_on_default_branch(api, head)
+    merge_commit = pr["merge_commit_sha"]
+    prog.require_on_default_branch(api, merge_commit)
+    prog.require_descendant(api, binding["plan_commit"], head)
+    prog.require_descendant(api, head, merge_commit)
+    if prog.PLAN_PATH not in prog.changed_paths(api, pr, number):
+        return False
+    # The live merged revision must contain this exact record and definition;
+    # a reused old plan PR cannot authorize a later arbitrary change.
+    # A normal merge's latest path commit can be its branch head rather than
+    # the merge SHA. Check the actual merge bytes as well, then require linear
+    # ancestry with the requested latest path revision (never a divergent PR).
+    if prog.load_plan(api, cfg, head) != proposed_plan or prog.load_plan(api, cfg, merge_commit) != proposed_plan:
+        return False
+    if proposed != merge_commit:
+        comparison = api._request("GET", f"/compare/{merge_commit}...{proposed}")
+        if (comparison or {}).get("status") not in ("ahead", "behind", "identical"):
+            return False
+    return True
+
+
 def resolve_request(api, cfg, issue_number, operation, payload):
     repository = cfg["repository"]
     if operation in ("audit", "check"):
@@ -209,29 +289,16 @@ def resolve_request(api, cfg, issue_number, operation, payload):
         if proposed is not None:
             if not isinstance(proposed, str) or not prog.SHA.fullmatch(proposed):
                 raise BridgeError("decision-status plan_commit must be an exact commit SHA")
-            proposed_plan = prog.load_plan(api, cfg, proposed)
+            proposed_plan = prog.require_current_plan(api, cfg, proposed, binding["plan_commit"])
             if proposed_plan["program"] != plan["program"]:
                 raise BridgeError("decision-status proposed plan changes the canonical program")
             proposed_node = prog.plan_node(proposed_plan, node["id"])
             prog.require_on_default_branch(api, proposed)
             prog.require_descendant(api, binding["plan_commit"], proposed)
-            # An unrelated commit or edited spec under the old approval is not
-            # a User decision. Preserve the semantic binding unless this merged
-            # plan names a distinct durable approval/decision pointer AND
-            # changes the selected node's approved definition. Same-scope User
-            # settlement needs its own adopted reconciler; this is not one.
-            if proposed_plan["approval_pointer"] != plan["approval_pointer"]:
-                decision = proposed_plan["approval_pointer"]
-                repositories = (cfg["repository"], "BeautifulMind-JT/ai-ops-control-plane")
-                if not any(re.fullmatch(r"https://github\.com/" + re.escape(repo)
-                                       + r"/(?:issues|pull)/[1-9][0-9]*(?:#issuecomment-[1-9][0-9]*)?", decision)
-                           for repo in repositories):
-                    raise BridgeError("revised scope requires a durable approval/decision pointer")
-                # Read-only here. Keep writer_launch; this cannot manufacture a
-                # new execution. Same-task execution fences still span revisions.
-                if proposed_node != node:
-                    binding = {**binding, "plan_commit": proposed,
-                               "task_revision": prog.task_revision_for(proposed, writer["lane"])}
+            if proposed_plan["approval_pointer"] != plan["approval_pointer"] and \
+                    superseding_user_decision(api, cfg, issue, binding, node, proposed, proposed_plan, proposed_node, writer):
+                binding = {**binding, "plan_commit": proposed,
+                           "task_revision": prog.task_revision_for(proposed, writer["lane"])}
             plan, node = proposed_plan, proposed_node
     else:
         binding, issue, plan, node, rows, writer = request_context(api, cfg, issue_number)

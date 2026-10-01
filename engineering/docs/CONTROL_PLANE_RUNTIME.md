@@ -58,6 +58,22 @@ init/reconcile나 builder root를 허용하지 않는다.
 원 ledger와 외부 session을 대사하기 전 dispatch를 재개하지 않는다.
 최초 활성화 전에도 ledger에 없는 기존 writer/session이 없는지 확인한다.
 
+program mode 상태는 재부팅해도 남는 저장소에 둔다. `/var/lib/astra/control/`의
+원장과 transactional side file, `/var/lib/aiops-fable/` 전체의 실행 archive·receipt·
+immutable journal·quota ticket/claim/child 기록을 함께 보존한다. 재부팅 때 초기화되는
+그록봇 VM은 이 설치 조건을 충족하지 않는다. 다른 host로 이전할 때는 admission을
+멈추고 기존 기록·binding·권한을 그대로 옮긴 뒤 hash/chain과 외부 세션을 대사한다.
+빈 원장으로 새로 시작하거나 GitHub 댓글만 복사해서 UNKNOWN/소비된 quota claim을
+없애지 않는다. 실제 영속 backing과 재부팅 생존 검증은 설치 qualification에 기록하며,
+폴더 marker 하나로 증명하지 않는다. 상세 절차는
+`PROGRAM_FABLE_RECOVERY.md`의 "Durable host state and migration"을 따른다.
+
+`materialize-list --repository <repo> --program <key>`는 보호된 policy로 범위를
+검증하는 읽기 전용 canonical 원장 조회다(최대 10,000개). CREATED뿐 아니라
+UNKNOWN·SUBMITTING·ABANDONED의 ID도 보존해 반환하며, 이슈 projection이 삭제돼도
+plan에서 해당 ID를 없애거나 이름을 바꿔 fence를 회피할 수 없다. 완료 판정·원장 수정·
+임의 파일 읽기 권한은 주지 않는다.
+
 program mode의 sudoers 원문은 `.github/control-plane/sudoers-aiops-program.example`이다.
 - 설치 위치는 `/etc/sudoers.d/aiops-program`이고, root:root 0440이다. 파일 이름에 점(`.`)이 있으면 sudo가 읽지 않는다.
 - 바꾸는 곳은 `RUNNER_USER` 하나다. 기존 `status --launch-request-id` 규칙의 사용자 칸을 그대로 쓴다.

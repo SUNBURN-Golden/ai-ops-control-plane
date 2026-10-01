@@ -220,6 +220,8 @@ SUPPORTED_CLAUDE_VERSION = "2.1.285 (Claude Code)"
 RUN_ID_RE = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
 SESSION_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
 RESET_HORIZON_SECONDS = 8 * 86400
+WRAPPER_STOP_PROFILE = "fable-wrapper-stop-v1"
+WRAPPER_STOP_CODES = ("WRAPPER_TIMEOUT", "STREAM_INVALID", "OUTPUT_LIMIT")
 
 
 def strict_json(raw):
@@ -257,12 +259,38 @@ def failure_of(raw, *, version="", execution=None, observed_at_epoch_ms=None):
                "extra_usage_evidence_source": None, "raw_result_sha256": None,
                "raw_event_archive_sha256": sha256_bytes(raw),
                "adapter_profile": FAILURE_PROFILE if version == SUPPORTED_CLAUDE_VERSION else "UNSUPPORTED"}
+    guard = execution.get("guard_stop")
+    if isinstance(guard, dict) and guard.get("error_code") in WRAPPER_STOP_CODES:
+        # The fixed wrapper proves these stops; no provider result/reset schema
+        # is interpreted. Publication and exact binding are checked by the
+        # protected archive verifier before an operator can settle the request.
+        code = guard["error_code"]
+        terminated = (execution.get("model_attempted") is True
+                      and execution.get("process_state") == "EXITED"
+                      and execution.get("process_group_state") == "ABSENT"
+                      and type(execution.get("exit_code")) is int
+                      and execution["exit_code"] == -signal.SIGKILL
+                      and execution.get("guard_kill_sent") is True
+                      and execution.get("interrupted") is False
+                      and execution.get("timed_out") is (code == "WRAPPER_TIMEOUT"))
+        if (not terminated or type(raw) is not bytes or len(raw) > MAX_OUTPUT + 1
+                or type(guard.get("raw_output_bytes")) is not int
+                or code == "WRAPPER_TIMEOUT" and type(guard.get("timeout_seconds")) is not int
+                or code == "OUTPUT_LIMIT" and type(guard.get("max_output_bytes")) is not int):
+            return failure
+        if code == "WRAPPER_TIMEOUT":
+            expected = wrapper_stop(code, raw, timeout_seconds=TIMEOUT_SECONDS)
+        else:
+            _, expected = read_stream(io.BytesIO(raw))
+        if guard != expected:
+            return failure
+        failure.update(error_code=code, terminal_evidence="VERIFIED", adapter_profile=WRAPPER_STOP_PROFILE)
+        return failure
     try:
         events = events_of(raw)
     except FableError:
         failure["error_code"] = "RESULT_INVALID" if known_process else "UNKNOWN"
         return failure
-    guard = execution.get("guard_stop")
     if guard is not None:
         # This is wrapper-owned termination evidence, not a provider result or
         # a quota-reset receipt. Never infer a reset from the rejected event.
@@ -348,8 +376,15 @@ def failure_of(raw, *, version="", execution=None, observed_at_epoch_ms=None):
         failure["error_code"] = ("OVERAGE_NOT_BLOCKED" if "OVERAGE_NOT_BLOCKED" in policies
                                  else "OVERAGE_UNVERIFIED")
         return failure
-    failure["extra_usage"] = {"overageStatus": "rejected", "isUsingOverage": False}
+    blocked = all(info.get("overageStatus") == "rejected" for info in limits)
+    failure["extra_usage"] = ({"overageStatus": "rejected", "isUsingOverage": False}
+                              if limits[-1].get("overageStatus") == "rejected"
+                              else {"status": limits[-1].get("status"), "isUsingOverage": False})
     failure["extra_usage_evidence_source"] = "preceding_event_same_run"
+    if not blocked:
+        # Subscription warnings can allow normal execution (User decision 9),
+        # but do not prove billing-disabled status or qualify for quota retry.
+        return failure
     if status != 429 or result.get("subtype") != "success":
         return failure
     if any(info.get("status") not in ("allowed", "allowed_warning", "rejected") for info in limits):
@@ -479,7 +514,7 @@ def consult_verdict(value):
 
 
 def overage_policy(info):
-    """Missing evidence stops the run without claiming extra usage is enabled."""
+    """Accept only explicit blocked status or the User-approved subscription signal."""
     if not isinstance(info, dict):
         return "OVERAGE_UNVERIFIED", "no rate-limit status"
     if info.get("isUsingOverage") is True:
@@ -488,6 +523,8 @@ def overage_policy(info):
         return "OVERAGE_NOT_BLOCKED", f"overageStatus={info.get('overageStatus')!r}"
     if info.get("isUsingOverage") is not False:
         return "OVERAGE_UNVERIFIED", f"isUsingOverage={info.get('isUsingOverage')!r}"
+    if "overageStatus" not in info and info.get("status") in ("allowed", "allowed_warning"):
+        return None, None
     if info.get("overageStatus") != "rejected":
         return "OVERAGE_UNVERIFIED", f"overageStatus={info.get('overageStatus')!r}"
     return None, None
@@ -509,7 +546,7 @@ def events_of(raw):
 
 
 def model_output(raw):
-    """Parse the CLI's stream, prove extra usage stayed blocked and the run was a successful Fable run."""
+    """Require approved subscription signals and a successful Fable result."""
     events = events_of(raw)
     limits = [event.get("rate_limit_info") for event in events if event.get("type") == "rate_limit_event"]
     failed = [event for event in events if event.get("type") == "result" and event.get("is_error") is not False]
@@ -536,7 +573,9 @@ def model_output(raw):
     if len(results) != 1:
         raise FableError("model output has duplicate result")
     data = dict(results[-1])
-    data["overage"] = {key: limits[-1].get(key) for key in ("overageStatus", "overageDisabledReason")}
+    data["overage"] = ({key: limits[-1].get(key) for key in ("overageStatus", "overageDisabledReason")}
+                       if "overageStatus" in limits[-1]
+                       else {"status": limits[-1]["status"], "isUsingOverage": False})
     if data.get("subtype") != "success" or data.get("is_error") is not False:
         raise FableError(f"model run did not succeed: {data.get('subtype')}")
     usage = data.get("modelUsage")
@@ -682,22 +721,31 @@ def belongs(comment, repository, number):
     return str(comment.get("issue_url", "")).lower().endswith(f"/repos/{repository}/issues/{number}".lower())
 
 
+def wrapper_stop(code, raw, **detail):
+    return {"error_code": code, "raw_output_sha256": sha256_bytes(raw),
+            "raw_output_bytes": len(raw), **detail}
+
+
 def read_stream(stream):
-    """Collect the CLI's JSON lines; stop at the first sign that extra usage is not blocked."""
+    """Collect JSON lines; stop immediately on invalid output or an unsafe usage signal."""
     lines, size, event_index = [], 0, 0
     for line in iter(lambda: stream.readline(MAX_OUTPUT - size + 1), b""):
         lines.append(line)
         size += len(line)
         if size > MAX_OUTPUT:
-            return b"".join(lines), True
+            raw = b"".join(lines)
+            return raw, wrapper_stop("OUTPUT_LIMIT", raw, max_output_bytes=MAX_OUTPUT)
         try:
             if not line.strip():
                 continue
             event = strict_json(line)
+            if not isinstance(event, dict):
+                raise ValueError("JSON event is not an object")
         except (ValueError, RecursionError):
             # Malformed/duplicate fields cannot conceal an overage event while
             # the expensive process continues running.
-            return b"".join(lines), True
+            raw = b"".join(lines)
+            return raw, wrapper_stop("STREAM_INVALID", raw)
         if isinstance(event, dict) and event.get("type") == "rate_limit_event":
             code, _ = overage_policy(event.get("rate_limit_info"))
             if code:
@@ -744,12 +792,15 @@ class Runner:
         timed_out = []
 
         def kill(proc, reason=None):
-            if reason:
-                timed_out.append(reason)
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
-                pass
+                sent = False
+            else:
+                sent = True
+            if reason:
+                timed_out.append((reason, sent))
+            return sent
 
         with tempfile.TemporaryFile() as err:
             proc = subprocess.Popen(claude_argv(self.claude, system, schema), cwd=work,
@@ -768,7 +819,7 @@ class Runner:
                 if stop:
                     if isinstance(stop, dict):
                         self.last_execution["guard_stop"] = stop
-                    kill(proc)
+                    self.last_execution["guard_kill_sent"] = kill(proc)
                 proc.wait()
             except BaseException:
                 self.last_execution["interrupted"] = True
@@ -780,7 +831,18 @@ class Runner:
                 raise
             finally:
                 timer.cancel()
+                timer.join()
                 self.last_execution.update(exit_code=proc.poll(), timed_out=bool(timed_out))
+                timeout_killed = any(sent for _, sent in timed_out)
+                if timeout_killed:
+                    self.last_execution["guard_stop"] = wrapper_stop(
+                        "WRAPPER_TIMEOUT", self.last_output, timeout_seconds=TIMEOUT_SECONDS)
+                    self.last_execution["guard_kill_sent"] = True
+                elif self.last_execution.get("guard_kill_sent") is True:
+                    # A late deadline callback may find a group already killed
+                    # by the stream guard. Preserve that successful stop cause
+                    # rather than replacing it with an unproved timeout kill.
+                    self.last_execution["timed_out"] = False
                 if proc.returncode is not None:
                     self.last_execution["process_state"] = "EXITED"
                 try:
@@ -903,7 +965,8 @@ def verify_failure_evidence(ctx, run_id):
         raise FableError("failure evidence is not a verified unpublished terminal run")
     if any((run / name).exists() for name in ("publish-intent.json", "publish-response.json", "comment.md", "run.json")):
         raise FableError("failure publication is ambiguous")
-    raw = protected_read(run / "claude-output.jsonl", MAX_OUTPUT)
+    # The output guard reads exactly one excess byte to prove the limit.
+    raw = protected_read(run / "claude-output.jsonl", MAX_OUTPUT + 1)
     stderr = protected_read(run / "claude-stderr.txt", 65536)
     execution = record.get("execution")
     if isinstance(execution, dict) and execution.get("guard_stop") is not None:
@@ -1045,11 +1108,15 @@ class Context:
 
 def run_trailer(ctx, data, output_sha, run_id, claude_version):
     models = ", ".join(sorted(data["modelUsage"]))
+    extra = data["overage"]
+    extra_note = (f"blocked (`{extra.get('overageStatus')}`, `{extra.get('overageDisabledReason')}`)"
+                  if extra.get("overageStatus") == "rejected"
+                  else f"subscription signal (`{extra.get('status')}`, `isUsingOverage=false`); "
+                       "billing-disabled status was not reported")
     return (f"<details><summary>실행 기록</summary>\n\n"
             f"- host run: `{run_id}`\n- model session: `{data['session_id']}`\n- models: `{models}`\n"
             f"- turns: {data.get('num_turns')}\n- claude: `{claude_version}`\n"
-            f"- extra usage: blocked (`{data['overage'].get('overageStatus')}`, "
-            f"`{data['overage'].get('overageDisabledReason')}`)\n"
+            f"- extra usage: {extra_note}\n"
             f"- aiops-fable sha256: `{ctx.tool_sha256}`\n- raw output sha256: `{output_sha}`\n"
             f"</details>\n")
 

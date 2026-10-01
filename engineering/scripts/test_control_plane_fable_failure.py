@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import control_plane_fable as fable
-from test_control_plane_fable import BLOCKED, SESSION, cli_output, verdict, mock_root_evidence
+from test_control_plane_fable import (BLOCKED, SESSION, SUBSCRIPTION_WARNING_286,
+                                    cli_output, verdict, mock_root_evidence)
 
 NOW_MS = 1790757120000  # 2026-09-30 17:32 KST
 RESET_SECONDS = 1790765400  # 2026-09-30 19:50 KST
@@ -43,6 +44,42 @@ def parse(events, **kwargs):
 
 
 class FailureParserTests(unittest.TestCase):
+    def test_subscription_warning_never_synthesizes_billing_block_or_quota_eligibility(self):
+        events = failed_events(machine_reset=True)
+        events[1]["rate_limit_info"] = dict(SUBSCRIPTION_WARNING_286)
+        record = parse(events)
+        self.assertEqual(record["error_code"], "MODEL_EXECUTION_FAILED")
+        self.assertEqual(record["terminal_evidence"], "VERIFIED")
+        self.assertEqual(record["extra_usage"], {"status": "allowed_warning", "isUsingOverage": False})
+        self.assertIsNone(record["reset_at_epoch_ms"])
+        self.assertIsNone(record["limit_type"])
+        events.insert(1, {"type": "rate_limit_event", "uuid": "event-extra-00001", "session_id": SESSION,
+                          "rate_limit_info": {**BLOCKED, "status": "rejected", "rateLimitType": "five_hour",
+                                              "resetsAt": RESET_SECONDS}})
+        self.assertNotEqual(parse(events)["error_code"], "MODEL_RATE_LIMIT")
+
+    def test_wrapper_stop_requires_its_own_kill_and_proves_no_quota_on_any_cli_version(self):
+        for code, raw in (("WRAPPER_TIMEOUT", b'{}\n'), ("STREAM_INVALID", b'not-json\n'),
+                          ("OUTPUT_LIMIT", b'x' * 33)):
+            with self.subTest(code=code), patch.object(fable, "MAX_OUTPUT", 32):
+                guard = (fable.wrapper_stop(code, raw, timeout_seconds=fable.TIMEOUT_SECONDS)
+                         if code == "WRAPPER_TIMEOUT" else fable.read_stream(io.BytesIO(raw))[1])
+                execution = {**EXECUTION, "exit_code": -signal.SIGKILL, "guard_stop": guard,
+                             "guard_kill_sent": True, "timed_out": code == "WRAPPER_TIMEOUT"}
+                record = fable.failure_of(raw, version="2.1.286 (Claude Code)", execution=execution)
+                self.assertEqual(record["error_code"], code)
+                self.assertEqual(record["terminal_evidence"], "VERIFIED")
+                self.assertEqual(record["adapter_profile"], fable.WRAPPER_STOP_PROFILE)
+                self.assertIsNone(record["reset_at_epoch_ms"])
+                self.assertIsNone(record["extra_usage"])
+                for change in ({"guard_kill_sent": False}, {"guard_kill_sent": 1},
+                               {"process_group_state": "UNKNOWN"}, {"exit_code": 1},
+                               {"interrupted": True}, {"timed_out": code != "WRAPPER_TIMEOUT"},
+                               {"guard_stop": {**guard, "raw_output_sha256": "0" * 64}}):
+                    unproved = fable.failure_of(raw, version="2.1.286 (Claude Code)",
+                                                execution={**execution, **change})
+                    self.assertEqual(unproved["terminal_evidence"], "UNKNOWN")
+
     def test_1732_reconstruction_preserves_429_without_guessing_text_reset(self):
         record = parse(failed_events())
         self.assertEqual(record["error_code"], "MODEL_EXECUTION_FAILED")
@@ -313,6 +350,79 @@ class ProcessTests(unittest.TestCase):
                                   execution=runner.last_execution)
         self.assertEqual(record["terminal_evidence"], "VERIFIED")
 
+    def test_wrapper_stream_stop_runner_records_actual_kill_before_verification(self):
+        for raw, expected in ((b'not-json\n', "STREAM_INVALID"), (b'x' * 1000, "OUTPUT_LIMIT")):
+            runner, proc, signals = self.runner(), self.process(output=raw), []
+            def killpg(pid, sig):
+                signals.append(sig)
+                if sig == 0:
+                    raise ProcessLookupError
+            def wait(timeout=None):
+                proc.returncode = -signal.SIGKILL
+            proc.wait = wait
+            with self.subTest(expected=expected), patch.object(fable, "MAX_OUTPUT", 32), \
+                    patch.object(fable.subprocess, "Popen", return_value=proc), \
+                    patch.object(fable.threading, "Timer"), patch.object(fable.os, "killpg", killpg):
+                runner(Path("/fake/work"), "system", {}, "prompt")
+                self.assertEqual(signals, [signal.SIGKILL, 0])
+                self.assertTrue(runner.last_execution["guard_kill_sent"])
+                record = fable.failure_of(runner.last_output, version="2.1.286 (Claude Code)",
+                                          execution=runner.last_execution)
+                self.assertEqual(record["error_code"], expected)
+                self.assertEqual(record["terminal_evidence"], "VERIFIED")
+
+    def test_timeout_runner_seals_only_a_completed_timeout_kill(self):
+        runner, proc, signals = self.runner(), self.process(output=b'{}\n'), []
+        class ImmediateTimer:
+            def __init__(self, seconds, function, args):
+                self.function, self.args = function, args
+            def start(self): self.function(*self.args)
+            def cancel(self): pass
+            def join(self): pass
+        def killpg(pid, sig):
+            signals.append(sig)
+            if sig == 0: raise ProcessLookupError
+        def wait(timeout=None): proc.returncode = -signal.SIGKILL
+        proc.wait = wait
+        with patch.object(fable.subprocess, "Popen", return_value=proc), \
+                patch.object(fable.threading, "Timer", ImmediateTimer), patch.object(fable.os, "killpg", killpg):
+            runner(Path("/fake/work"), "system", {}, "prompt")
+        self.assertEqual(signals, [signal.SIGKILL, 0])
+        record = fable.failure_of(runner.last_output, version="2.1.286 (Claude Code)",
+                                  execution=runner.last_execution)
+        self.assertEqual(record["error_code"], "WRAPPER_TIMEOUT")
+        self.assertEqual(record["terminal_evidence"], "VERIFIED")
+
+    def test_late_timeout_does_not_replace_successful_stream_guard_kill(self):
+        for raw, expected in ((b'not-json\n', "STREAM_INVALID"), (b'x' * 1000, "OUTPUT_LIMIT")):
+            runner, proc, signals = self.runner(), self.process(output=raw), []
+            class LateTimer:
+                def __init__(self, seconds, function, args):
+                    self.function, self.args = function, args
+                    proc.timeout_callback = lambda: self.function(*self.args)
+                def start(self): pass
+                def cancel(self): pass
+                def join(self): pass
+            def killpg(pid, sig):
+                signals.append(sig)
+                if sig == 0 or signals.count(signal.SIGKILL) > 1:
+                    raise ProcessLookupError
+            def wait(timeout=None):
+                # The guard already killed the group. A previously started
+                # deadline callback reaches killpg before timer.join completes.
+                proc.timeout_callback()
+                proc.returncode = -signal.SIGKILL
+            proc.wait = wait
+            with self.subTest(expected=expected), patch.object(fable, "MAX_OUTPUT", 32), \
+                    patch.object(fable.subprocess, "Popen", return_value=proc), \
+                    patch.object(fable.threading, "Timer", LateTimer), patch.object(fable.os, "killpg", killpg):
+                runner(Path("/fake/work"), "system", {}, "prompt")
+                self.assertEqual(signals, [signal.SIGKILL, signal.SIGKILL, 0])
+                record = fable.failure_of(runner.last_output, version="2.1.286 (Claude Code)",
+                                          execution=runner.last_execution)
+                self.assertEqual(record["error_code"], expected)
+                self.assertEqual(record["terminal_evidence"], "VERIFIED")
+
 
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
@@ -409,6 +519,41 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(store.read("audit", self.binding)["status"], "ERROR")
         self.assertEqual(store.read("audit", self.binding)["settlement"], "TERMINAL_FAILED")
         self.assertEqual(quota.resume("audit", self.binding, forbidden_call)["status"], "BLOCKED_ERROR")
+
+    def test_each_wrapper_stop_roundtrips_settles_without_same_binding_reexecution_or_quota(self):
+        import control_plane_program_receipts as journal
+        from control_plane_program_quota import Quota
+        for code, raw in (("WRAPPER_TIMEOUT", b'{}\n'), ("STREAM_INVALID", b'not-json\n'),
+                          ("STREAM_INVALID", b'{"type":"assistant","type":"result"}\n'),
+                          ("OUTPUT_LIMIT", b'x' * 65)):
+            with self.subTest(code=code, raw=raw), patch.object(fable, "MAX_OUTPUT", 64):
+                guard = (fable.wrapper_stop(code, raw, timeout_seconds=fable.TIMEOUT_SECONDS)
+                         if code == "WRAPPER_TIMEOUT" else fable.read_stream(io.BytesIO(raw))[1])
+                ctx = self.context(output=raw, execution={**EXECUTION, "exit_code": -signal.SIGKILL,
+                    "guard_stop": guard, "guard_kill_sent": True, "timed_out": code == "WRAPPER_TIMEOUT"})
+                ctx.claude_version = "2.1.286 (Claude Code)"
+                store_root = self.runs / ("store-" + fable.sha256_bytes(raw + code.encode())[:8])
+                store_root.mkdir(mode=0o700)
+                store = journal.Receipts(store_root, "a" * 64, trust=lambda *args, **kwargs: None)
+                def invoke():
+                    _, _, failure = self.fail_run(ctx)
+                    raise fable.FableError("wrapper stop", failure=failure)
+                with self.assertRaises(fable.FableError): store.execute("audit", self.binding, invoke)
+                first = store.read("audit", self.binding)
+                self.assertEqual(first["failure"]["error_code"], code)
+                original = store._path(first["admission"], "outcome").read_bytes()
+                verify = lambda run: fable.verify_failure_evidence(ctx, run)
+                def forbidden(*args): self.fail("self-stop retried the model")
+                quota = Quota(store, verify, forbidden, forbidden, clock_ms=lambda: NOW_MS)
+                self.assertEqual(quota.resume("audit", self.binding, forbidden)["status"], "BLOCKED_ERROR")
+                self.assertEqual(list(quota.root.iterdir()), [])
+                settled = store.reconcile(first["admission"], first["state_version"], verify)
+                self.assertEqual(settled["status"], "RECONCILED_FAILED")
+                self.assertEqual(store._path(first["admission"], "outcome").read_bytes(), original)
+                self.assertEqual(store.execute("audit", self.binding, forbidden)["status"], "ERROR")
+                self.assertEqual(quota.resume("audit", self.binding, forbidden)["status"], "BLOCKED_ERROR")
+                changed = {**self.binding, "head": "b" * 40}
+                self.assertEqual(store.read("audit", changed)["status"], "MISSING")
 
     def test_tampered_archive_or_projection_cannot_settle(self):
         for target in ("claude-output.jsonl", "claude-stderr.txt", "failure-evidence.json", "model-attempt.json"):

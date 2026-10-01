@@ -189,6 +189,87 @@ class ContextTests(unittest.TestCase):
         return bridge.run(ctx, fable, {"repository": runtime.REPO, "issue": issue,
                           "operation": "decision-status", "github_token": "token", **fields})
 
+    def bind_user_plan_revision(self, issue, binding):
+        proposed = self.r.gh.contents[runtime.PLAN2]
+        proposed["approval_pointer"] = f"https://github.com/{runtime.REPO}/pull/48"
+        old = prog.load_plan(self.r.gh, self.r.cfg, runtime.PLAN1)
+        new = prog.load_plan(self.r.gh, self.r.cfg, runtime.PLAN2)
+        proposed["superseding_decisions"] = [{"schema_version": 1, "repository": runtime.REPO,
+            "program": "zari", "node": "n1", "issue": issue, "writer_launch": binding["writer_launch"],
+            "previous_plan_commit": runtime.PLAN1,
+            "previous_definition_sha256": prog.node_definition_sha256(old["nodes"][0]),
+            "definition_sha256": prog.node_definition_sha256(new["nodes"][0]),
+            "decision_pointer": proposed["approval_pointer"]}]
+        self.r.gh.pulls[48] = {"state": "closed", "merged": True, "changed_files": 1,
+             "merge_commit_sha": runtime.PLAN2, "head": {"sha": runtime.PLAN2,
+             "ref": "user-plan-revision", "repo": {"full_name": runtime.REPO}}, "base": {"ref": "main"}}
+        self.r.gh.changed_files[48] = [{"filename": prog.PLAN_PATH}]
+
+    def test_own_issue_pointer_and_whitespace_cannot_clear_semantic_decision(self):
+        issue, _, binding = self.reviewed_delivery()
+        self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
+        with patch.object(bridge, "protected"), \
+                patch.object(bridge, "installed_fingerprint", return_value="a" * 64), \
+                patch.object(bridge, "require_service_authorization"):
+            ctx, store = self.protected_status_store()
+            store.write("audit", binding, {"status": "POSTED", "result": "DECISION_REQUIRED",
+                        "scope_result": "USER_REQUIRED", "program_binding": binding})
+            for mode in ("own-issue", "whitespace", "wrong-digest", "unmerged", "delivery-branch", "not-plan", "merge-resolution"):
+                self.r.gh.contents[runtime.PLAN2] = json.loads(json.dumps(self.r.gh.contents[runtime.PLAN1]))
+                self.r.gh.contents[runtime.PLAN2]["nodes"][0]["spec"] = "Actually changed definition."
+                self.bind_user_plan_revision(issue, binding)
+                if mode == "own-issue":
+                    self.r.gh.contents[runtime.PLAN2]["approval_pointer"] = self.r.gh.issues[issue]["html_url"]
+                elif mode == "whitespace":
+                    self.r.gh.contents[runtime.PLAN2]["nodes"][0] = {**self.r.gh.contents[runtime.PLAN1]["nodes"][0],
+                            "title": self.r.gh.contents[runtime.PLAN1]["nodes"][0]["title"] + " "}
+                elif mode == "wrong-digest":
+                    self.r.gh.contents[runtime.PLAN2]["superseding_decisions"][0]["definition_sha256"] = "f" * 64
+                elif mode == "unmerged": self.r.gh.pulls[48]["merged"] = False
+                elif mode == "delivery-branch": self.r.gh.pulls[48]["head"]["ref"] = "astra/zari-n1"
+                elif mode == "not-plan": self.r.gh.changed_files[48] = [{"filename": "src/code.py"}]
+                else:
+                    merge = "3" * 40
+                    self.r.gh.latest_plan_commit = runtime.PLAN2
+                    self.r.gh.pulls[48]["merge_commit_sha"] = merge
+                    self.r.gh.contents[merge] = runtime.plan([runtime.node(floor="A3", spec="Unadopted conflict resolution.")])
+                    self.r.gh.compare[(runtime.PLAN2, merge)] = "ahead"
+                with self.subTest(mode=mode):
+                    self.assertEqual(self.status_via_bridge(ctx, issue, plan_commit=runtime.PLAN2)["status"], "BLOCKED")
+
+    def test_decision_binds_actual_normal_merge_even_when_latest_path_commit_is_pr_head(self):
+        issue, _, binding = self.reviewed_delivery()
+        self.r.gh.contents[runtime.PLAN2] = runtime.plan([runtime.node(floor="A3", spec="Approved new scope.")])
+        self.bind_user_plan_revision(issue, binding)
+        merge = "3" * 40
+        self.r.gh.contents[merge] = json.loads(json.dumps(self.r.gh.contents[runtime.PLAN2]))
+        self.r.gh.latest_plan_commit = runtime.PLAN2
+        self.r.gh.pulls[48]["merge_commit_sha"] = merge
+        self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
+        self.r.gh.compare[(runtime.PLAN2, merge)] = "ahead"
+        self.r.gh.compare[(merge, runtime.PLAN2)] = "behind"
+        revised, *_ = bridge.resolve_request(self.r.gh, self.r.cfg, issue, "decision-status",
+                                             {"plan_commit": runtime.PLAN2})
+        self.assertEqual(revised["plan_commit"], runtime.PLAN2)
+
+    def test_renamed_or_removed_blocked_node_retains_host_identity(self):
+        issue, _, binding = self.reviewed_delivery()
+        self.r.gh.contents[runtime.PLAN2] = runtime.plan([runtime.node("renamed", floor="A3")])
+        self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
+        # Erasing an editable projection cannot erase the protected canonical node.
+        del self.r.gh.issues[issue]
+        with self.assertRaisesRegex(prog.ProgramError, "removes or renames"):
+            prog.materialize("zari", "renamed", runtime.PLAN2)
+        self.assertEqual(len(self.r.host.ledger.materialize_list("zari", runtime.REPO, self.r.host.policy)["rows"]), 1)
+
+    def test_program_key_rename_cannot_hide_existing_canonical_fence(self):
+        issue, _, _ = self.reviewed_delivery()
+        self.r.gh.contents[runtime.PLAN2] = runtime.plan([runtime.node("renamed", floor="A3")])
+        self.r.gh.contents[runtime.PLAN2]["program"] = "renamed-program"
+        self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
+        with self.assertRaisesRegex(runtime.cp.ControlPlaneError, "existing canonical program"):
+            prog.materialize("renamed-program", "renamed", runtime.PLAN2)
+
     def test_unresolved_execution_blocks_revised_plan_even_if_delegation_removed(self):
         issue, _, binding = self.reviewed_delivery()
         self.r.gh.contents[runtime.PLAN2] = runtime.plan([runtime.node(floor="A3", spec="Approved revised scope.")])
@@ -214,8 +295,7 @@ class ContextTests(unittest.TestCase):
         issue, _, binding = self.reviewed_delivery()
         self.r.gh.contents[runtime.PLAN2] = runtime.plan([runtime.node(floor="A3", astra_auto_merge=True,
                                                                   spec="User-approved revised scope.")])
-        self.r.gh.contents[runtime.PLAN2]["approval_pointer"] = \
-            "https://github.com/BeautifulMind-JT/ai-ops-control-plane/issues/48#issuecomment-123"
+        self.bind_user_plan_revision(issue, binding)
         self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
         with patch.object(bridge, "protected"), \
                 patch.object(bridge, "installed_fingerprint", return_value="a" * 64), \
@@ -251,8 +331,7 @@ class ContextTests(unittest.TestCase):
                         with self.assertRaisesRegex(prog.ProgramError, "USER_REQUIRED"):
                             self.r.launch_writer(issue, commit=runtime.PLAN2)
             self.r.gh.contents[runtime.PLAN2]["approval_pointer"] = "different text is not a User decision"
-            with self.assertRaisesRegex(bridge.BridgeError, "durable approval"):
-                self.status_via_bridge(ctx, issue, plan_commit=runtime.PLAN2)
+            self.assertEqual(self.status_via_bridge(ctx, issue, plan_commit=runtime.PLAN2)["status"], "BLOCKED")
             # Same-scope settlement is not manufactured by a pointer change;
             # it needs an independently adopted decision reconciler.
             self.r.gh.contents[runtime.PLAN2] = json.loads(json.dumps(self.r.gh.contents[runtime.PLAN1]))
@@ -278,6 +357,48 @@ class ContextTests(unittest.TestCase):
                 with self.assertRaisesRegex(prog.ProgramError, "unresolved"):
                     self.r.launch_writer(issue, commit=runtime.PLAN2)
         self.assertEqual(self.r.host.ledger.materialize_status("zari", "n1")["plan_commit"], runtime.PLAN1)
+
+    def test_advanced_host_plan_after_prepare_exception_can_retry_terminal_writer(self):
+        issue, _ = self.r.released_writer()
+        self.r.gh.contents[runtime.PLAN2] = runtime.plan([runtime.node(floor="A3", spec="Revised scope.")])
+        self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
+        with patch.object(bridge, "protected"), \
+                patch.object(bridge, "installed_fingerprint", return_value="a" * 64), \
+                patch.object(bridge, "require_service_authorization"):
+            ctx, _ = self.protected_status_store()
+            with patch.object(prog, "fable_program", side_effect=lambda _op, n, **fields:
+                              self.status_via_bridge(ctx, n, **fields)):
+                with patch.object(runtime.cp, "prepare_dispatch", side_effect=runtime.cp.ControlPlaneError("prepare failed")):
+                    with self.assertRaisesRegex(runtime.cp.ControlPlaneError, "prepare failed"):
+                        prog.start(issue, "zari", "n1", runtime.PLAN2, self.r.file("p2.json"), preflight=lambda _: True)
+                self.assertEqual(self.r.host.ledger.materialize_status("zari", "n1")["plan_commit"], runtime.PLAN2)
+                binding, *_ = bridge.request_context(self.r.gh, self.r.cfg, issue, decision_only=True)
+                self.assertEqual(binding["plan_commit"], runtime.PLAN1)
+                self.assertEqual(prog.start(issue, "zari", "n1", runtime.PLAN2,
+                                           self.r.file("retry.json"), preflight=lambda _: True)["status"], "PREPARED")
+
+    def test_advanced_host_plan_after_failed_prestart_can_retry_terminal_writer(self):
+        issue, _ = self.r.released_writer()
+        self.r.gh.contents[runtime.PLAN2] = runtime.plan([runtime.node(floor="A3", spec="Revised scope.")])
+        self.r.gh.compare[(runtime.PLAN1, runtime.PLAN2)] = "ahead"
+        with patch.object(bridge, "protected"), \
+                patch.object(bridge, "installed_fingerprint", return_value="a" * 64), \
+                patch.object(bridge, "require_service_authorization"):
+            ctx, _ = self.protected_status_store()
+            with patch.object(prog, "fable_program", side_effect=lambda _op, n, **fields:
+                              self.status_via_bridge(ctx, n, **fields)):
+                prog.start(issue, "zari", "n1", runtime.PLAN2, self.r.file("p2.json"), preflight=lambda _: True)
+                packet = json.loads(self.r.file("p2.json").read_text())
+                admitted, _ = self.r.host.ledger.reserve(packet, self.r.host.policy)
+                self.assertTrue(admitted)
+                self.r.host.ledger.finalize(packet, {"outcome": "FAILED_PRESTART", "reason": "fixture provider did not start"})
+                result = runtime.host.result_for(packet, "FAILED_PRESTART", "fixture provider did not start")
+                self.r.file("failed.json").write_text(json.dumps(result))
+                runtime.cp.finalize_dispatch(issue, self.r.file("failed.json"), packet["launch_request_id"])
+                binding, *_ = bridge.request_context(self.r.gh, self.r.cfg, issue, decision_only=True)
+                self.assertEqual(binding["plan_commit"], runtime.PLAN1)
+                self.assertEqual(prog.start(issue, "zari", "n1", runtime.PLAN2,
+                                           self.r.file("retry.json"), preflight=lambda _: True)["status"], "PREPARED")
 
     def test_proposed_plan_status_rejects_unapproved_unmerged_stale_or_different_scope(self):
         issue, _, _ = self.reviewed_delivery()

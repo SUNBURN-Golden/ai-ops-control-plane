@@ -359,7 +359,8 @@ class Receipts:
                         or evidence.get("publication_state") != "NOT_STARTED" \
                         or evidence.get("kind") != admission["action"] \
                         or evidence.get("error_code") not in ("MODEL_RATE_LIMIT", "MODEL_EXECUTION_FAILED",
-                                                             "OVERAGE_NOT_BLOCKED", "OVERAGE_UNVERIFIED"):
+                                                             "OVERAGE_NOT_BLOCKED", "OVERAGE_UNVERIFIED",
+                                                             "WRAPPER_TIMEOUT", "STREAM_INVALID", "OUTPUT_LIMIT"):
                     raise ReceiptError("program failure evidence is ambiguous or bound to another request")
                 event = {"schema_version": 1, "admission": key, "admission_sha256": digest(admission),
                          "outcome_sha256": digest(outcome), "resolution": "TERMINAL_FAILED",

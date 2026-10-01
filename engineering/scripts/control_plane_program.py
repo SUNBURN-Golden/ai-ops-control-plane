@@ -35,6 +35,7 @@ import secrets
 import subprocess
 import sys
 import time
+from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -335,6 +336,92 @@ def require_on_default_branch(api: cp.GithubApi, commit: str) -> None:
         raise ProgramError(f"PLAN_NOT_MERGED: {commit} is not on the default branch {branch}")
 
 
+def latest_default_plan(api: cp.GithubApi, cfg: Dict[str, Any]) -> tuple:
+    """Read the latest default-branch plan change, including merged stack commits.
+
+    An ancestor being merged is not scope approval. Always inspect the current
+    plan-file revision before admission so historical unmarked plans cannot
+    bypass a later full-scope registration hold.
+    """
+    branch = default_branch(api)
+    revisions = api._request("GET", f"/commits?sha={quote(branch, safe='')}&path={quote(PLAN_PATH, safe='')}&per_page=1")
+    if not isinstance(revisions, list) or len(revisions) != 1 or not isinstance(revisions[0], dict) \
+            or not SHA.fullmatch(str(revisions[0].get("sha", ""))):
+        raise ProgramError("latest default-branch program plan commit is unknown")
+    commit = revisions[0]["sha"]
+    require_on_default_branch(api, commit)
+    return commit, load_plan(api, cfg, commit)
+
+
+def require_current_plan(api: cp.GithubApi, cfg: Dict[str, Any], requested: str,
+                         recorded: Optional[str] = None) -> Dict[str, Any]:
+    require_on_default_branch(api, requested)
+    latest, latest_plan = latest_default_plan(api, cfg)
+    # Revisions always use the current plan-file commit, rather than a caller's
+    # arbitrary merged ancestor or an unrelated later commit.
+    if requested != latest:
+        raise ProgramError(f"STALE_PLAN: requested plan {requested} is not latest default-branch plan {latest}")
+    if recorded is not None:
+        require_descendant(api, recorded, requested)
+    try:
+        recorded_nodes = host(["materialize-list", "--repository", cfg["repository"],
+                               "--program", latest_plan["program"]])
+    except cp.ControlPlaneError as exc:
+        raise ProgramError(str(exc)) from exc
+    rows = recorded_nodes.get("rows")
+    if (recorded_nodes.get("repository"), recorded_nodes.get("program")) != \
+            (cfg["repository"], latest_plan["program"]) or not isinstance(rows, list) or len(rows) > 10000 \
+            or not all(isinstance(row, dict) and isinstance(row.get("node"), str) for row in rows):
+        raise ProgramError("host canonical materialization list is malformed")
+    missing = sorted({row["node"] for row in rows} - {node["id"] for node in latest_plan["nodes"]})
+    if missing:
+        raise ProgramError(f"USER_REQUIRED: plan removes or renames canonical materialized nodes {missing}; "
+                           "identity/fence migration is not adopted")
+    return latest_plan
+
+
+def node_definition_sha256(node: Dict[str, Any]) -> str:
+    """Digest the validated definition, ignoring string-edge whitespace."""
+    def normalize(value):
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if isinstance(value, dict):
+            return {key: normalize(item) for key, item in value.items()}
+        return value
+    return hashlib.sha256(json.dumps(normalize(node), ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+PROGRAM_POLICY_PATHS = {PLAN_PATH, "AGENTS.md", "RUNBOOKS/DISPATCH.md", "docs/PROGRAM_MODE.md",
+                        "docs/CONTROL_PLANE_RUNTIME.md", "docs/COORDINATOR_PLAYBOOK.md",
+                        "docs/PROGRAM_ASTRA_AUTOMATION.md", "docs/PROGRAM_ASTRA_ADOPTION_PROPOSAL_KO.md",
+                        "docs/PROGRAM_FABLE_RECOVERY.md", "docs/DEVIN_EXECUTION_PLAN.md"}
+PROGRAM_POLICY_PREFIXES = (".aiops/", ".github/", "docs/aiops/", "docs/decisions/", "RUNBOOKS/")
+
+
+def changed_paths(api: cp.GithubApi, pr: Dict[str, Any], pr_number: int) -> set:
+    files = paginate(api, f"/pulls/{pr_number}/files")
+    if type(pr.get("changed_files")) is not int or len(files) != pr["changed_files"] \
+            or not all(isinstance(item, dict) and isinstance(item.get("filename"), str) for item in files):
+        raise ProgramError("PR changed-path inventory is incomplete or unknown")
+    return {path for item in files for path in (item.get("filename"), item.get("previous_filename")) if path}
+
+
+def program_policy_path(path: str, plan: Optional[Dict[str, Any]] = None) -> bool:
+    # Semicolon-separated local authority pointers are immutable contracts at
+    # the approved plan revision. External-repository/URL pointers do not name
+    # this PR's files. Trailing human annotations do not erase the local path.
+    authority_paths = set()
+    for pointer in str((plan or {}).get("authoritative_doc_pointers", "")).split(";"):
+        candidate = pointer.strip().split(" ", 1)[0]
+        if re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", candidate) and "." in candidate:
+            authority_paths.add(candidate)
+    return path in PROGRAM_POLICY_PATHS or path in authority_paths or path.startswith(PROGRAM_POLICY_PREFIXES) \
+        or path.rsplit("/", 1)[-1] == "AGENTS.md"
+
+
 # --------------------------------------------------------------------------- task body
 
 
@@ -440,7 +527,10 @@ def materialize(program: str, node_id: str, plan_commit: str) -> Dict[str, Any]:
     cfg = cp.load_config()
     cp.require_runtime_enabled()
     api = api_for(cfg)
-    plan = load_plan(api, cfg, plan_commit)
+    plan = require_current_plan(api, cfg, plan_commit)
+    prior = host(["materialize-status", "--program", program, "--node", node_id])
+    if prior.get("plan_commit") is not None:
+        require_descendant(api, prior["plan_commit"], plan_commit)
     if plan["program"] != program:
         raise ProgramError("plan program key does not match the request")
     node = plan_node(plan, node_id)
@@ -613,7 +703,8 @@ def delivery_completion(api: cp.GithubApi, cfg: Dict[str, Any], pin: Optional[Di
             or statuses.get("statuses") and statuses.get("state") in ("failure", "error"):
         return {**result, "status": "POST_MERGE_FAILED",
                 "reasons": ["KIX post-merge CI failed; durable failure and corrective task evidence required"]}
-    reasons.extend(verification_reasons(api, cfg, merge_sha))
+    reasons.extend(verification_reasons(api, cfg, merge_sha,
+                                        required_checks_key="program_post_merge_required_checks"))
     push_runs = post_merge_workflow_runs(api, branch, merge_sha)
     newest = {}
     for run in push_runs:
@@ -629,7 +720,8 @@ def delivery_completion(api: cp.GithubApi, cfg: Dict[str, Any], pin: Optional[Di
     verified_suites = {run.get("check_suite_id") for run in push_runs
                        if run.get("status") == "completed" and run.get("conclusion") == "success"
                        and type(run.get("check_suite_id")) is int}
-    for name in cfg.get("program_required_checks", []):
+    post_merge_checks = cfg.get("program_post_merge_required_checks")
+    for name in post_merge_checks if isinstance(post_merge_checks, list) else []:
         required = [check for check in checks if check.get("name") == name]
         if not required or any((check.get("check_suite") or {}).get("id") not in verified_suites
                                for check in required):
@@ -721,11 +813,9 @@ def start(issue_number: int, program: str, node_id: str, plan_commit: str, packe
         raise ProgramError("program node has no CREATED canonical issue matching issue_number")
     # Validate the new plan fully first; the host plan commit advances only right before the
     # envelope is rewritten, so a refused or waiting start never strands a stale body.
-    plan = load_plan(api, cfg, plan_commit)
+    plan = require_current_plan(api, cfg, plan_commit, status["plan_commit"])
     node = plan_node(plan, node_id)
     require_on_default_branch(api, plan_commit)
-    if status["plan_commit"] != plan_commit:
-        require_descendant(api, status["plan_commit"], plan_commit)
     issue = api.issue(issue_number)
     if issue.get("state") != "open" or issue_key(issue) != (program, node_id, status["request"]):
         raise ProgramError("canonical issue is closed or its task key does not match the host record")
@@ -1110,17 +1200,20 @@ def latest_check_runs(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [run for _, run in newest.values()]
 
 
-def verification_reasons(api, cfg, head):
-    """One current-head CI predicate shared by merge and quota readmission."""
+def verification_reasons(api, cfg, head, *, required_checks_key="program_required_checks"):
+    """Exact-head CI predicate; merge/quota use premerge checks by default.
+
+    Post-merge completion explicitly selects the protected postmerge check list.
+    """
     reasons = []
     runs = latest_check_runs(all_check_runs(api, head)) if head else []
     if any(r.get("status") != "completed" or r.get("conclusion") not in ("success", "neutral", "skipped")
            for r in runs):
         reasons.append("verification gate: a check run is incomplete or failing on the head")
-    required_checks = cfg.get("program_required_checks")
+    required_checks = cfg.get(required_checks_key)
     if not isinstance(required_checks, list) or not required_checks \
             or not all(isinstance(name, str) and name.strip() for name in required_checks):
-        reasons.append("verification gate: the product's required checks are not declared (program_required_checks)")
+        reasons.append(f"verification gate: the product's required checks are not declared ({required_checks_key})")
     else:
         for name in required_checks:
             named = [r for r in runs if r.get("name") == name]
@@ -1168,6 +1261,13 @@ def merge_check(issue_number: int, pr_number: int) -> Dict[str, Any]:
     labels = {label.get("name") for label in issue.get("labels", [])}
     if labels & BLOCKING_LABELS:
         reasons.append(f"unresolved blocker labels: {sorted(labels & BLOCKING_LABELS)}")
+    try:
+        protected_paths = sorted(path for path in changed_paths(api, pr, pr_number) if program_policy_path(path, plan))
+        if protected_paths:
+            reasons.append(f"program delivery changes plan/policy paths {protected_paths}; "
+                           "a separate User-merged plan/policy PR is required")
+    except ProgramError as exc:
+        reasons.append(str(exc))
     reasons.extend(verification_reasons(api, cfg, head))
     if any(row.get("role") == "REVIEWER" and row.get("state") in ("SUBMITTING", "CONFIRMED", "UNKNOWN")
            for row in rows):

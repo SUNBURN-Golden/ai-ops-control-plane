@@ -87,6 +87,10 @@ def archive(files, *, top="BeautifulMind-JT-ai-ops-control-plane-0123456", links
 
 BLOCKED = {"status": "allowed", "overageStatus": "rejected", "overageDisabledReason": "org_level_disabled",
            "isUsingOverage": False}
+# Reconstructed wire shape reported for CLI 2.1.286; no provider call/captured
+# host transcript is claimed. Crucially, overageStatus is absent, not null.
+SUBSCRIPTION_WARNING_286 = {"status": "allowed_warning", "rateLimitType": "five_hour",
+                            "utilization": 0.91, "resetsAt": 1790765400, "isUsingOverage": False}
 
 
 def cli_output(structured, *, models=None, subtype="success", is_error=False, denials=(), limits=(BLOCKED,)):
@@ -280,6 +284,34 @@ class ExtractTests(Base):
 
 
 class OutputTests(unittest.TestCase):
+    def test_approved_subscription_signal_flows_through_stream_and_final_validation(self):
+        for status in ("allowed", "allowed_warning"):
+            info = {**SUBSCRIPTION_WARNING_286, "status": status}
+            raw = cli_output(verdict(), limits=(info,))
+            output, stop = fable.read_stream(io.BytesIO(raw))
+            self.assertFalse(stop)
+            self.assertEqual(output, raw)
+            data = fable.model_output(output)
+            self.assertEqual(data["overage"], {"status": status, "isUsingOverage": False})
+            self.assertNotIn("overageStatus", data["overage"])
+            ctx = type("Ctx", (), {"tool_sha256": "f" * 64})()
+            trailer = fable.run_trailer(ctx, data, "a" * 64, "fixture-run", "2.1.286 (Claude Code)")
+            self.assertIn("billing-disabled status was not reported", trailer)
+            self.assertNotIn("extra usage: blocked", trailer)
+
+    def test_subscription_exception_requires_exact_absence_boolean_and_status(self):
+        changes = [{"overageStatus": value} for value in (None, "", "unknown", "allowed", "allowed_warning")]
+        changes += [{"isUsingOverage": value} for value in (None, 0, "false", True)]
+        changes += [{"status": value} for value in (None, "rejected", "unknown", True)]
+        for change in changes:
+            info = {**SUBSCRIPTION_WARNING_286, **change}
+            with self.subTest(change=change):
+                self.assertIsNotNone(fable.overage_policy(info)[0])
+                _, stop = fable.read_stream(io.BytesIO(cli_output(verdict(), limits=(info,))))
+                self.assertIsInstance(stop, dict)
+                with self.assertRaises(fable.FableError):
+                    fable.model_output(cli_output(verdict(), limits=(info,)))
+
     def test_only_a_successful_fable_run_counts(self):
         good = fable.model_output(cli_output(verdict()))
         self.assertEqual(good["session_id"], SESSION)
@@ -526,7 +558,7 @@ class ConsultTests(Base):
 
 
 class PreflightTests(Base):
-    def reply(self, *, nonce=None, outside=False, denied=True, leak=False):
+    def reply(self, *, nonce=None, outside=False, denied=True, leak=False, limits=(BLOCKED,)):
         def inspect(work):
             self.nonce = (work / "note.txt").read_text().strip()
             self.outside = (work.parent / "outside.txt").read_text().strip()
@@ -536,11 +568,18 @@ class PreflightTests(Base):
             def __call__(inner, work, system, schema, prompt):
                 inspect(work)
                 inner.output = cli_output({"nonce": nonce or self.nonce, "outside_read_ok": outside},
-                                          denials=denials)
+                                          denials=denials, limits=limits)
                 if leak:
                     inner.output += json.dumps({"type": "user", "text": self.outside}).encode() + b"\n"
                 return super().__call__(work, system, schema, prompt)
         return Runner()
+
+    def test_subscription_warning_pass_preserves_missing_billing_status(self):
+        result = fable.preflight(self.context(FakeGitHub(), self.reply(limits=(SUBSCRIPTION_WARNING_286,))),
+                                 "2.1.286 (Claude Code)")
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["extra_usage"], {"status": "allowed_warning", "isUsingOverage": False})
+        self.assertNotIn("overageStatus", result["extra_usage"])
 
     def test_preflight_proves_an_inside_read_and_a_denied_outside_read(self):
         result = fable.preflight(self.context(FakeGitHub(), self.reply()), "2.1.285 (Claude Code)")

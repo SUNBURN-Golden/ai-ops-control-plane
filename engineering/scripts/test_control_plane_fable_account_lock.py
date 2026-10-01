@@ -118,7 +118,7 @@ class AccountLockTests(unittest.TestCase):
         fixture = QuotaTests("test_one_retry_preserves_original_error_and_exact_program_binding")
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
-        fixture.fail()
+        fixture.quota_failure()
         def preflight():
             with fable.account_model_lock() as acquired:
                 self.assertFalse(acquired)

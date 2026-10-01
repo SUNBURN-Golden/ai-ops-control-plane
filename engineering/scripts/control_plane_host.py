@@ -872,6 +872,30 @@ class Ledger:
                 "attempt": row["attempt"], "issue": row["issue"], "plan_commit": row["plan_commit"],
                 "repository": row["repository"], "sealed": json.loads(row["sealed"])}
 
+    def materialize_list(self, program, repository, policy):
+        """Bounded read-only canonical identities, including abandoned records.
+
+        Projection deletion and node renaming cannot hide these ledger rows.
+        This grants no admission, plan mutation, settlement or launch authority.
+        """
+        safe_key(program, "program")
+        if repository not in policy["allowed_repositories"]:
+            raise HostError("materialization list repository is not allowed")
+        db = self.connect()
+        try:
+            rows = db.execute("SELECT program, node, repository, request, state, issue, plan_commit FROM materializations "
+                              "WHERE repository=? OR program=? ORDER BY program, node LIMIT 10001",
+                              (repository, program)).fetchall()
+        finally:
+            db.close()
+        if len(rows) > 10000 or any(row["repository"] != repository for row in rows):
+            raise HostError("materialization list exceeds its bound or targets a different repository")
+        if any(row["program"] != program for row in rows):
+            raise HostError("program key replaces an existing canonical program; identity migration is not adopted")
+        return {"program": program, "repository": repository,
+                "rows": [{"program": row["program"], "node": row["node"], "status": row["state"], "request": row["request"],
+                          "issue": row["issue"], "plan_commit": row["plan_commit"]} for row in rows]}
+
     def reconcile(self, request, session, evidence, *, no_session=False, sender_fenced=False,
                   never_admitted=False):
         with self.inflight_lock(exclusive=True):
@@ -1053,6 +1077,9 @@ def main(argv=None):
     mplan = commands.add_parser("materialize-plan")
     for flag in ("program", "node", "from", "to"):
         mplan.add_argument("--" + flag, required=True)
+    mlist = commands.add_parser("materialize-list")
+    for flag in ("repository", "program"):
+        mlist.add_argument("--" + flag, required=True)
     mstatus = commands.add_parser("materialize-status")
     for flag in ("program", "node"):
         mstatus.add_argument("--" + flag, required=True)
@@ -1092,6 +1119,8 @@ def main(argv=None):
             result = ledger.materialize_resolve(args.program, args.node, args.request, args.evidence)
         elif args.command == "materialize-plan":
             result = ledger.materialize_plan(args.program, args.node, getattr(args, "from"), args.to)
+        elif args.command == "materialize-list":
+            result = ledger.materialize_list(args.program, args.repository, policy)
         elif args.command == "materialize-status":
             result = ledger.materialize_status(args.program, args.node)
         else:

@@ -13,6 +13,7 @@ Cmnd_Alias AIOPS_PROGRAM_HOST = \
     /opt/astra/bin/astra-host-control ^materialize-begin --program [A-Za-z0-9][A-Za-z0-9._-]* --node [A-Za-z0-9][A-Za-z0-9._-]* --repository [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+ --plan-commit [0-9a-f]{40}$, \
     /opt/astra/bin/astra-host-control ^materialize-finish --program [A-Za-z0-9][A-Za-z0-9._-]* --node [A-Za-z0-9][A-Za-z0-9._-]* --request [0-9a-f]{24} --outcome CREATED --issue [1-9][0-9]*$, \
     /opt/astra/bin/astra-host-control ^materialize-finish --program [A-Za-z0-9][A-Za-z0-9._-]* --node [A-Za-z0-9][A-Za-z0-9._-]* --request [0-9a-f]{24} --outcome UNKNOWN$, \
+    /opt/astra/bin/astra-host-control ^materialize-list --repository [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+ --program [A-Za-z0-9][A-Za-z0-9._-]*$, \
     /opt/astra/bin/astra-host-control ^materialize-status --program [A-Za-z0-9][A-Za-z0-9._-]* --node [A-Za-z0-9][A-Za-z0-9._-]*$, \
     /opt/astra/bin/astra-host-control ^materialize-plan --program [A-Za-z0-9][A-Za-z0-9._-]* --node [A-Za-z0-9][A-Za-z0-9._-]* --from [0-9a-f]{40} --to [0-9a-f]{40}$, \
     /opt/astra/bin/astra-host-control preflight --builder-id CURSOR

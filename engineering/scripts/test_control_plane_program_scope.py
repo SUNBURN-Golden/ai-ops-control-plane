@@ -31,6 +31,12 @@ class PlanAPI:
         self.reads = []
 
     def _request(self, method, path):
+        if method == "GET" and path == "":
+            return {"default_branch": "main"}
+        if method == "GET" and path == f"/compare/main...{PLAN_COMMIT}":
+            return {"status": "behind"}
+        if method == "GET" and path.startswith("/commits?sha=main&path="):
+            return [{"sha": PLAN_COMMIT}]
         if method != "GET" or path != f"/contents/{prog.PLAN_PATH}?ref={PLAN_COMMIT}":
             raise AssertionError("unexpected API access beyond the exact plan read")
         self.reads.append(path)

@@ -74,9 +74,14 @@ wrapper are not covered and must still be scheduled separately.
 The runtime waits long enough for the existing three-hour Fable model limit plus
 archive preparation/transport. It does not cancel an audit after the old 15-minute
 workflow timeout. Fable's extra-usage checks, fixed model, restricted tools,
-read-only account, secret filtering and no fallback remain in force. A missing
-`overageStatus` stays a failure. This change does not switch an account's billing
-settings or interpret the missing field as rejected. One active job holds its
+read-only account, secret filtering and no fallback remain in force. User-approved
+fix-request item 9 permits only a valid rate-limit info object with status
+`allowed`/`allowed_warning`, boolean `isUsingOverage=false` and an absent
+`overageStatus` key. Other missing/malformed or contradictory billing proof stays
+a failure; actual extra usage still stops immediately. The accepted exception
+preserves the missing key and never interprets it as rejected. It does not switch
+an account's billing settings or supply the explicit rejected evidence required
+for a protected quota readmission. One active job holds its
 task concurrency group and runner for the long invocation; queued GitHub runs
 are not model admissions. Workflow cancellation does not prove a root child
 stopped. Timeout, permission or transport errors remain fenced while the operator
@@ -170,13 +175,28 @@ For every prior released writer, `start` checks protected consultations and audi
 before changing the issue, pin or writer, including User-only and nondelegated nodes.
 The read-only query validates the proposed plan as an approved default-branch
 descendant with the same canonical program/node. USER_REQUIRED or an unresolved admitted request prevents resume
-even if somebody removes GitHub labels or rewrites a comment. A legitimate User
-scope revision with a changed durable approval pointer and changed node definition
-may supersede the exact old semantic USER_REQUIRED binding. An unrelated main commit,
-unchanged approval, or changed specification without new approval cannot. Such a
-revision does not itself reconcile an unresolved execution. Removing delegation
+even if somebody removes GitHub labels or rewrites a comment. Semantic supersession
+requires a same-repository, separately merged plan-decision PR and an exact
+`superseding_decisions` record present in its merged plan. Required record keys
+are `schema_version` (1), `repository`, `program`, `node`, `issue`,
+`writer_launch`, `previous_plan_commit`, `previous_definition_sha256`,
+`definition_sha256` and `decision_pointer`. Both node digests are SHA256 of
+canonical validated node JSON after recursive string-edge normalization.
+The record must bind the protected blocked node/writer and the actual new node;
+the pointer cannot be the task issue/comment, a delivery PR or a task branch.
+Title-edge whitespace, a URL-looking approval change or an unrelated main commit
+cannot supersede the decision. Current-default plan admission refuses removal or
+renaming of protected canonical node identities; no ancestry migration is adopted.
+The separate User-merged revision requirement is policy, not a claim of unique
+human identity under M4's shared credential. Such a revision does not itself
+reconcile an unresolved execution. Removing delegation
 from the proposed node cannot remove an existing protected execution fence. A
 missing or unqualified protected decision service holds this resume path.
+Program delivery merge-check also rejects plan/policy changes: `.aiops/`,
+`.github/`, `docs/aiops/`, `docs/decisions/`, `RUNBOOKS/`, any `AGENTS.md`, fixed
+central policy paths and the local paths bound by `authoritative_doc_pointers`.
+Those revisions must follow a separate User-merge path; an ordinary delivery
+cannot change the scope/approval that would authorize its own automatic merge.
 Deleting a receipt, changing HEAD/plan/tool hash or editing the projection is not
 terminal proof. This guard grants no new authority to Opus. Read-only
 decision-status may inspect an operator-reconciled terminal writer and derive
@@ -198,6 +218,15 @@ insufficient and no source check is represented as host qualification.
 
 ## Rollout on the host
 
+The #46 `a8b7355712c58de8d27c85a535fb241a09a4037c` and historical #47
+`94a768e19df12703ea0b9a49e49972feb2f6ef4f` checkpoints lack the external-field
+validator required by KIX R-1 §6-2. They must not be adopted alone. Use #47
+`e34868c6a12e5488224095b3248e59c8be9128f1` or a verified descendant retaining
+the `user_merge` guard and rejection of every `depends_on_external` field,
+including an empty field. The actual final accepted HEAD still requires its own
+independent A3, User adoption and host qualification; this minimum checkpoint is
+not a PASS or authorization pointer.
+
 1. Record the actual User governance decision for restricted Option C and the
    runner-root exception; keep its pointer PENDING until then. Audit the new
    implementation's exact HEAD with ordinary ARCHITECTURE/A3 and obtain normal
@@ -208,6 +237,9 @@ insufficient and no source check is represented as host qualification.
    `control_plane_program_quota.py`, `control_plane_program.py`, `control_plane.py`
    from the same accepted commit into `/opt/aiops/lib/program/`, root-owned and
    not group/other writable. Protect every directory in the path chain.
+   Preserve the complete protected state on durable storage and migrate the
+   existing ledger/receipts/journals/quota records, never an empty reset, as required
+   by `PROGRAM_FABLE_RECOVERY.md` "Durable host state and migration".
 3. Copy the same commit's central config and project profiles to
    `/opt/aiops/lib/.github/control-plane/`, with a protected root-owned directory
    chain. Install all fingerprinted policy documents (`POLICY_PATHS`, including
@@ -222,7 +254,9 @@ insufficient and no source check is represented as host qualification.
    config/profile/policy hashes, including direct stdin entry. Only after actual
    adoption and qualification may the operator apply the exact sudoers candidate
    and validate it with `visudo -cf`; no general root command is added.
-5. Run existing Fable preflight. Require its actual extra-usage rejected evidence.
+5. Run existing Fable preflight. Installation's blocked-billing qualification
+   still requires actual extra-usage rejected evidence; the narrow ordinary
+   subscription-warning exception above does not supply that evidence.
    OVERAGE_UNVERIFIED means missing or malformed billing proof, not permission to
    change account settings. OVERAGE_NOT_BLOCKED identifies affirmative contradictory
    billing evidence. Retain either failure and diagnose the sealed raw archive;
