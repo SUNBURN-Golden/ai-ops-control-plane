@@ -1,0 +1,5 @@
+#!/bin/sh
+# Fixed binary and both official update disables; no mutable workspace scripts.
+export DISABLE_AUTOUPDATER=1
+export DISABLE_UPDATES=1
+exec /opt/aiops/bin/claude-2.1.286 "$@"
