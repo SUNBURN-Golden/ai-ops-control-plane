@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import types
 import unittest
 from unittest.mock import patch
@@ -566,8 +567,8 @@ class RecoveryTests(unittest.TestCase):
                     return types.SimpleNamespace(st_mode=s.st_mode,st_uid=0)
                 return s
             with patch.object(Path,'lstat',owner):
-                t.capture({},self.root/'unused',popen=lambda *a,**kw:Process(),read_code=lambda _: 'fake-approval-code',emit=output.append)
-        self.assertEqual(b'fake-approval-code\n',stdin.getvalue());self.assertEqual(url,output[0])
+                t.capture({},self.root/'unused',popen=lambda *a,**kw:Process(),read_code=lambda _: 'fake-approval-code',emit=output.append,pause=lambda _:None)
+        self.assertEqual(b'fake-approval-code\r',stdin.getvalue());self.assertEqual(url,output[0])
         self.assertNotIn(FAKE,' '.join(output));self.assertFalse(hasattr(t,'webbrowser'))
     def test_f3_normal_401_identifiers_validate(self):
         run=lambda *a,**k:types.SimpleNamespace(returncode=0,stdout=self.token_events(None,line=401,uuid='401a'),stderr=b'401 in diagnostic ID')
@@ -818,6 +819,56 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(url,t.login_url(screen))
         bad=pyte.HistoryScreen(500,10,history=10);pyte.Stream(bad).feed('https://claude.com.evil.example/oauth/authorize?x=1\r\nPaste code here >')
         self.assertIsNone(t.login_url(bad))
+
+    # Third live run: the code was pasted with a newline and never submitted.
+    class Clocks(list):
+        """Fake threading.Timer factory; fires a timer at start when its limit is listed."""
+        def __init__(self, fire=()):
+            super().__init__();self.fire=fire
+        def __call__(self, seconds, fn):
+            clock=types.SimpleNamespace(seconds=seconds,cancelled=False,daemon=False)
+            clock.start=lambda:fn() if seconds in self.fire else None
+            clock.cancel=lambda:setattr(clock,'cancelled',True)
+            self.append(clock);return clock
+    def cli_login_screen(self):
+        url='https://claude.com/cai/oauth/authorize?code=true&client_id=fake&state=fake'
+        return url,(" Browser didn't open? Use the url below to sign in (c to copy)\r\n\r\n"+url+
+                    "\r\n\r\n Paste code here if prompted > ").encode()
+    def test_host_cli_2_1_286_code_submitted_with_its_own_enter(self):
+        events=[];clocks=self.Clocks()
+        class Stdin:
+            def write(self, data):events.append(('write',data))
+            def flush(self):pass
+        def approval(_):
+            # No time limit runs while the User approves in the browser.
+            self.assertEqual(1,len(clocks));self.assertTrue(clocks[0].cancelled);return 'fake-approval-code'
+        url,raw=self.cli_login_screen()
+        path,output=self.capture_with(raw+FAKE.encode(),approval=approval,stdin=Stdin(),
+                                      pause=lambda seconds:events.append(('pause',seconds)),timer=clocks)
+        self.assertEqual([('write',b'fake-approval-code'),('pause',t.SUBMIT_PAUSE),('write',b'\r')],events)
+        self.assertEqual([t.PROMPT_SECONDS,t.ISSUE_SECONDS],[x.seconds for x in clocks])
+        self.assertTrue(all(x.cancelled and x.daemon for x in clocks));self.assertEqual(url,output[0])
+        self.assertEqual(self.root/'aiops-recover-token'/'typescript',path)
+    def test_host_cli_2_1_286_rejected_code_fails_fast(self):
+        # Screen recorded from the pinned CLI after a bad code; it then waits for Enter forever.
+        _,raw=self.cli_login_screen();folder=self.root/'aiops-recover-token'
+        rejected=raw+(b'\r\n OAuth error: Invalid code. Please make sure the full code was copied\r\n\r\n'
+                      b' Press Enter to retry.')
+        self.expect('LOGIN_CODE_REJECTED_RETRY',self.capture_with,rejected)
+        self.assertFalse((folder/'typescript').exists());self.assertTrue((folder/'failed-0.typescript').exists())
+        self.assertTrue(t.login_rejected([' Press Enter to retry.']))
+        self.assertFalse(t.login_rejected([' Paste code here if prompted > ****']))
+    def test_host_cli_silent_after_code_is_stopped(self):
+        killed=[];_,raw=self.cli_login_screen();folder=self.root/'aiops-recover-token'
+        self.expect('TOKEN_ISSUANCE_FAILED_RETRY',self.capture_with,raw,rc=-9,
+                    timer=self.Clocks(fire=(t.ISSUE_SECONDS,)),kill=lambda:killed.append(1))
+        self.assertEqual([1],killed);self.assertTrue((folder/'failed-0.typescript').exists())
+    def test_host_cli_no_prompt_is_stopped(self):
+        killed=[];clocks=self.Clocks(fire=(t.PROMPT_SECONDS,));folder=self.root/'aiops-recover-token'
+        self.expect('LOGIN_PROMPT_NOT_SHOWN_RETRY',self.capture_with,b' Welcome to Claude Code\r\n',rc=-9,
+                    timer=clocks,kill=lambda:killed.append(1))
+        self.assertEqual([1],killed);self.assertEqual([t.PROMPT_SECONDS],[x.seconds for x in clocks])
+        self.assertFalse((folder/'typescript').exists())
     def bootstrap_script(self):
         root=Path(__file__).resolve().parents[2]
         doc=(root/'engineering/recovery/BOOTSTRAP_KO.md').read_text()
@@ -920,9 +971,9 @@ class RecoveryTests(unittest.TestCase):
         finally:os.umask(previous)
 
     # Re-audit fixes (manual Fable A3 at 43ac23f, F1-F5 and N2).
-    def capture_with(self, raw, rc=0, approval='fake-approval-code'):
+    def capture_with(self, raw, rc=0, approval='fake-approval-code', stdin=None, pause=lambda _:None, timer=threading.Timer, kill=lambda:None):
         import io
-        proc=types.SimpleNamespace(stdout=io.BytesIO(raw),stdin=io.BytesIO(),wait=lambda **kw:rc,terminate=lambda:None,kill=lambda:None)
+        proc=types.SimpleNamespace(stdout=io.BytesIO(raw),stdin=stdin or io.BytesIO(),wait=lambda **kw:rc,terminate=lambda:None,kill=kill)
         class Process:
             def __enter__(self):return proc
             def __exit__(self,*a):return False
@@ -933,7 +984,8 @@ class RecoveryTests(unittest.TestCase):
                 return types.SimpleNamespace(st_mode=s.st_mode,st_uid=0)
             return s
         with patch.object(t,'check_tmpfs'),patch.object(Path,'lstat',owner):
-            path=t.capture({},self.root/'unused',popen=lambda *a,**kw:Process(),read_code=lambda _:approval,emit=output.append)
+            path=t.capture({},self.root/'unused',popen=lambda *a,**kw:Process(),
+                           read_code=approval if callable(approval) else lambda _:approval,emit=output.append,pause=pause,timer=timer)
         return path,output
     def login_screen(self):
         url='https://claude.ai/oauth/authorize?client_id=fake&state=fake'

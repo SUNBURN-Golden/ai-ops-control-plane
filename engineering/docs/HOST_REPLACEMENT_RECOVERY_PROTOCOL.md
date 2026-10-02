@@ -94,6 +94,7 @@ GitHub private 접근과 CAS 실제 권한을 대신 검증하지 않는다. 실
 | 현상 | 원인 | 수정 | 확인 |
 | --- | --- | --- | --- |
 | 2차 시운전: 설치 뒤 `PYTE_UNAVAILABLE` | 새 VM에서는 wrapper가 `/opt/aiops/lib/python`을 sys.path에 넣을 때 그 폴더가 없어, import 시스템이 "없음"으로 캐시함. 같은 프로세스에서 설치한 pyte·cryptography를 못 찾음(시스템 복사본이 대신 쓰일 수도 있음) | 설치 직후 `importlib.invalidate_caches()` | 늦게 생긴 폴더의 import를 별도 프로세스로 재현, 설치→캐시 갱신→등록 순서 시험 |
+| 3차 시운전: 승인 코드 입력 뒤 15분 넘게 대기 | 코드를 `코드+줄바꿈(LF)` 한 번에 보냄. CLI 2.1.286 입력창은 Enter 키의 CR만 제출로 받으므로 코드는 입력란에만 남고 제출되지 않음. 잘못된 코드·교환 실패 때도 CLI는 `Press Enter to retry.`에서 계속 기다림 | 코드를 보내고 1초 뒤 CR만 따로 보냄. 제출 뒤 `OAuth error`/`Press Enter to retry`가 보이면 즉시 `LOGIN_CODE_REJECTED_RETRY`. 시간 한도: URL·코드 입력창 표시 120초, 코드 제출 뒤 300초(대표 승인 대기 중에는 한도 없음). 넘으면 script를 끝내고 `LOGIN_PROMPT_NOT_SHOWN_RETRY`/`TOKEN_ISSUANCE_FAILED_RETRY` | 고정 CLI 실물(승인 없이 가짜 코드)로 기존 코드는 45초 넘게 대기, 수정 코드는 6초 만에 `LOGIN_CODE_REJECTED_RETRY`. 별도 CR 제출·한도·화면 오류 시험 |
 
 ## 수동 Fable A3 재감사(43ac23f, FAIL) 대응
 

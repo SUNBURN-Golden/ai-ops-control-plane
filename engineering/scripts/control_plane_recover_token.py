@@ -7,6 +7,7 @@ import re
 import stat
 import subprocess
 import time
+import threading
 import getpass
 import codecs
 import urllib.parse
@@ -18,6 +19,10 @@ TRANSCRIPT = Path('/dev/shm/aiops-token.typescript')
 EXPECTED_CLI = '2.1.286 (Claude Code)'
 ENV = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8',
        'DISABLE_AUTOUPDATER': '1', 'DISABLE_UPDATES': '1', 'BROWSER': '/bin/false'}
+# setup-token waits on its own screen forever; the capture never does.
+PROMPT_SECONDS = 120   # start until the URL and code prompt are shown
+ISSUE_SECONDS = 300    # submitted code until the token is shown and the CLI exits
+SUBMIT_PAUSE = 1.0     # the pasted code is rendered before Enter submits it
 
 
 def replay(data, columns=500, lines=60):
@@ -138,7 +143,14 @@ def login_url(screen):
     return None
 
 
-def capture(cfg, path, popen=subprocess.Popen, read_code=getpass.getpass, emit=print):
+def login_rejected(rows):
+    """CLI 2.1.286 shows 'OAuth error: …' and 'Press Enter to retry.' for a bad or
+    expired code and for a failed exchange, then waits for Enter."""
+    return any('OAuth error' in row or 'Press Enter to retry' in row for row in rows)
+
+
+def capture(cfg, path, popen=subprocess.Popen, read_code=getpass.getpass, emit=print,
+            pause=time.sleep, timer=threading.Timer):
     import pyte
     check_tmpfs(path)
     parent = path.parent / 'aiops-recover-token'
@@ -160,32 +172,61 @@ def capture(cfg, path, popen=subprocess.Popen, read_code=getpass.getpass, emit=p
         with popen(['/usr/bin/script', '-q', '-e', '-c', command, str(path)],
                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=ENV) as proc:
             sent = False
+            expired = []
+
+            def watchdog(seconds):
+                # Ending script closes the pipe, so the blocked read below returns.
+                def stop():
+                    expired.append(True)
+                    proc.kill()
+                clock = timer(seconds, stop)
+                clock.daemon = True
+                clock.start()
+                return clock
+            clock = watchdog(PROMPT_SECONDS)
             try:
                 while True:
                     block = proc.stdout.read(1)
                     if not block:
                         break
                     stream.feed(decoder.decode(block))
-                    if not sent and block in (b':', b'>', b'\n', b'\r'):
-                        rows = terminal_lines(screen)
-                        # Wait for the code prompt so a wrapped URL is complete.
-                        prompt = any(re.search(r'(paste|enter).{0,80}code', row, re.I) for row in rows)
-                        url = login_url(screen) if prompt else None
-                        if url:
-                            emit(url)
-                            emit('브라우저에서 승인 → 받은 코드를 붙여 넣고 Enter')
-                            code = read_code('승인 코드: ')
-                            if not code or len(code) > 8192 or '\n' in code or '\r' in code:
-                                fail('LOGIN_CODE_INVALID_RETRY')
-                            proc.stdin.write((code + '\n').encode())
-                            proc.stdin.flush()
-                            del code
-                            sent = True
-                if proc.wait():
+                    if block not in (b':', b'>', b'.', b'\n', b'\r'):
+                        continue
+                    rows = terminal_lines(screen)
+                    if sent:
+                        if login_rejected(rows):
+                            fail('LOGIN_CODE_REJECTED_RETRY')
+                        continue
+                    # Wait for the code prompt so a wrapped URL is complete.
+                    prompt = any(re.search(r'(paste|enter).{0,80}code', row, re.I) for row in rows)
+                    url = login_url(screen) if prompt else None
+                    if url:
+                        clock.cancel()
+                        emit(url)
+                        emit('브라우저에서 승인 → 받은 코드를 붙여 넣고 Enter')
+                        code = read_code('승인 코드: ')
+                        if not code or len(code) > 8192 or '\n' in code or '\r' in code:
+                            fail('LOGIN_CODE_INVALID_RETRY')
+                        # The CLI submits only on a carriage return of its own, as from
+                        # the Enter key; a newline inside the pasted text is just text.
+                        proc.stdin.write(code.encode())
+                        proc.stdin.flush()
+                        del code
+                        pause(SUBMIT_PAUSE)
+                        proc.stdin.write(b'\r')
+                        proc.stdin.flush()
+                        sent = True
+                        clock = watchdog(ISSUE_SECONDS)
+                returncode = proc.wait()
+                clock.cancel()
+                if expired:
+                    fail('TOKEN_ISSUANCE_FAILED_RETRY' if sent else 'LOGIN_PROMPT_NOT_SHOWN_RETRY')
+                if returncode:
                     fail('TOKEN_ISSUANCE_FAILED_RETRY')
                 if not sent:
                     fail('LOGIN_PROMPT_NOT_SHOWN_RETRY')
             except BaseException:
+                clock.cancel()
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)
