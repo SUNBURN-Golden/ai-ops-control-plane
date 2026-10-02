@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -1456,6 +1457,58 @@ class SudoersExampleTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "unescaped"):
             sudoers_runner_rules("Cmnd_Alias AIOPS_PROGRAM_HOST = \\\n"
                                  "    /opt/astra/bin/astra-host-control ^reap --evidence https://x$\n\n")
+
+
+class IsolatedEntrypointTests(unittest.TestCase):
+    """Exercise the production -I invocation without calling the real host."""
+
+    def test_isolated_script_and_operation_help(self):
+        script = Path(prog.__file__).resolve()
+        for command in ([], ["lanes"], ["materialize"], ["start"], ["review"],
+                        ["finalize-review"], ["reap"], ["merge-check"], ["merge"], ["astra-audit"],
+                        ["astra-consult"], ["quota-readiness"], ["quota-resume"]):
+            with self.subTest(command=command):
+                result = subprocess.run([sys.executable, "-I", str(script), *command, "--help"],
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("usage:", result.stdout)
+
+    def test_isolated_lanes_ignores_cwd_and_pythonpath_modules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            poison = Path(tmp) / "control_plane.py"
+            poison.write_text("raise RuntimeError('AMBIENT_MODULE_EXECUTED')\n")
+            probe = (
+                "import json, runpy, sys; from pathlib import Path; "
+                "ns=runpy.run_path(sys.argv[1]); cp=ns['cp']; "
+                "assert sys.flags.isolated == 1; "
+                "assert Path(cp.__file__).resolve() == Path(sys.argv[1]).with_name('control_plane.py'); "
+                "defn=\"def fake_host(arguments, document=None):\\n"
+                " assert arguments == ['status', '--lanes'] and document is None\\n"
+                " return {'lanes': [], 'active_total': 0, 'max_active_sessions': 1}\\n\"; "
+                "scope={}; exec(defn, scope); cp.host_call=scope['fake_host']; "
+                "raise SystemExit(ns['main'](['lanes']))"
+            )
+            result = subprocess.run([sys.executable, "-I", "-c", probe,
+                                     str(Path(prog.__file__).resolve())], cwd=tmp,
+                                    env={**os.environ, "PYTHONPATH": tmp},
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout),
+                             {"lanes": [], "active_total": 0, "max_active_sessions": 1})
+
+    def test_isolated_lanes_keeps_host_errors_fail_closed(self):
+        probe = (
+            "import runpy, sys; ns=runpy.run_path(sys.argv[1]); cp=ns['cp']; "
+            "defn=\"def deny(*args):\\n raise cp.ControlPlaneError('HOST_DENIED_TEST')\\n\"; "
+            "scope={'cp': cp}; exec(defn, scope); cp.host_call=scope['deny']; "
+            "raise SystemExit(ns['main'](['lanes']))"
+        )
+        result = subprocess.run([sys.executable, "-I", "-c", probe,
+                                 str(Path(prog.__file__).resolve())],
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("HOST_DENIED_TEST", result.stderr)
+        self.assertEqual(result.stdout, "")
 
 
 if __name__ == "__main__":
