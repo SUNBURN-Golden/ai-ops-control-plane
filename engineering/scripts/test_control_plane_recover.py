@@ -784,6 +784,28 @@ class RecoveryTests(unittest.TestCase):
                     b'User aiops-auditor may run the following commands on vm:\n    (ALL) NOPASSWD: ALL\n')
         self.expect('AUDITOR_SUDO_FORBIDDEN',self.sudo_listing,0,b'User someone is not allowed to run sudo on vm.\n')
         self.expect('AUDITOR_SUDO_FORBIDDEN',self.sudo_listing,2,b'User aiops-auditor is not allowed to run sudo on vm.\n')
+    def test_host_fresh_install_dir_importable_after_refresh(self):
+        # Real Grok VM: PYTE_UNAVAILABLE because sys.path held /opt/aiops/lib/python
+        # before the installer created it, and the import system cached it as missing.
+        import subprocess,sys
+        late=self.root/'late'/'python';scripts=Path(__file__).resolve().parent
+        code=('import sys,os\n'
+              f'sys.path.insert(0,{str(late)!r});sys.path.insert(1,{str(scripts)!r})\n'
+              'import json,argparse\n'
+              f'os.makedirs({str(late / "freshpkg")!r});open({str(late / "freshpkg" / "__init__.py")!r},"w").close()\n'
+              'try:\n import freshpkg;print("STALE_OK")\nexcept ImportError:print("STALE_MISSING")\n'
+              'import control_plane_recover as r\nr.refresh_imports()\nimport freshpkg;print("REFRESHED_OK")\n')
+        out=subprocess.run([sys.executable,'-I','-c',code],capture_output=True,text=True,timeout=60)
+        self.assertIn('STALE_MISSING',out.stdout,out.stderr);self.assertIn('REFRESHED_OK',out.stdout,out.stderr)
+    def test_host_recover_refreshes_imports_right_after_install(self):
+        import contextlib
+        order=[];inst=types.SimpleNamespace(install=lambda fetch:order.append('install'))
+        with patch.object(r,'config',return_value={}),patch.object(r,'barrier',lambda *a:contextlib.nullcontext()), \
+             patch.object(r,'components',return_value=(inst,self.cp,{},'fake-gh')), \
+             patch.object(r,'refresh_imports',side_effect=lambda:order.append('refresh')), \
+             patch.object(r,'prepare_enrollment',side_effect=lambda cp:(order.append('prepare'),r.fail('STOP'))):
+            self.assertEqual(1,r.recover_main(['--enroll']))
+        self.assertEqual(['install','refresh','prepare'],order)
     def test_host_cli_2_1_286_login_url_shown(self):
         # Screen shape recorded from the pinned CLI 2.1.286 setup-token (no approval made).
         import pyte

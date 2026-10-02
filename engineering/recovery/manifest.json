@@ -26,7 +26,7 @@
       "cache_path": "engineering/scripts/control_plane_recover.py",
       "destination": "/opt/aiops/lib/control_plane_recover.py",
       "mode": 420,
-      "sha256": "a18114cf177f0cb652c4f9b7ab9567788a631896946aad72b0601214258c27d4"
+      "sha256": "7e74f7c77cbba557365234bcf7bc8b0975c094d5aa1d50626b86dd51d8f6d767"
     },
     {
       "cache_path": "engineering/scripts/control_plane_recover_token.py",

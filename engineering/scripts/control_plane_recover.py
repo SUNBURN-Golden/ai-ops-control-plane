@@ -1069,6 +1069,13 @@ def prepare_enrollment(cp, input_fn=input):
     inventory(cp.root, cp.uid, cp.gid)
 
 
+def refresh_imports():
+    """On a fresh VM the wrapper puts /opt/aiops/lib/python on sys.path before the installer
+    creates it, and the import system caches that entry as missing. Without this, the pinned
+    pyte/cryptography stay unimportable (or a system copy wins) for the rest of this process."""
+    importlib.invalidate_caches()
+
+
 def new_state_password(prompt=getpass.getpass):
     """The only key to every later restore: confirm it before anything is created."""
     password = prompt('상태 암호: ')
@@ -1095,6 +1102,7 @@ def recover_main(argv=None):
         with barrier('/etc/aiops/recovery.lock'):
             inst, cp, fable_item, gh = components(cfg, create_account=True)
             inst.install(lambda item: fetch_artifact(item, cfg))
+            refresh_imports()
             if args.enroll:
                 prepare_enrollment(cp)
                 password = new_state_password()

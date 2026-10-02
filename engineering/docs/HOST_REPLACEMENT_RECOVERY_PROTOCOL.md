@@ -91,6 +91,10 @@ GitHub private 접근과 CAS 실제 권한을 대신 검증하지 않는다. 실
 
 고정 CLI 바이너리와 wheel 6개의 SHA256, `claude --version` 문자열, PTY 폭 검사도 실물로 확인했다.
 
+| 현상 | 원인 | 수정 | 확인 |
+| --- | --- | --- | --- |
+| 2차 시운전: 설치 뒤 `PYTE_UNAVAILABLE` | 새 VM에서는 wrapper가 `/opt/aiops/lib/python`을 sys.path에 넣을 때 그 폴더가 없어, import 시스템이 "없음"으로 캐시함. 같은 프로세스에서 설치한 pyte·cryptography를 못 찾음(시스템 복사본이 대신 쓰일 수도 있음) | 설치 직후 `importlib.invalidate_caches()` | 늦게 생긴 폴더의 import를 별도 프로세스로 재현, 설치→캐시 갱신→등록 순서 시험 |
+
 ## 수동 Fable A3 재감사(43ac23f, FAIL) 대응
 
 근거: [#49 감사 기록](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/49#issuecomment-5943407971).
