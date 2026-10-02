@@ -674,7 +674,7 @@ class RecoveryTests(unittest.TestCase):
             return real(path)
         with patch.object(r.pwd,'getpwnam',return_value=account),patch.object(grp,'getgrgid',return_value=types.SimpleNamespace(gr_name='aiops-auditor')), \
              patch.object(r.os,'getgrouplist',return_value=[996]),patch.object(r.os.path,'lexists',return_value=True),patch.object(Path,'lstat',info), \
-             patch.object(r.subprocess,'run',return_value=types.SimpleNamespace(returncode=1,stdout=b'not allowed to run sudo',stderr=b'')):
+             patch.object(r.subprocess,'run',return_value=types.SimpleNamespace(returncode=0,stdout=b'User aiops-auditor is not allowed to run sudo on vm.\n',stderr=b'')):
             self.assertEqual(996,r.ensure_account(cfg).pw_uid)
     def test_f7_keyctl_missing_uses_tmpfs_fallback(self):
         with patch.object(r.subprocess,'run',side_effect=FileNotFoundError()),patch.object(r,'tmpfs_key',return_value=self.key) as fallback:
@@ -764,6 +764,38 @@ class RecoveryTests(unittest.TestCase):
              patch.object(r.os,'getgrouplist',return_value=[996]),patch.object(Path,'exists',return_value=True), \
              patch.object(r.subprocess,'run',return_value=types.SimpleNamespace(returncode=0,stdout=b'(ALL) ALL',stderr=b'')):
             self.expect('AUDITOR_SUDO_FORBIDDEN',r.ensure_account,cfg)
+    def sudo_listing(self, rc, out):
+        import grp,stat
+        cfg={'account':{'name':'aiops-auditor','home':'/var/lib/aiops-auditor'}}
+        account=types.SimpleNamespace(pw_uid=996,pw_gid=996,pw_dir=cfg['account']['home'],pw_shell='/usr/sbin/nologin')
+        home=types.SimpleNamespace(st_mode=stat.S_IFDIR|0o700,st_uid=996,st_gid=996)
+        with patch.object(r.pwd,'getpwnam',return_value=account),patch.object(grp,'getgrgid',return_value=types.SimpleNamespace(gr_name='aiops-auditor')), \
+             patch.object(r.os,'getgrouplist',return_value=[996]),patch.object(Path,'exists',return_value=True), \
+             patch.object(r.os.path,'lexists',return_value=True),patch.object(Path,'lstat',return_value=home), \
+             patch.object(r.subprocess,'run',return_value=types.SimpleNamespace(returncode=rc,stdout=out,stderr=b'')):
+            return r.ensure_account(cfg,create=False)
+    def test_host_sudo_listing_without_rule_accepted(self):
+        # Real Grok VM (Debian 13): an unprivileged user is listed with exit code 0.
+        line=b'User aiops-auditor is not allowed to run sudo on grok-bot-vm-364569106.\n'
+        self.assertEqual(996,self.sudo_listing(0,line).pw_uid)
+        self.assertEqual(996,self.sudo_listing(1,line).pw_uid)
+    def test_host_sudo_listing_with_rule_or_other_user_refused(self):
+        self.expect('AUDITOR_SUDO_FORBIDDEN',self.sudo_listing,0,
+                    b'User aiops-auditor may run the following commands on vm:\n    (ALL) NOPASSWD: ALL\n')
+        self.expect('AUDITOR_SUDO_FORBIDDEN',self.sudo_listing,0,b'User someone is not allowed to run sudo on vm.\n')
+        self.expect('AUDITOR_SUDO_FORBIDDEN',self.sudo_listing,2,b'User aiops-auditor is not allowed to run sudo on vm.\n')
+    def test_host_cli_2_1_286_login_url_shown(self):
+        # Screen shape recorded from the pinned CLI 2.1.286 setup-token (no approval made).
+        import pyte
+        url=('https://claude.com/cai/oauth/authorize?code=true&client_id=fake&response_type=code'
+             '&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference'
+             '&code_challenge=fake&code_challenge_method=S256&state=fake')
+        screen=pyte.HistoryScreen(500,60,history=100);stream=pyte.Stream(screen)
+        stream.feed(" Browser didn't open? Use the url below to sign in (c to copy)\r\n\r\n"+url+
+                    "\r\n\r\n Hold Shift while selecting to use your terminal's native copy\r\n\r\n Paste code here if prompted >")
+        self.assertEqual(url,t.login_url(screen))
+        bad=pyte.HistoryScreen(500,10,history=10);pyte.Stream(bad).feed('https://claude.com.evil.example/oauth/authorize?x=1\r\nPaste code here >')
+        self.assertIsNone(t.login_url(bad))
     def bootstrap_script(self):
         root=Path(__file__).resolve().parents[2]
         doc=(root/'engineering/recovery/BOOTSTRAP_KO.md').read_text()

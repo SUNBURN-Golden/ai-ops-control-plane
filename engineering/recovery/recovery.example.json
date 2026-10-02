@@ -8,7 +8,7 @@
   },
   "artifact_cache": "/var/cache/aiops-recover",
   "claude_version": "2.1.286 (Claude Code)",
-  "manifest_sha256": "9db78e6a89b774cf8c9c50ea35c9d90ba14c9c10d5a7142e5a701cf1bd91a76d",
+  "manifest_sha256": "4ea150c78b542ad1337d548a4a48d0365bf3dd3b48e8666535f9e6f86c4fcbc9",
   "scope": "AUDIT_HOST_ONLY",
   "source_commit": "a964c0d72285a752cb567c39bfc4a7fb83ff3eae",
   "state_branch": "audit-host",

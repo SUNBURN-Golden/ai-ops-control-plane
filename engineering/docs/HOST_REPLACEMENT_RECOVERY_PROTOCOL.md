@@ -82,6 +82,15 @@ GitHub private 접근과 CAS 실제 권한을 대신 검증하지 않는다. 실
 설치·모델 실행·감사는 이 요청에서 금지되어 미실행이다. 자세한 전제는
 [설계](HOST_REPLACEMENT_RECOVERY_DESIGN.md)의 설치·과금 절에 기록한다.
 
+## 실호스트 시운전 1차(2026-10-02, Grok VM) 대응
+
+| 현상 | 원인 | 수정 | 확인 |
+| --- | --- | --- | --- |
+| 등록 첫 단계 `AUDITOR_SUDO_FORBIDDEN` | sudo 1.9.15/1.9.16은 규칙이 없는 다른 사용자 조회에 종료 코드 0과 `User <name> is not allowed to run sudo`를 낸다. 코드는 종료 코드 1만 허용 | 종료 코드 0/1 + 해당 사용자 이름의 그 문장 + 규칙 목록 없음일 때만 통과 | 실제 sudo 1.9.15 출력 재현, 규칙 있음·다른 사용자·다른 종료 코드 거부 시험 |
+| (같은 시운전 전 점검) 로그인 URL 미표시로 대기 | 고정 CLI 2.1.286 setup-token은 `https://claude.com/cai/oauth/authorize?...`를 표시. 허용 호스트에 claude.com이 없음 | 허용 호스트에 claude.com 추가(정확 일치) | 고정 CLI 실물로 승인 없이 URL·코드 입력 단계까지 재현, 유사 호스트 거부 시험 |
+
+고정 CLI 바이너리와 wheel 6개의 SHA256, `claude --version` 문자열, PTY 폭 검사도 실물로 확인했다.
+
 ## 수동 Fable A3 재감사(43ac23f, FAIL) 대응
 
 근거: [#49 감사 기록](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/49#issuecomment-5943407971).
