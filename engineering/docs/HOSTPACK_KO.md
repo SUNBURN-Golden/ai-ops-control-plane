@@ -10,7 +10,7 @@
 
 | 명령 | 하는 일 |
 |---|---|
-| `verify` | 읽기 전용. 구성 요소별 OK/HOLD와 다음 단계를 JSON으로 낸다. 레인 로그인은 증명하지 못하므로 항상 `PREFLIGHT_NOT_PROVEN`이다 |
+| `verify` | 읽기 전용. 구성 요소별 OK/HOLD와 다음 단계를 JSON으로 낸다. 레인 로그인은 이 도구가 증명하지 못한다. 레인마다 `preflight: NOT_PROVEN_BY_THIS_TOOL`로 표시하고, 증명은 워크플로 preflight가 한다. 구조가 모두 맞으면 상태는 `READY_FOR_PREFLIGHT`다 |
 | `install` | 없는 것만 설치한다. 계정, 보호 디렉터리, 호스트 helper, 레인 4개(wrapper, adapter, supervisor), 경계 hook, 러너 시작 스크립트, 호스트 정책, sudoers 2개. 바이트가 다른 기존 파일은 덮어쓰지 않고 `INSTALLATION_DRIFT`로 전체를 멈춘다 |
 | `boundary-render --commit <main 커밋>` | 그 main 커밋 하나에 고정된 경계 정책을 만든다. hook·evaluator 해시는 고정 매니페스트에서 가져오며 디스크 파일에서 다시 계산하지 않는다 |
 | `save` | 호스트 원장(SQLite 백업 API), 레인 설정, 선택한 레인의 로그인 파일을 암호화해 비공개 `aiops-state`의 `host-state` 브랜치에 올린다(CAS) |
@@ -70,7 +70,7 @@ COMMIT = os.environ['AIOPS_HOSTPACK_COMMIT']
 EVIDENCE = os.environ['AIOPS_BOUNDARY_EVIDENCE_URL']
 REPOSITORY = 'BeautifulMind-JT/ai-ops-control-plane'
 PINNED_SHA256 = {
- "engineering/scripts/control_plane_hostpack.py": "92220499f2fc3616933ea01aceae2b8f860fe01dbf351af72a87d448a9ac6124",
+ "engineering/scripts/control_plane_hostpack.py": "587a358fbb2a2feb301abe75630882c6bfd0b709cda686c93b2d8abf33dd8669",
  "engineering/hostpack/aiops-hostpack": "5492b8d848348b381a69744499c4cd651a1cff2d8042ade9d9b4d8f3dc4b21b0",
  "engineering/hostpack/manifest.json": "1030c68e4f2300837734cb9d3aa3fa4579ee551e06e8ffb3864165327592047e",
  "engineering/hostpack/hostpack.example.json": "fd22710cce91cd77fcd09348b9598067e35975b85f9c0043e6696c620f9d6a31"
@@ -144,3 +144,10 @@ AIOPS_HOSTPACK_PY
 - **원장 최신성.** 마지막 `save` 이후의 쓰기는 보호되지 않는다. 쓰기 직전 저장은 호스트 helper와 워크플로 변경이 필요하고, 둘 다 `RUNTIME_PATHS`라서 새 감사와 활성화 재결합을 부른다. 이번 범위에서 하지 않았다.
 - **러너 설치·등록, 현장 소장 Routine, 활성화 재결합은 이 묶음이 하지 않는다.**
 - 실호스트 시운전과 독립 A3 감사 전에는 NOT_READY다.
+
+## 감사 반영 메모 (A3 1차)
+
+- 체크포인트는 팩 커밋이 바뀌어도 복원된다(`source_commit`은 40자리 형식만 검사).
+- 원장 스냅샷은 SUBMITTING 행을 담을 수 있다. 복원하면 그 행은 UNKNOWN으로 취급된다.
+- 디렉터리가 이미 있고 모드·소유자가 다르면 덮어쓰지 않고 INSTALLATION_DRIFT로 멈춘다.
+- `aiops-base` 규칙의 기준 예시는 `.github/control-plane/sudoers-aiops-base.example`이며 테스트가 모듈 템플릿과 같은지 비교한다.

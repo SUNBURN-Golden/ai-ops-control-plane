@@ -256,29 +256,36 @@ def render_host_policy(cfg, uids):
             'control_runtime_enabled': False}
 
 
-def render_base_sudoers(runner_user):
-    """The runner's fixed host commands and the control account's lane commands that the wrappers use.
+def base_sudoers_template():
+    """Authoritative text of /etc/sudoers.d/aiops-base with the RUNNER_USER placeholder.
 
+    Committed as .github/control-plane/sudoers-aiops-base.example; a test keeps the two identical.
     The program example adds status --lanes / task-status / reap / materialize-*, CURSOR preflight and
     every --quiescence rule; these are the rules it calls "existing": launch, the other preflights,
     status by launch id, and the lane adapters' --preflight / --launch. No shell, init, reconcile or root.
     """
-    if not SAFE_NAME.fullmatch(runner_user):
-        fail('CONFIG_REJECTED', 'runner_user')
-    lines = ['# /etc/sudoers.d/aiops-base  (root:root 0440; rendered by aiops-hostpack, no dot in the file name)',
+    lines = ['# /etc/sudoers.d/aiops-base  (root:root 0440; no dot in the file name)',
              '# Fixed runner -> astra-control host commands and control -> lane adapter commands. Nothing else.',
+             '# Replace RUNNER_USER with the exact user field of the existing "status --launch-request-id" rule.',
+             '# Installed by aiops-hostpack (the authorized install path, decision pointer in HOSTPACK_KO.md).',
              '',
              'Cmnd_Alias AIOPS_BASE_HOST = \\',
              f'    {HELPER} launch, \\']
     for builder in ('DEVIN', 'GROK_BUILD', 'GLM'):
         lines.append(f'    {HELPER} preflight --builder-id {builder}, \\')
     lines.append(f'    {HELPER} ^status --launch-request-id [0-9a-f]{{24}}$')
-    lines += ['', f'{runner_user} ALL=({CONTROL_ACCOUNT}) NOPASSWD: AIOPS_BASE_HOST', '']
+    lines += ['', f'RUNNER_USER ALL=({CONTROL_ACCOUNT}) NOPASSWD: AIOPS_BASE_HOST', '']
     for lane in ('DEVIN', 'GROK_BUILD', 'GLM'):
         spec = LANE_SPECS[lane]
         adapter = '/opt/astra/libexec/' + spec['adapter']
         lines.append(f"{CONTROL_ACCOUNT} ALL=({spec['account']}) NOPASSWD: {adapter} --preflight, {adapter} --launch")
     return ('\n'.join(lines) + '\n').encode()
+
+
+def render_base_sudoers(runner_user):
+    if not SAFE_NAME.fullmatch(runner_user):
+        fail('CONFIG_REJECTED', 'runner_user')
+    return base_sudoers_template().replace(b'RUNNER_USER ALL=', runner_user.encode() + b' ALL=', 1)
 
 
 def render_program_sudoers(source_bytes, runner_user):
@@ -417,6 +424,7 @@ def collect_payload(prefix, cfg, manifest_sha256):
 
     ledger = prefix / LEDGER_DIR.lstrip('/')
     db = ledger / LEDGER_DB
+    side_total = 0
     if os.path.lexists(db):
         add('ledger-db', LEDGER_DB, 0o600, sqlite_snapshot(db), CONTROL_ACCOUNT)
         for name in sorted(os.listdir(ledger)):
@@ -428,6 +436,9 @@ def collect_payload(prefix, cfg, manifest_sha256):
             info = os.lstat(path)
             if not stat.S_ISREG(info.st_mode):
                 fail('STATE_UNSUPPORTED_FILE', f'ledger: {name}')
+            side_total += info.st_size
+            if info.st_size > MAX_LEDGER_BYTES or side_total > MAX_LEDGER_BYTES:
+                fail('STATE_TOO_LARGE', f'ledger: {name}')
             add('ledger-file', name, stat.S_IMODE(info.st_mode), path.read_bytes(), CONTROL_ACCOUNT)
     config_dir = prefix / LANE_CONFIG_DIR.lstrip('/')
     if config_dir.is_dir():
@@ -443,9 +454,12 @@ def collect_payload(prefix, cfg, manifest_sha256):
             'source_commit': cfg['source_commit'], 'entries': entries}
 
 
-def validate_payload(payload, source_commit):
+def validate_payload(payload):
+    # The payload records which source commit wrote it, for diagnosis only. It is deliberately NOT compared
+    # with the pack's current commit: re-bootstrapping to a newer merged commit must never strand the
+    # preserved ledger. Integrity is the AES-GCM tag over the whole envelope plus the per-entry digests.
     if (not isinstance(payload, dict) or payload.get('format') != STATE_FORMAT
-            or payload.get('source_commit') != source_commit or not isinstance(payload.get('entries'), list)):
+            or not COMMIT.fullmatch(str(payload.get('source_commit', ''))) or not isinstance(payload.get('entries'), list)):
         fail('STATE_CORRUPT')
     seen = set()
     for entry in payload['entries']:
@@ -566,11 +580,12 @@ class Hostpack:
             steps.append('aiops-hostpack boundary-render --commit <40-hex main commit>, then start the runner with astra-runner-launch.')
         waiting = [lane for lane, v in components['lanes'].items() if v['status'] != 'OK' and lane in self.cfg['enabled_builders']]
         if waiting:
-            steps.append('Lane login / CLI / preflight not proven for: ' + ', '.join(waiting)
-                         + ' (run the workflow operation=preflight after logging in as each lane account).')
+            steps.append('Lane installation incomplete for: ' + ', '.join(waiting) + ' (see each lane reasons).')
+        if any(v['preflight'] != 'PROVEN' for lane, v in components['lanes'].items() if lane in self.cfg['enabled_builders']):
+            steps.append('Lane logins are proven by the workflow operation=preflight, not by this tool: run it after logging in as each lane account.')
         if not evidence_url(self.cfg.get('boundary_evidence_pointer')):
             steps.append('Set boundary_evidence_pointer in hostpack.json to the real evidence URL before install.')
-        overall = 'READY_FOR_ACTIVATION_CHECK' if (
+        overall = 'READY_FOR_PREFLIGHT' if (
             all(c['status'] == 'OK' for key, c in components.items() if key != 'lanes') and not waiting
             and evidence_url(self.cfg.get('boundary_evidence_pointer'))) else 'HOLD'
         return result(overall, components=components, next_steps=steps)
@@ -598,9 +613,10 @@ class Hostpack:
                 reasons.append(key.upper() + '_NOT_INSTALLED')
         if lane == 'CURSOR' and not os.path.lexists(self.path(LANE_CONFIG_DIR) / 'cursor-lane.json'):
             reasons.append('CURSOR_LANE_CONFIG_MISSING')
-        if lane in self.cfg['enabled_builders'] and not self.ops.lane_proven(self, lane):
-            reasons.append('PREFLIGHT_NOT_PROVEN')
-        return {'status': 'OK' if not reasons else 'HOLD', 'reasons': reasons}
+        # This tool never starts a lane CLI, so it cannot prove a login. That proof is the workflow's preflight;
+        # it is reported next to the structural status and does not decide it.
+        preflight = 'PROVEN' if self.ops.lane_proven(self, lane) else 'NOT_PROVEN_BY_THIS_TOOL'
+        return {'status': 'OK' if not reasons else 'HOLD', 'reasons': reasons, 'preflight': preflight}
 
     def policy_matches(self, users):
         if not all(users.values()):
@@ -680,21 +696,19 @@ class Hostpack:
         for path, owner, mode in plan:
             uid, gid = (self.owner, self.owner) if owner == 'root' else (owner['uid'], owner['gid'])
             target = self.path(path)
-            if not os.path.lexists(target):
+            created = not os.path.lexists(target)
+            if created:
                 target.mkdir(mode=mode, parents=True)
+                os.chmod(target, mode)  # the umask must not decide the mode of a directory this pack creates
+                if self.ops.enforce_ownership:
+                    os.chown(target, uid, gid)
             info = os.lstat(target)
             if not stat.S_ISDIR(info.st_mode):
                 fail('INSTALLATION_DRIFT', path)
             if path == '/etc/sudoers.d':
                 continue  # an existing sudoers.d keeps the distribution's owner and mode
-            if self.ops.enforce_ownership:
-                if (info.st_uid, info.st_gid) != (uid, gid) or stat.S_IMODE(info.st_mode) != mode:
-                    if path == LEDGER_DIR and os.listdir(target):
-                        fail('INSTALLATION_DRIFT', path)  # never re-own an existing ledger
-                    os.chown(target, uid, gid)
-                    os.chmod(target, mode)
-            else:
-                os.chmod(target, mode)
+            if stat.S_IMODE(info.st_mode) != mode or (self.ops.enforce_ownership and (info.st_uid, info.st_gid) != (uid, gid)):
+                fail('INSTALLATION_DRIFT', path)  # a directory that already exists is never re-owned or re-moded
 
     # ---- boundary ----------------------------------------------------------------
 
@@ -846,7 +860,7 @@ class Checkpoints:
             key = derive(password, base64.b64decode(envelope['salt'], validate=True))
         except (KeyError, ValueError):
             fail('STATE_CORRUPT')
-        payload = validate_payload(decrypt(envelope, cipher, key), self.pack.cfg['source_commit'])
+        payload = validate_payload(decrypt(envelope, cipher, key))
         return head, envelope, payload
 
     def save(self, password):
@@ -967,7 +981,7 @@ def github_backend(pack):
     return load_recover().GithubState(pack.cfg['state_repository'], pack.cfg['state_branch'], token)
 
 
-GOOD = ('INSTALLED', 'SAVED', 'RESTORED', 'RENDERED', 'READY_FOR_ACTIVATION_CHECK')
+GOOD = ('INSTALLED', 'SAVED', 'RESTORED', 'RENDERED', 'READY_FOR_PREFLIGHT')
 
 
 def main(argv=None):

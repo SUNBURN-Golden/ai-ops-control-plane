@@ -385,7 +385,7 @@ class VerifyTests(PackTest):
         self.fake_ledger()
         report = self.pack.verify()
         for lane in h.LANES:
-            self.assertIn('PREFLIGHT_NOT_PROVEN', report['components']['lanes'][lane]['reasons'])
+            self.assertEqual(report['components']['lanes'][lane]['preflight'], 'NOT_PROVEN_BY_THIS_TOOL')
         self.assertEqual(report['status'], 'HOLD')
 
     def test_ready_only_when_everything_including_lane_preflight_holds(self):
@@ -394,8 +394,12 @@ class VerifyTests(PackTest):
         (self.root / 'etc/astra/cursor-lane.json').write_text('{}')
         self.pack.boundary_render(COMMIT, (1, 2, 3))
         self.ops.proven = set(h.LANES)
-        self.assertEqual(self.pack.verify()['status'], 'READY_FOR_ACTIVATION_CHECK')
+        self.assertEqual(self.pack.verify()['status'], 'READY_FOR_PREFLIGHT')
         self.ops.proven = set(h.LANES) - {'GLM'}
+        report = self.pack.verify()
+        self.assertEqual(report['components']['lanes']['GLM']['preflight'], 'NOT_PROVEN_BY_THIS_TOOL')
+        self.assertEqual(report['components']['lanes']['DEVIN']['preflight'], 'PROVEN')
+        (self.root / 'opt/astra/libexec/astra-glm-adapter').unlink()
         self.assertEqual(self.pack.verify()['status'], 'HOLD')
 
     def test_boundary_digests_come_from_the_manifest_not_the_disk(self):
@@ -560,8 +564,15 @@ class CheckpointTests(PackTest):
             entry = dict(good)
             mutate(entry)
             payload = {'format': h.STATE_FORMAT, 'source_commit': COMMIT, 'entries': [entry]}
-            self.expect('STATE_CORRUPT', h.validate_payload, payload, COMMIT)
-        self.expect('STATE_CORRUPT', h.validate_payload, {'format': h.STATE_FORMAT, 'source_commit': 'b' * 40, 'entries': []}, COMMIT)
+            self.expect('STATE_CORRUPT', h.validate_payload, payload)
+        self.expect('STATE_CORRUPT', h.validate_payload, {'format': h.STATE_FORMAT, 'source_commit': 'zz', 'entries': []})
+        # an older pack commit is accepted (upgrade-then-restore)
+        h.validate_payload({'format': h.STATE_FORMAT, 'source_commit': 'b' * 40, 'entries': []})
+
+    def test_base_sudoers_example_equals_template(self):
+        example = (Path(h.__file__).resolve().parent.parent / '.github/control-plane/sudoers-aiops-base.example').read_bytes()
+        self.assertEqual(example, h.base_sudoers_template())
+        self.assertIn(b'alice ALL=(astra-control)', h.render_base_sudoers('alice'))
 
     def test_empty_ledger_is_never_synthesised_by_a_save(self):
         out = self.cp.save(self.PASSWORD)
