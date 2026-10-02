@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -39,7 +40,15 @@ from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-import control_plane as cp
+if sys.flags.isolated:
+    # -I excludes the script directory as well as CWD/PYTHONPATH. Load only
+    # this entry point's sibling; never restore an ambient module search path.
+    _cp_spec = importlib.util.spec_from_file_location(
+        "control_plane", Path(__file__).resolve().with_name("control_plane.py"))
+    cp = importlib.util.module_from_spec(_cp_spec)
+    _cp_spec.loader.exec_module(cp)
+else:
+    import control_plane as cp
 
 LANE_ORDER = ("DEVIN", "GROK_BUILD", "GLM", "CURSOR")
 # Lanes whose adapters take schema v2 packets and run without a per-user service manager.
