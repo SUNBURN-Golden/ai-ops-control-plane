@@ -32,8 +32,12 @@ PY
 [ -n "${HOOK_SHA:-}" ] && [ -n "${POLICY_SHA:-}" ] && [ -n "${EVAL_SHA:-}" ] \
   || { echo 'RUNNER_LAUNCH_REFUSED: expected digests unreadable' >&2; exit 2; }
 
-ENV_FILE_ARGS=()
-if [ -e "$RUNNER_DIR/.env" ]; then ENV_FILE_ARGS=(--env-file "$RUNNER_DIR/.env"); fi
+# A runner .env is job-writable by construction (the runner owns its directory), so the boundary
+# runbook forbids it: the listener environment comes only from this wrapper. Remove it first.
+if [ -e "$RUNNER_DIR/.env" ]; then
+  echo "RUNNER_LAUNCH_REFUSED: $RUNNER_DIR/.env exists; remove it (the boundary keys must not live there)" >&2
+  exit 2
+fi
 
 # Both checks run as the runner account with exactly the environment the listener will get.
 as_runner() {
@@ -46,10 +50,12 @@ as_runner() {
       "$@"
 }
 
-/usr/bin/python3 -I "$BOUNDARY/control_plane_boundary.py" verify-install \
+# --writable-check asks "can THIS account write there": run it as the runner account, never as root
+# (root can write everywhere, so a root run would refuse every path).
+as_runner /usr/bin/python3 -I "$BOUNDARY/control_plane_boundary.py" verify-install \
   --hook "$BOUNDARY/control_plane_boundary_hook.sh" --policy "$BOUNDARY/policy.json" \
   --hook-sha256 "$HOOK_SHA" --policy-sha256 "$POLICY_SHA" --evaluator-sha256 "$EVAL_SHA" \
-  --owner-uid 0 --forbid-prefix "$RUNNER_DIR" --writable-check "${ENV_FILE_ARGS[@]}" \
+  --owner-uid 0 --forbid-prefix "$RUNNER_DIR" --writable-check \
   || { echo 'RUNNER_LAUNCH_REFUSED: verify-install failed' >&2; exit 3; }
 
 as_runner /usr/bin/python3 -I "$BOUNDARY/control_plane_boundary.py" check-env \

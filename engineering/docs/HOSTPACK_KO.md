@@ -72,7 +72,7 @@ REPOSITORY = 'BeautifulMind-JT/ai-ops-control-plane'
 PINNED_SHA256 = {
  "engineering/scripts/control_plane_hostpack.py": "92220499f2fc3616933ea01aceae2b8f860fe01dbf351af72a87d448a9ac6124",
  "engineering/hostpack/aiops-hostpack": "5492b8d848348b381a69744499c4cd651a1cff2d8042ade9d9b4d8f3dc4b21b0",
- "engineering/hostpack/manifest.json": "f86103dbdf37f173ceb5e9c2bdf7553a98c8853ef1fa961b402e84a468060fd8",
+ "engineering/hostpack/manifest.json": "1030c68e4f2300837734cb9d3aa3fa4579ee551e06e8ffb3864165327592047e",
  "engineering/hostpack/hostpack.example.json": "fd22710cce91cd77fcd09348b9598067e35975b85f9c0043e6696c620f9d6a31"
 }
 INSTALL = {

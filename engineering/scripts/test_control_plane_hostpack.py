@@ -596,6 +596,12 @@ class CliTests(PackTest):
         self.assertIn('check-env', text)
         self.assertIn('boundary-expected.json', text)
         self.assertNotIn('/runner/.env', text)
+        # --writable-check asks "can this account write there": it must run as the runner, never as root
+        self.assertRegex(text, r'(?m)^as_runner /usr/bin/python3 -I "\$BOUNDARY/control_plane_boundary.py" verify-install')
+        self.assertNotRegex(text, r'(?m)^/usr/bin/python3 -I "\$BOUNDARY/control_plane_boundary.py" verify-install')
+        self.assertIn('--writable-check', text)
+        self.assertNotIn('--env-file', text)  # a runner .env is job-writable: refuse it instead of passing it
+        self.assertIn('/.env exists; remove it', text)
 
     def test_hostpack_launcher_checks_the_whole_path_and_adds_no_boot_hook(self):
         text = (ENGINEERING / 'hostpack/aiops-hostpack').read_text()
