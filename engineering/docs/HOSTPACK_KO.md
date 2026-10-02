@@ -44,18 +44,102 @@
 ## 4. 설치 순서 (그록봇)
 
 1. 감사 서버 부트스트랩(`engineering/recovery/BOOTSTRAP_KO.md`)을 먼저 끝낸다. 이 묶음은 그 모듈(`control_plane_recover.py`)과 고정 암호 라이브러리를 재사용한다.
-2. `/etc/aiops/hostpack.json`을 `hostpack/hostpack.example.json`에서 만든다. `source_commit`, `manifest_sha256`, `boundary_evidence_pointer`의 자리표시자를 모두 실제 값으로 바꾼다.
-   자리표시자가 남아 있으면 설정 검증이 거부한다. `boundary_evidence_pointer`가 실제 URL이 아니면 `install`이 아무것도 쓰기 전에 멈춘다.
-3. `install` → 체크포인트가 있으면 `restore` → `boundary-render` → 러너 시작 스크립트 실행 → 워크플로 `operation=preflight` → `verify`.
+2. 아래 블록을 root로 붙여 넣는다. **병합 뒤 `AIOPS_HOSTPACK_COMMIT`(병합된 커밋 40자리)와 `AIOPS_BOUNDARY_EVIDENCE_URL`(실제 증거 URL) 두 자리만 채운다.**
+   자리표시자가 남아 있으면 다운로드 전에 종료한다. 소스가 바뀌면 해시 표도 갱신한다(시험이 표와 파일을 대조한다).
+   블록은 네 파일을 고정 커밋에서 받아 해시를 확인한 뒤 열린 바이트로 root 보호 위치에 복사하고, 기존 파일이 다르면 덮어쓰지 않고 멈춘다.
+   `/etc/aiops/hostpack.json`은 예제에서 세 값(`source_commit`, `manifest_sha256`, `boundary_evidence_pointer`)만 채워 만든다.
+
+```bash
+(
+set +x
+set -euo pipefail
+umask 077
+[ "$(id -u)" = 0 ] || { echo 'ROOT_REQUIRED'; exit 1; }
+# 병합 뒤 이 40자리 SHA와 증거 URL만 채운다. 소스가 바뀌면 아래 SHA256 표도 갱신한다.
+export AIOPS_HOSTPACK_COMMIT='__MERGED_SOURCE_COMMIT_40HEX__'
+export AIOPS_BOUNDARY_EVIDENCE_URL='__REAL_BOUNDARY_EVIDENCE_URL__'
+[[ "$AIOPS_HOSTPACK_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo 'PIN_COMMIT_REQUIRED'; exit 1; }
+[ -f /opt/aiops/lib/control_plane_recover.py ] || { echo 'AUDIT_HOST_BOOTSTRAP_REQUIRED'; exit 1; }
+read -rs -p 'GH_TOKEN: ' GH_TOKEN
+printf '\n'
+export GH_TOKEN
+/usr/bin/python3 -I - <<'AIOPS_HOSTPACK_PY'
+import base64, hashlib, json, os, pathlib, re, stat, urllib.parse, urllib.request
+
+COMMIT = os.environ['AIOPS_HOSTPACK_COMMIT']
+EVIDENCE = os.environ['AIOPS_BOUNDARY_EVIDENCE_URL']
+REPOSITORY = 'BeautifulMind-JT/ai-ops-control-plane'
+PINNED_SHA256 = {
+ "engineering/scripts/control_plane_hostpack.py": "92220499f2fc3616933ea01aceae2b8f860fe01dbf351af72a87d448a9ac6124",
+ "engineering/hostpack/aiops-hostpack": "5492b8d848348b381a69744499c4cd651a1cff2d8042ade9d9b4d8f3dc4b21b0",
+ "engineering/hostpack/manifest.json": "f86103dbdf37f173ceb5e9c2bdf7553a98c8853ef1fa961b402e84a468060fd8",
+ "engineering/hostpack/hostpack.example.json": "fd22710cce91cd77fcd09348b9598067e35975b85f9c0043e6696c620f9d6a31"
+}
+INSTALL = {
+ 'engineering/scripts/control_plane_hostpack.py': ('/opt/aiops/lib/control_plane_hostpack.py', 0o644),
+ 'engineering/hostpack/aiops-hostpack': ('/usr/local/bin/aiops-hostpack', 0o755),
+ 'engineering/hostpack/manifest.json': ('/etc/aiops/hostpack-manifest.json', 0o644),
+}
+class Stop(Exception): pass
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+ def redirect_request(self, *args): raise Stop('BOOTSTRAP_REDIRECT_REJECTED')
+def fetch(name):
+ request = urllib.request.Request('https://api.github.com/repos/' + REPOSITORY + '/contents/' + name + '?ref=' + COMMIT,
+  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+ with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+  item = json.loads(response.read(2 << 20))
+ if item.get('encoding') != 'base64': raise Stop('BOOTSTRAP_ENCODING_REJECTED')
+ data = base64.b64decode(item['content'])
+ if hashlib.sha256(data).hexdigest() != PINNED_SHA256[name]: raise Stop('BOOTSTRAP_HASH_MISMATCH')
+ return data
+def protected(path):
+ for parent in list(path.parents)[:-0 or None]:
+  info = os.lstat(parent)
+  if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022: raise Stop('BOOTSTRAP_PARENT_DRIFT')
+def place(path, data, mode):
+ protected(path)
+ if os.path.lexists(path):
+  info = os.lstat(path)
+  if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != mode or path.read_bytes() != data:
+   raise Stop('BOOTSTRAP_FILE_DRIFT')
+  return
+ temporary = path.parent / ('.bootstrap-' + path.name)
+ descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+ try:
+  with os.fdopen(descriptor, 'wb') as target:
+   os.fchmod(target.fileno(), mode); target.write(data); target.flush(); os.fsync(target.fileno())
+  os.link(temporary, path, follow_symlinks=False)
+ finally:
+  temporary.unlink(missing_ok=True)
+try:
+ if os.geteuid() != 0 or not re.fullmatch('[a-f0-9]{40}', COMMIT): raise Stop('PIN_OR_ROOT_REQUIRED')
+ parsed = urllib.parse.urlsplit(EVIDENCE)
+ if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.hostname in ('localhost', 'example.com', 'example.org', 'example.net') or re.search(r'\s', EVIDENCE):
+  raise Stop('EVIDENCE_URL_REQUIRED')
+ fetched = {name: fetch(name) for name in PINNED_SHA256}
+ manifest = json.loads(fetched['engineering/hostpack/manifest.json'])
+ canonical = json.dumps(manifest, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+ config = json.loads(fetched['engineering/hostpack/hostpack.example.json'])
+ config.update(source_commit=COMMIT, manifest_sha256=hashlib.sha256(canonical).hexdigest(), boundary_evidence_pointer=EVIDENCE)
+ config_bytes = (json.dumps(config, indent=2, sort_keys=True) + '\n').encode()
+ for name, (destination, mode) in INSTALL.items(): place(pathlib.Path(destination), fetched[name], mode)
+ place(pathlib.Path('/etc/aiops/hostpack.json'), config_bytes, 0o600)
+ print('HOSTPACK_BOOTSTRAPPED: run aiops-hostpack verify, then aiops-hostpack install')
+except Stop as error:
+ print(str(error)); raise SystemExit(1)
+except Exception:
+ # Never echo provider errors, headers, credentials or response contents.
+ print('BOOTSTRAP_FAILED'); raise SystemExit(1)
+AIOPS_HOSTPACK_PY
+)
+```
+
+3. `aiops-hostpack install` → 체크포인트가 있으면 `aiops-hostpack restore` → `aiops-hostpack boundary-render --commit <main 커밋>` → `/opt/astra/bin/astra-runner-launch` → 워크플로 `operation=preflight` → `aiops-hostpack verify`.
 4. 원장이 아직 없고 체크포인트도 없으면, 대표님이 빈 원장을 승인한 뒤에만 관리자가 `init`을 한 번 실행한다.
-5. 감사 호스트와 같은 방식으로, 상태가 바뀔 때마다 `save`를 실행한다. 마지막 `save` 이후의 원장 변경은 리셋 때 사라진다.
+5. 상태가 바뀔 때마다 `aiops-hostpack save`를 실행한다. 마지막 `save` 이후의 원장 변경은 리셋 때 사라진다.
 
 ## 5. 알려진 한계
 
-- **호출 스크립트 없음.** `aiops-hostpack` 호출 스크립트(`/usr/local/bin`)를 이 PR에 넣지 못했다. 설치된 모듈은 고정 라이브러리 경로를 직접 지정해야만 돌아간다.
-  자동 모드 안전 장치가 해당 파일 생성을 거부했고(`Unauthorized Persistence`), 거부를 우회하지 않았다. 대표님의 권한 규칙 결정이 필요하다.
-- **러너 시작 스크립트의 결함 하나.** `hostpack/astra-runner-launch`가 기대 해시 파일을 읽지 못했을 때 즉시 멈추지 않고 빈 해시로 다음 검사로 넘어간다.
-  뒤의 경계 검사가 빈 해시를 거부하므로 열린 채로 시작되지는 않는다고 판단하지만 확인하지 못했다. 고치는 편집도 같은 안전 장치가 거부했다.
 - **레인 로그인 경로는 추정.** 공급자별 CLI 상태 폴더(`LANE_SPECS`의 `logins`)는 실제 호스트에서 확인이 필요하다. 없는 경로는 캡처하지 않는다.
 - **원장 최신성.** 마지막 `save` 이후의 쓰기는 보호되지 않는다. 쓰기 직전 저장은 호스트 helper와 워크플로 변경이 필요하고, 둘 다 `RUNTIME_PATHS`라서 새 감사와 활성화 재결합을 부른다. 이번 범위에서 하지 않았다.
 - **러너 설치·등록, 현장 소장 Routine, 활성화 재결합은 이 묶음이 하지 않는다.**

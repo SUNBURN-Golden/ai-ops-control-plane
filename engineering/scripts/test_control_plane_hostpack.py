@@ -597,6 +597,53 @@ class CliTests(PackTest):
         self.assertIn('boundary-expected.json', text)
         self.assertNotIn('/runner/.env', text)
 
+    def test_hostpack_launcher_checks_the_whole_path_and_adds_no_boot_hook(self):
+        text = (ENGINEERING / 'hostpack/aiops-hostpack').read_text()
+        self.assertTrue(text.startswith('#!/usr/bin/python3 -I'))
+        for parent in ("'/'", "'/opt'", "'/opt/aiops'", "'/opt/aiops/lib'"):
+            self.assertIn(parent, text)
+        self.assertIn('O_NOFOLLOW', text)
+        self.assertIn('st_uid != 0', text)
+        for forbidden in ('systemctl', 'crontab', 'subprocess', 'os.system', 'os.fork'):
+            self.assertNotIn(forbidden, text)
+        self.assertTrue(os.access(ENGINEERING / 'hostpack/aiops-hostpack', os.X_OK))
+
+    def test_launcher_refuses_an_unprotected_module_path(self):
+        import subprocess
+        import sys
+        done = subprocess.run([sys.executable, '-I', str(ENGINEERING / 'hostpack/aiops-hostpack'), 'verify'],
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(json.loads(done.stdout), {'reason': 'INSTALLATION_DRIFT', 'status': 'HOLD'})
+
+    def doc_block(self):
+        text = (ENGINEERING / 'docs/HOSTPACK_KO.md').read_text()
+        match = re.search(r"<<'AIOPS_HOSTPACK_PY'\n(.*?)\nAIOPS_HOSTPACK_PY\n", text, re.S)
+        self.assertIsNotNone(match)
+        return text, match.group(1)
+
+    def test_bootstrap_hash_table_matches_the_files_it_pins(self):
+        _, block = self.doc_block()
+        table = dict(re.findall(r'"(engineering/[^"]+)": "([0-9a-f]{64})"', block.split('INSTALL = {')[0]))
+        self.assertEqual(set(table), {'engineering/scripts/control_plane_hostpack.py', 'engineering/hostpack/aiops-hostpack',
+                                      'engineering/hostpack/manifest.json', 'engineering/hostpack/hostpack.example.json'})
+        for name, digest in table.items():
+            self.assertEqual(digest, h.sha((ENGINEERING.parent / name).read_bytes()), name)
+
+    def test_bootstrap_block_compiles_and_refuses_placeholders(self):
+        text, block = self.doc_block()
+        compile(block, 'bootstrap', 'exec')
+        self.assertIn("[[ \"$AIOPS_HOSTPACK_COMMIT\" =~ ^[0-9a-f]{40}$ ]] || { echo 'PIN_COMMIT_REQUIRED'; exit 1; }", text)
+        self.assertIn("AUDIT_HOST_BOOTSTRAP_REQUIRED", text)
+        for forbidden in ('systemctl', 'crontab', 'rc.local', 'enable --now'):
+            self.assertNotIn(forbidden, block)
+
+    def test_bootstrap_config_values_pass_the_modules_own_validation(self):
+        example = json.loads((ENGINEERING / 'hostpack/hostpack.example.json').read_text())
+        example.update(source_commit=COMMIT, manifest_sha256=h.sha(h.canonical(self.manifest)), boundary_evidence_pointer=EVIDENCE)
+        h.validate_config(example, h.sha(h.canonical(self.manifest)))
+        self.assertTrue(h.evidence_url(example['boundary_evidence_pointer']))
+
     def test_module_adds_no_daemon_timer_or_boot_hook(self):
         text = (ENGINEERING / 'scripts/control_plane_hostpack.py').read_text()
         for forbidden in ('systemctl', 'crontab', 'enable --now', 'rc.local', 'daemon(', 'os.fork', 'sched.scheduler'):

@@ -28,7 +28,9 @@ if not all(re.fullmatch(r'[0-9a-f]{64}', d) for d in digests):
     raise SystemExit(1)
 print(*digests)
 PY
-) || { echo 'RUNNER_LAUNCH_REFUSED: expected digests unreadable' >&2; exit 2; }
+) || true
+[ -n "${HOOK_SHA:-}" ] && [ -n "${POLICY_SHA:-}" ] && [ -n "${EVAL_SHA:-}" ] \
+  || { echo 'RUNNER_LAUNCH_REFUSED: expected digests unreadable' >&2; exit 2; }
 
 ENV_FILE_ARGS=()
 if [ -e "$RUNNER_DIR/.env" ]; then ENV_FILE_ARGS=(--env-file "$RUNNER_DIR/.env"); fi

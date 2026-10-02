@@ -66,7 +66,7 @@
       "destination": "/opt/astra/bin/astra-runner-launch",
       "group": "root",
       "mode": 493,
-      "sha256": "398ae48435263b46a70557f9b28d9ab026aba50d214a12e8fc235b9076d4fe8a"
+      "sha256": "1909e13b61da62e188c1b98ebf79dcfc33b57681a45cf1b90ba91e9102a2f00c"
     },
     {
       "cache_path": "engineering/adapters/imported/astra-builder-devin",
