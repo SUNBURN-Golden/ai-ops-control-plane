@@ -1,0 +1,17 @@
+# /etc/sudoers.d/aiops-base  (root:root 0440; no dot in the file name)
+# Fixed runner -> astra-control host commands and control -> lane adapter commands. Nothing else.
+# Replace RUNNER_USER with the exact user field of the existing "status --launch-request-id" rule.
+# Installed by aiops-hostpack. Decision: https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/54#issuecomment-5950850220
+
+Cmnd_Alias AIOPS_BASE_HOST = \
+    /opt/astra/bin/astra-host-control launch, \
+    /opt/astra/bin/astra-host-control preflight --builder-id DEVIN, \
+    /opt/astra/bin/astra-host-control preflight --builder-id GROK_BUILD, \
+    /opt/astra/bin/astra-host-control preflight --builder-id GLM, \
+    /opt/astra/bin/astra-host-control ^status --launch-request-id [0-9a-f]{24}$
+
+RUNNER_USER ALL=(astra-control) NOPASSWD: AIOPS_BASE_HOST
+
+astra-control ALL=(astra-builder-devin) NOPASSWD: /opt/astra/libexec/astra-devin-adapter --preflight, /opt/astra/libexec/astra-devin-adapter --launch
+astra-control ALL=(astra-builder-grokbuild) NOPASSWD: /opt/astra/libexec/astra-grok-adapter --preflight, /opt/astra/libexec/astra-grok-adapter --launch
+astra-control ALL=(astra-builder-glm) NOPASSWD: /opt/astra/libexec/astra-glm-adapter --preflight, /opt/astra/libexec/astra-glm-adapter --launch

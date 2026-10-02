@@ -57,6 +57,7 @@ host-preflight와 모든 재시도가 fail-closed로 거부된다. shell, 임의
 별도 후보 파일을 추가한 사실은 설치·허가가 아니다. 예외가 채택되어도 shell·임의 Python/인수,
 init/reconcile나 builder root를 허용하지 않는다.
 관리자만 DB를 최초 `init`한다. 손실된 DB를 빈 DB로 재생성해 복구하지 않는다.
+예외(대표 결정 https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/54#issuecomment-5950850220): 호스트 교체로 원장이 사라졌고 복구할 체크포인트가 없을 때에 한해 관리자가 1회 새 원장을 `init`할 수 있다. 이 경우에도 GitHub 기록과 외부 세션을 대사하기 전에는 dispatch를 재개하지 않으며, `aiops-hostpack`은 `init`을 자동 실행하지 않는다.
 원 ledger와 외부 session을 대사하기 전 dispatch를 재개하지 않는다.
 최초 활성화 전에도 ledger에 없는 기존 writer/session이 없는지 확인한다.
 
@@ -99,6 +100,7 @@ PA-1 root 예외의 원문은 **`.github/control-plane/sudoers-aiops-program-ast
 동일 치환 후 정확히 비교한다. 이 검증은 일반 `/etc/sudoers.d/aiops-program` 비교와 분리한다.
 설치 성공도 활성화 승인이나 실제 서비스 qualification을 대신하지 않는다.
 `control_plane_install.py`의 disabled pin 설치는 sudoers를 복사하거나 PA-1 예외를 설치하지 않는다.
+`aiops-hostpack`(`.github/control-plane/sudoers-aiops-base.example`, `HOSTPACK_KO.md`)은 계정 6개 생성과 `/etc/sudoers.d/aiops-base`, `aiops-program` 설치의 승인된 경로다(대표 결정 https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/54#issuecomment-5950850220). 이 경로도 PA-1 예외는 설치하지 않으며 활성화는 감사 PASS와 activation-only PR 뒤에만 한다. 같은 보호 파일을 두 설치기가 쓰므로 호스트팩 설치 뒤에는 `activated_runtime_sha`와 설치 바이트의 일치를 host-preflight가 확인하고, 불일치는 발송 전에 거부된다.
 
 host policy 모양은 `.github/control-plane/host-policy.example.json`에 있다.
 예시는 UID=0 / 빈 repo / PENDING evidence라서 그대로는 실행되지 않는다.

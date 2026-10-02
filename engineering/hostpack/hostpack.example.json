@@ -1,0 +1,30 @@
+{
+  "allowed_repositories": [
+    "BeautifulMind-JT/kix-protocol",
+    "BeautifulMind-JT/ZARI",
+    "BeautifulMind-JT/film-unit-mv-studio",
+    "BeautifulMind-JT/maeum-gyeol",
+    "BeautifulMind-JT/kix-commerce-apps"
+  ],
+  "boundary_evidence_pointer": "__SET_TO_REAL_BOUNDARY_EVIDENCE_URL__",
+  "enabled_builders": [
+    "DEVIN",
+    "GROK_BUILD",
+    "GLM",
+    "CURSOR"
+  ],
+  "manifest_sha256": "__SET_TO_SHA256_OF_CANONICAL_MANIFEST__",
+  "max_active_sessions": 4,
+  "max_launches_per_24h": null,
+  "preserve_logins": [
+    "DEVIN",
+    "GROK_BUILD",
+    "GLM",
+    "CURSOR"
+  ],
+  "runner_user": "astra-runner",
+  "schema": "AIOPS_HOSTPACK_CONFIG_V1",
+  "source_commit": "__SET_TO_MERGED_COMMIT_40HEX__",
+  "state_branch": "host-state",
+  "state_repository": "BeautifulMind-JT/aiops-state"
+}
