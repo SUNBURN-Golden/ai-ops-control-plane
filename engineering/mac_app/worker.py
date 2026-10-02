@@ -15,15 +15,19 @@ from common import AppError, atomic_json, read_json
 
 def failure_code(folder, returncode):
     # Classify terminal CLI errors, never forward stderr (which may contain secrets).
-    path = Path(folder) / 'stderr.log'
-    with path.open('rb') as stream:
-        stream.seek(max(0, path.stat().st_size - 32768))
-        message = stream.read().decode('utf-8', 'replace').lower()
+    fragments = []
+    for name in ('stderr.log', 'stdout.log'):
+        path = Path(folder) / name
+        if not path.exists(): continue
+        with path.open('rb') as stream:
+            stream.seek(max(0, path.stat().st_size - 32768))
+            fragments.append(stream.read().decode('utf-8', 'replace').lower())
+    message = '\n'.join(fragments)
     if re.search(r'(unknown|invalid|unsupported|unavailable) model|model.{0,100}(does not exist|not found|not supported|not available)', message):
         return 'MODEL_UNAVAILABLE'
-    if re.search(r'not (logged|signed) in|authentication (failed|required)|login required|please (log|sign) in|401 unauthorized', message):
+    if re.search(r'not (logged|signed) in|authentication (failed|required)|login required|please (log|sign) in|401 unauthorized|invalid api key|missing.{0,30}(api key|credentials)|providerautherror', message):
         return 'PROVIDER_LOGIN_REQUIRED'
-    if re.search(r'unexpected argument|unrecognized (argument|option)|unknown option|sandbox.{0,80}(unavailable|not available)', message):
+    if re.search(r'unexpected argument|unrecognized (argument|option)|unknown option|sandbox.{0,80}(unavailable|not available|failed|not supported)', message):
         return 'CLI_SETUP_REQUIRED'
     return 'PROVIDER_EXIT_' + str(returncode)
 
@@ -41,12 +45,15 @@ def run(folder):
     atomic_json(folder / 'running.json', {'pid': os.getpid(), 'started': receipt['started']})
     child = None
     try:
-        argv = agents.command(request['profile'], request['role'], folder)
+        argv = agents.command(request['profile'], request['role'], folder, checkout=request['checkout'])
+        agents.prepare(request['profile'], request['role'], folder, request['checkout'], request['prompt'])
         with open(folder / 'stdout.log', 'wb') as stdout, open(folder / 'stderr.log', 'wb') as stderr:
             child = subprocess.Popen(argv, cwd=request['checkout'], stdin=subprocess.PIPE,
-                                     stdout=stdout, stderr=stderr, env=agents.environment(), start_new_session=True)
+                                     stdout=stdout, stderr=stderr,
+                                     env=agents.environment(request['profile'], request['role']), start_new_session=True)
             try:
-                child.communicate(request['prompt'].encode(), timeout=request['timeout_seconds'])
+                stdin = b'' if request['profile']['provider'] in ('grok_build', 'devin') else request['prompt'].encode()
+                child.communicate(stdin, timeout=request['timeout_seconds'])
             except subprocess.TimeoutExpired:
                 os.killpg(child.pid, signal.SIGTERM)
                 try: child.wait(timeout=10)
@@ -62,7 +69,9 @@ def run(folder):
                 os.killpg(child.pid, signal.SIGTERM)
                 raise AppError('CHILD_PROCESS_GROUP_NOT_QUIESCENT')
             if child.returncode != 0: raise AppError(failure_code(folder, child.returncode))
-        receipt['report'] = agents.result(request['profile'], folder)
+        completed = agents.completion(request['profile'], folder)
+        receipt['report'] = completed.pop('report')
+        receipt['provider_evidence'] = completed
     except (OSError, AppError, ValueError) as exc:
         receipt['error'] = exc.code if isinstance(exc, AppError) else type(exc).__name__
     finally:

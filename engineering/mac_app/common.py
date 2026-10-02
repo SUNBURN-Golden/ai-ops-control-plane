@@ -8,10 +8,11 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+from provider_catalog import CATALOG
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 ROLES = ('planner', 'builder', 'reviewer', 'supervisor')
-PROVIDERS = ('codex', 'claude')
+PROVIDERS = tuple(CATALOG)
 TERMINAL = ('accepted', 'cancelled')
 DEFAULTS = {
     'schema_version': 1,
@@ -92,19 +93,26 @@ def repository(value):
     return value
 
 
+def validate_profile(config):
+    if not isinstance(config, dict) or set(config) != {'provider', 'model'}:
+        raise AppError('INVALID_MODEL_PROFILE')
+    provider, model = config['provider'], config['model']
+    if not isinstance(provider, str) or provider not in PROVIDERS or not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9_.:/-]{0,120}', model) or model.startswith('-'):
+        raise AppError('INVALID_MODEL', '지원하는 실행 도구와 올바른 모델 ID를 지정해 주세요.')
+    if CATALOG[provider]['model_required'] and (not model or model.lower() in ('auto', 'default')):
+        raise AppError('EXACT_MODEL_REQUIRED', CATALOG[provider]['name'] + '에서 사용할 정확한 모델 ID를 입력해 주세요.')
+    if provider == 'glm' and not re.fullmatch(r'zai-coding-plan/glm-[A-Za-z0-9][A-Za-z0-9_.-]*', model):
+        raise AppError('GLM_CODING_PLAN_REQUIRED', 'GLM은 zai-coding-plan/glm-… 모델 ID를 사용합니다. OpenCode의 Z.AI Coding Plan 연결을 확인해 주세요.')
+    return config
+
+
 def validate_settings(value):
     if not isinstance(value, dict) or set(value) != set(DEFAULTS) or type(value.get('schema_version')) is not int or value['schema_version'] != 1:
         raise AppError('INVALID_SETTINGS')
     if not isinstance(value['roles'], dict) or set(value['roles']) != set(ROLES):
         raise AppError('INVALID_ROLES')
     for role in ROLES:
-        config = value['roles'][role]
-        if not isinstance(config, dict) or set(config) != {'provider', 'model'}:
-            raise AppError('INVALID_MODEL_PROFILE')
-        if config['provider'] not in PROVIDERS or not isinstance(config['model'], str) or not re.fullmatch(r'[A-Za-z0-9_.:/-]{0,120}', config['model']):
-            raise AppError('INVALID_MODEL', '지원하는 실행 도구와 올바른 모델 ID를 지정해 주세요.')
-        if config['model'].startswith('-'):
-            raise AppError('INVALID_MODEL')
+        validate_profile(value['roles'][role])
     if type(value['session_minutes']) is not int or not 5 <= value['session_minutes'] <= 720:
         raise AppError('INVALID_SESSION_LIMIT')
     if type(value['max_agent_calls']) is not int or not 0 <= value['max_agent_calls'] <= 100000:

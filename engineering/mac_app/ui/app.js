@@ -3,6 +3,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const labels = {queued:'시작 대기',preparing:'레포 준비',planning:'계획 중',building:'개발 중',reviewing:'감사 중',supervising:'감리 중',publishing:'결과 정리',verifying:'CI 확인 중',waiting_provider:'연결 재시도 대기',paused:'일시정지',needs_user:'결정 필요',unknown:'실행 확인 필요',ready:'검수 준비',accepted:'검수 완료',cancelled:'취소됨'};
 const roleInfo = {planner:['계획','레포의 기준 문서를 읽고 완성까지의 순서를 정합니다.','⌁'],builder:['개발','코드를 구현하고 테스트·디버깅·수정을 이어갑니다.','↗'],reviewer:['감사','별도 세션에서 실제 코드와 검증 근거를 확인합니다.','◎'],supervisor:['감리','원래 목표와 산출물 전체가 충족됐는지 점검합니다.','◈']};
+function providerInfo(id){return state?.providers.find(p=>p.id===id);}
 let state = null, selected = null, activePage = 'workspace', modelsDirty = false, dialogAction = null, timer = null;
 let pendingRequestId = null, pendingRequestPayload = null;
 function el(tag, className, content) { const node = document.createElement(tag); if(className) node.className=className; if(content!==undefined) node.textContent=content; return node; }
@@ -80,7 +81,7 @@ function renderDetail(scroll){
   if(!job.attempt&&['paused','needs_user','waiting_provider'].includes(job.state))buttons.append(actionButton('작업 취소',()=>action(job,'cancel')));
   if(!job.attempt&&['paused','needs_user','waiting_provider'].includes(job.state)&&JSON.stringify(job.settings.roles)!==JSON.stringify(state.settings.roles))buttons.append(actionButton('새 모델 설정 적용',()=>action(job,'reconfigure')));
   detail.append(buttons);
-  const team=Object.entries(job.settings.roles).map(([role,config])=>roleInfo[role][0]+': '+config.provider+(config.model?' / '+config.model:' / CLI 기본값')).join(' · ');
+  const team=Object.entries(job.settings.roles).map(([role,config])=>roleInfo[role][0]+': '+(providerInfo(config.provider)?.name||config.provider)+(config.model?' / '+config.model:' / CLI 기본값')).join(' · ');
   detail.append(el('div','detail-meta',team));
   if(job.head)detail.append(el('div','detail-meta',`검토 대상 ${job.head.slice(0,12)} · 모델 실행 ${job.calls}회`));
   const events=el('details','events');events.open=wasOpen;events.append(el('summary','','작업 기록 보기'));const log=el('div');events.append(log);detail.append(events);
@@ -95,20 +96,24 @@ function renderModels(){
     const card=el('div','role-card card'),heading=el('div','role-heading');heading.append(el('h2','',info[0]),el('span','role-symbol',info[2]));card.append(heading,el('p','',info[1]));
     const fields=el('div','role-fields');const providerWrap=el('div'),modelWrap=el('div');
     const label=el('label','','실행 도구');label.htmlFor=role+'-provider';const provider=el('select');provider.id=role+'-provider';
-    for(const [id,name] of [['codex','Codex CLI'],['claude','Claude Code']]){const option=el('option','',name);option.value=id;provider.append(option);}provider.value=state.settings.roles[role].provider;
+    for(const item of state.providers){const option=el('option','',item.name);option.value=item.id;provider.append(option);}provider.value=state.settings.roles[role].provider;
     const ml=el('label','','모델 ID');ml.htmlFor=role+'-model';const model=el('input');model.id=role+'-model';model.type='text';model.placeholder='비우면 CLI 기본 모델';model.value=state.settings.roles[role].model;model.maxLength=120;
-    providerWrap.append(label,provider);modelWrap.append(ml,model);fields.append(providerWrap,modelWrap);card.append(fields);root.append(card);
+    const hint=el('p','provider-hint');hint.id=role+'-provider-hint';model.setAttribute('aria-describedby',hint.id);
+    const explain=()=>{const item=providerInfo(provider.value);model.placeholder=item.model_hint;model.required=item.model_required;hint.textContent=item.description+' 모델 확인: '+item.models_command;};
+    provider.addEventListener('change',()=>{model.value='';explain();});explain();
+    providerWrap.append(label,provider);modelWrap.append(ml,model);fields.append(providerWrap,modelWrap);card.append(fields,hint);root.append(card);
   }
   $('#session-minutes').value=state.settings.session_minutes;$('#max-calls').value=state.settings.max_agent_calls;$('#keep-awake').checked=state.settings.keep_awake;$('#publish-pr').checked=state.settings.publish_pr;
 }
 function shellQuote(value){return "'"+value.replaceAll("'","'\\''")+"'";}
 function renderConnections(){
   const c=state.connections;$('#host-dot').classList.add('online');$('#connection-label').textContent='앱에 연결됨';$('#version').textContent=state.version;
-  const configured=c.git.installed&&c.gh.installed&&c.github_authenticated&&Object.values(state.settings.roles).every(v=>c[v.provider].installed);
+  const configured=c.git.installed&&c.gh.installed&&c.github_authenticated&&Object.values(state.settings.roles).every(v=>c[v.provider]?.installed);
   $('#setup-banner').hidden=configured;
   const list=$('#connection-list');list.replaceChildren();
-  for(const [key,name] of [['git','Git'],['gh','GitHub CLI'],['codex','Codex CLI'],['claude','Claude Code']]){
-    const item=c[key],row=el('div','connection-row'),body=el('div');body.append(el('strong','',name),el('p','',item.version||'설치 후 다시 확인해 주세요.'));const ready=item.installed&&(key!=='gh'||c.github_authenticated);row.append(body,el('span','status-pill '+(ready?'ready':'muted'),ready?(key==='gh'?'로그인됨':'설치됨'):item.installed?'로그인 필요':'미설치'));list.append(row);
+  for(const [key,name] of [['git','Git'],['gh','GitHub CLI'],...state.providers.map(p=>[p.id,p.name])]){
+    const item=c[key]||{},row=el('div','connection-row'),body=el('div');body.append(el('strong','',name),el('p','',item.version||'설치 후 다시 확인해 주세요.'));const ready=item.installed&&(key!=='gh'||c.github_authenticated);row.append(body,el('span','status-pill '+(ready?'ready':'muted'),ready?(key==='gh'?'로그인됨':'설치됨'):item.installed?'로그인 필요':'미설치'));
+    const info=providerInfo(key);if(info){const help=el('p','connection-help');help.append(el('code','',info.login_command),document.createTextNode(' · '));const link=el('a','','설치 안내 ↗');link.href=info.docs_url;link.target='_blank';link.rel='noopener noreferrer';help.append(link);body.append(help);}list.append(row);
   }
   const prefix=shellQuote(state.python_path)+' '+shellQuote(state.cli_path)+' --data-dir '+shellQuote(state.data_directory);
   $('#cli-example').textContent=prefix+" start \\\n  --repo BeautifulMind-JT/ZARI \\\n  --goal '레포에 명시된 산출물을 완성하고 결과를 검수할 수 있게 해 줘' \\\n  --request-id zari-delivery-001";

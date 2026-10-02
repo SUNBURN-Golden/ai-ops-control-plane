@@ -5,9 +5,12 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
+import uuid
 
-from common import AppError, ROLES, encoded, parse_json
+from common import AppError, ROLES, atomic_json, encoded, parse_json, validate_profile
+from provider_catalog import CATALOG
 
 
 def object_schema(fields):
@@ -61,28 +64,75 @@ def prompt(job, role, head):
     }[role]
     context = {key: job.get(key) for key in ('id', 'repository', 'goal', 'base_sha', 'plan', 'feedback', 'user_answers')}
     context.update(role=role, exact_head=head, current_task=task)
-    return RULES + '\nROLE ASSIGNMENT\n' + instruction + '\nTRUSTED JOB CONTEXT\n' + encoded(context)
+    return (RULES + '\nROLE ASSIGNMENT\n' + instruction + '\nTRUSTED JOB CONTEXT\n' + encoded(context)
+            + '\nOUTPUT CONTRACT\nReturn exactly one JSON object matching this schema as your final answer. '
+              'No prose outside the JSON, no Markdown fences, and no result file written by a tool.\n' + encoded(SCHEMA))
 
 
-def environment():
+def environment(profile=None, role=None):
     # CLI OAuth/keychain state remains usable. Do not inherit a server/relay token,
     # API key, cloud credentials, arbitrary PYTHONPATH or a git config override.
     allowed = ('HOME', 'PATH', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR',
-               'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'CODEX_HOME')
+               'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'CODEX_HOME', 'GROK_HOME')
     env = {key: os.environ[key] for key in allowed if key in os.environ}
     env.update(TERM='dumb', NO_COLOR='1', PYTHONDONTWRITEBYTECODE='1', GIT_TERMINAL_PROMPT='0')
+    if profile and profile['provider'] == 'glm':
+        # Highest-priority inline config fixes the approved subscription route and
+        # a dedicated role. Never reuse a user's arbitrary default agent/model.
+        permission = {'*': 'deny', 'read': 'allow', 'glob': 'allow', 'grep': 'allow'}
+        if role == 'builder': permission.update(edit='allow', bash='allow')
+        permission.update(external_directory='deny', task='deny', question='deny')
+        config = {'autoupdate': False, 'share': 'disabled', 'enabled_providers': ['zai-coding-plan'],
+                  'model': profile['model'], 'permission': permission,
+                  'agent': {'aiops': {'description': 'AIOPS assigned local role', 'mode': 'primary',
+                                     'model': profile['model'], 'permission': permission}}}
+        env.update(OPENCODE_CONFIG_CONTENT=encoded(config), OPENCODE_PERMISSION=encoded(permission),
+                   OPENCODE_DISABLE_AUTOUPDATE='1', OPENCODE_DISABLE_DEFAULT_PLUGINS='1',
+                   OPENCODE_DISABLE_CLAUDE_CODE='1', OPENCODE_DISABLE_TERMINAL_TITLE='1')
     return env
 
 
-def command(profile, role, attempt_dir):
+def executable(provider):
+    for name in CATALOG[provider]['executables']:
+        found = shutil.which(name)
+        if found: return found
+    return None
+
+
+def session_uuid(folder):
+    # One fresh, stable native Grok session identity per admitted local attempt.
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, str(Path(folder).resolve())))
+
+
+def prepare(profile, role, folder, checkout, assignment):
+    folder = Path(folder)
+    if profile['provider'] in ('grok_build', 'devin'):
+        fd = os.open(folder / 'prompt.txt', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(assignment); stream.flush(); os.fsync(stream.fileno())
+    if profile['provider'] == 'devin':
+        writing = role == 'builder'
+        allow = ['Read(**)', 'grep', 'glob']
+        deny = ['mcp__*']
+        if writing: allow += ['Write(' + str(Path(checkout).resolve()) + '/**)', 'exec']
+        else: deny += ['edit', 'exec', 'Write(/**)']
+        atomic_json(folder / 'devin-config.json', {
+            'theme_mode': 'nocolor', 'auto_update': False, 'notify': 'never', 'subagents_enabled': False,
+            'permissions': {'allow': allow, 'deny': deny, 'ask': []},
+            'read_config_from': dict(agents_standard=True, cursor=False, windsurf=False,
+                                     claude=False, copilot=False, opencode=False, zed=False)})
+
+
+def command(profile, role, attempt_dir, *, checkout=None):
     if role not in ROLES: raise AppError('INVALID_ROLE')
+    validate_profile(profile)
     provider = profile['provider']; writing = role == 'builder'
-    executable = shutil.which(provider)
-    if not executable: raise AppError('MISSING_PROVIDER', provider + ' 설치가 필요합니다.')
+    cli = executable(provider)
+    if not cli: raise AppError('MISSING_PROVIDER', CATALOG[provider]['name'] + ' CLI 설치가 필요합니다.')
     model = ['--model', profile['model']] if profile['model'] else []
     folder = Path(attempt_dir)
     if provider == 'codex':
-        return [executable, '-a', 'never', 'exec', '--json', '--ephemeral', '--color', 'never',
+        return [cli, '-a', 'never', 'exec', '--json', '--ephemeral', '--color', 'never',
                 '--sandbox', 'workspace-write' if writing else 'read-only',
                 '-c', 'sandbox_workspace_write.network_access=true' if writing else 'sandbox_workspace_write.network_access=false',
                 '--output-schema', str(folder / 'schema.json'), '--output-last-message', str(folder / 'last-message.json'),
@@ -91,27 +141,57 @@ def command(profile, role, attempt_dir):
         tools = 'Read,Glob,Grep,Edit,Write,Bash' if writing else 'Read,Glob,Grep'
         settings = {'sandbox': {'enabled': True, 'failIfUnavailable': True,
                                 'autoAllowBashIfSandboxed': True, 'allowUnsandboxedCommands': False}}
-        return [executable, '--bare', '-p', '--output-format', 'json', '--json-schema', encoded(SCHEMA),
+        return [cli, '--bare', '-p', '--output-format', 'json', '--json-schema', encoded(SCHEMA),
                 '--tools', tools, '--allowedTools', tools, '--disallowedTools', 'mcp__*',
                 '--permission-mode', 'acceptEdits' if writing else 'dontAsk',
                 '--settings', encoded(settings), *model]
+    if provider == 'cursor':
+        # ask mode excludes editing. --force is limited to the builder; it is
+        # not treated as a sandbox or as permission to launch cloud workers.
+        return [cli, '--print', '--output-format', 'stream-json', '--trust', '--sandbox', 'enabled',
+                *(['--force'] if writing else ['--mode', 'ask']),
+                *(['--workspace', str(Path(checkout).resolve())] if checkout else []), *model]
+    if provider == 'glm':
+        return [cli, 'run', '--format', 'json', '--agent', 'aiops', '--auto',
+                '--title', 'AIOPS ' + role, *(['--dir', str(Path(checkout).resolve())] if checkout else []), *model]
+    if provider == 'grok_build':
+        return [cli, '--no-auto-update', '--prompt-file', str(folder / 'prompt.txt'),
+                '--session-id', session_uuid(folder), '--output-format', 'json',
+                '--json-schema', encoded(SCHEMA),
+                '--sandbox', 'workspace' if writing else 'read-only',
+                '--always-approve', '--no-subagents', '--no-memory', '--no-plan',
+                '--deny', 'MCPTool', *([] if writing else ['--deny', 'Bash', '--deny', 'Edit']),
+                *(['--cwd', str(Path(checkout).resolve())] if checkout else []), *model]
+    if provider == 'devin':
+        return [cli, '--print', '--prompt-file', str(folder / 'prompt.txt'),
+                '--export', str(folder / 'trajectory.json'), '--config', str(folder / 'devin-config.json'),
+                '--sandbox', '--permission-mode', 'autonomous', '--respect-workspace-trust', 'false', *model]
     raise AppError('UNSUPPORTED_PROVIDER')
 
 
-def result(profile, folder):
-    folder = Path(folder)
-    if profile['provider'] == 'codex':
-        path = folder / 'last-message.json'
-        if not path.is_file() or path.is_symlink() or path.stat().st_size > 262144:
-            raise AppError('MISSING_STRUCTURED_RESULT')
-        report = parse_json(path.read_text())
-    else:
-        raw = folder / 'stdout.log'
-        if raw.stat().st_size > 1048576: raise AppError('RESULT_TOO_LARGE')
-        wrapper = parse_json(raw.read_text(), 1048576)
-        if wrapper.get('is_error') or wrapper.get('permission_denials'):
-            raise AppError('PROVIDER_PERMISSION_OR_RESULT_ERROR')
-        report = wrapper.get('structured_output')
+def read_output(path, limit=16777216):
+    try: fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc: raise AppError('MISSING_STRUCTURED_RESULT') from exc
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise AppError('INVALID_RESULT_FILE')
+        if info.st_size > limit: raise AppError('RESULT_TOO_LARGE')
+        data = stream.read(limit + 1)
+    if len(data) > limit: raise AppError('RESULT_TOO_LARGE')
+    try: return data.decode('utf-8')
+    except UnicodeError as exc: raise AppError('INVALID_PROVIDER_ENCODING') from exc
+
+
+def json_answer(value):
+    if not isinstance(value, str): raise AppError('INVALID_AGENT_RESULT')
+    value = value.strip()
+    # Accept a whole fenced final answer, never search logs/tool output for JSON.
+    if value.startswith('```json\n') and value.endswith('\n```'): value = value[8:-4]
+    return parse_json(value, 262144)
+
+
+def validate_report(report):
     if not isinstance(report, dict) or set(report) != set(SCHEMA['properties']):
         raise AppError('INVALID_AGENT_RESULT')
     if report['status'] not in ('complete', 'fail', 'needs_user'):
@@ -127,11 +207,129 @@ def result(profile, folder):
     return report
 
 
+def session_id(value):
+    if not isinstance(value, str) or not value or len(value) > 200 or any(ord(c) < 33 for c in value):
+        raise AppError('INVALID_PROVIDER_SESSION')
+    return value
+
+
+def cursor_completion(raw):
+    """Completed assistant messages are separate from narration and tool output."""
+    sid = None; answer = None; terminal = None
+    for line in raw.splitlines():
+        if not line.strip(): continue
+        event = parse_json(line, 16777216)
+        if not isinstance(event, dict) or terminal is not None:
+            raise AppError('INVALID_PROVIDER_RESULT')
+        if 'session_id' in event:
+            current = session_id(event['session_id'])
+            if sid is not None and current != sid: raise AppError('PROVIDER_SESSION_MISMATCH')
+            sid = current
+        kind = event.get('type')
+        if kind == 'error' or event.get('is_error'): raise AppError('PROVIDER_REPORTED_ERROR')
+        if kind == 'assistant':
+            message = event.get('message'); content = message.get('content') if isinstance(message, dict) else None
+            if not isinstance(content, list) or not content or message.get('role') != 'assistant':
+                raise AppError('INVALID_PROVIDER_RESULT')
+            if any(not isinstance(p, dict) or p.get('type') != 'text' or not isinstance(p.get('text'), str) for p in content):
+                answer = None
+            else: answer = ''.join(p['text'] for p in content)
+        elif kind == 'tool_call': answer = None
+        elif kind == 'result': terminal = event
+    if (not terminal or terminal.get('subtype') != 'success' or terminal.get('is_error') is not False or
+            terminal.get('session_id') != sid or answer is None):
+        raise AppError('PROVIDER_INCOMPLETE_RESULT')
+    return json_answer(answer), 'cursor-cli:' + session_id(sid)
+
+
+def opencode_completion(raw):
+    """Only the final assistant step may supply the report; tool text never can."""
+    sid = None; message_id = None; parts = {}; finish = None
+    for line in raw.splitlines():
+        if not line.strip(): continue
+        event = parse_json(line, 16777216)
+        if not isinstance(event, dict): raise AppError('INVALID_PROVIDER_RESULT')
+        current = session_id(event.get('sessionID'))
+        if sid is not None and current != sid: raise AppError('PROVIDER_SESSION_MISMATCH')
+        sid = current
+        if event.get('type') == 'error': raise AppError('PROVIDER_REPORTED_ERROR')
+        part = event.get('part')
+        if event.get('type') in ('step_start', 'text', 'step_finish', 'tool_use'):
+            if not isinstance(part, dict): raise AppError('INVALID_PROVIDER_RESULT')
+            if part.get('sessionID', sid) != sid: raise AppError('PROVIDER_SESSION_MISMATCH')
+            mid = session_id(part.get('messageID'))
+            if mid != message_id:
+                message_id = mid; parts = {}; finish = None
+            if event['type'] == 'step_start': parts = {}; finish = None
+            elif event['type'] == 'tool_use': finish = None
+            elif event['type'] == 'text':
+                if part.get('type') != 'text' or not isinstance(part.get('text'), str):
+                    raise AppError('INVALID_PROVIDER_RESULT')
+                parts[session_id(part.get('id'))] = part['text']
+            else: finish = part.get('reason')
+    if finish != 'stop' or not parts: raise AppError('PROVIDER_INCOMPLETE_RESULT')
+    return json_answer(''.join(parts.values())), 'opencode-cli:' + session_id(sid)
+
+
+def devin_completion(raw):
+    trajectory = parse_json(raw, 16777216)
+    if (not isinstance(trajectory, dict) or not isinstance(trajectory.get('schema_version'), str) or
+            trajectory['schema_version'] not in {'ATIF-v1.' + str(i) for i in range(9)}):
+        raise AppError('INVALID_DEVIN_EXPORT')
+    if trajectory.get('continued_trajectory_ref'): raise AppError('PROVIDER_INCOMPLETE_RESULT')
+    steps = trajectory.get('steps')
+    if not isinstance(steps, list) or not steps or not isinstance(steps[-1], dict):
+        raise AppError('INVALID_DEVIN_EXPORT')
+    final = steps[-1]
+    if final.get('source') != 'agent' or final.get('tool_calls') or final.get('observation') or final.get('is_copied_context'):
+        raise AppError('PROVIDER_INCOMPLETE_RESULT')
+    message = final.get('message')
+    if isinstance(message, list):
+        if not message or any(not isinstance(p, dict) or p.get('type') != 'text' or not isinstance(p.get('text'), str) for p in message):
+            raise AppError('INVALID_DEVIN_EXPORT')
+        message = ''.join(p['text'] for p in message)
+    return json_answer(message), 'devin-cli:' + session_id(trajectory.get('session_id'))
+
+
+def completion(profile, folder):
+    provider = profile['provider']; folder = Path(folder); sid = None
+    if provider == 'codex':
+        report = parse_json(read_output(folder / 'last-message.json', 262144))
+    elif provider == 'devin':
+        report, sid = devin_completion(read_output(folder / 'trajectory.json'))
+    elif provider == 'glm':
+        report, sid = opencode_completion(read_output(folder / 'stdout.log'))
+    elif provider == 'cursor':
+        report, sid = cursor_completion(read_output(folder / 'stdout.log'))
+    else:
+        wrapper = parse_json(read_output(folder / 'stdout.log'), 16777216)
+        if not isinstance(wrapper, dict): raise AppError('INVALID_PROVIDER_RESULT')
+        if wrapper.get('is_error') or wrapper.get('permission_denials') or wrapper.get('type') == 'error':
+            raise AppError('PROVIDER_PERMISSION_OR_RESULT_ERROR')
+        if provider == 'claude':
+            report = wrapper.get('structured_output')
+            sid = wrapper.get('session_id')
+        elif provider == 'grok_build':
+            if wrapper.get('stopReason') != 'end_turn': raise AppError('PROVIDER_INCOMPLETE_RESULT')
+            if wrapper.get('sessionId') != session_uuid(folder): raise AppError('PROVIDER_SESSION_MISMATCH')
+            if 'structuredOutputError' in wrapper: raise AppError('PROVIDER_REPORTED_ERROR')
+            # Grok's text includes narration before tool calls. Its schema-bound
+            # native field is camelCase (unlike streaming-messages-json).
+            report = wrapper.get('structuredOutput'); sid = 'grok-cli:' + wrapper['sessionId']
+        else: raise AppError('UNSUPPORTED_PROVIDER')
+    return {'report': validate_report(report), 'session_id': sid,
+            'harness': CATALOG[provider]['harness'], 'provider': provider, 'model_requested': profile['model']}
+
+
+def result(profile, folder):
+    return completion(profile, folder)['report']
+
+
 def availability():
     data = {}
-    for tool in ('git', 'gh', 'codex', 'claude'):
-        path = shutil.which(tool)
-        item = {'installed': bool(path), 'version': ''}
+    for tool in ('git', 'gh', *CATALOG):
+        path = executable(tool) if tool in CATALOG else shutil.which(tool)
+        item = {'installed': bool(path), 'version': '', 'executable': path or '', 'authentication': 'not_checked'}
         if path:
             try:
                 run = subprocess.run([path, '--version'], capture_output=True, text=True, timeout=5, env=environment())

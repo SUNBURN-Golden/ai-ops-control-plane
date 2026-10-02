@@ -149,6 +149,24 @@ class AppTests(unittest.TestCase):
         with self.assertRaisesRegex(common.AppError,'READ_ONLY_ROLE_MODIFIED'):self.finish()
         self.assertIsNotNone(self.job()['attempt'])
 
+    def test_failed_read_only_provider_cannot_release_a_modified_checkout(self):
+        self.built(); self.launch(); self.repos.dirty = True
+        with self.assertRaisesRegex(common.AppError, 'READ_ONLY_ROLE_MODIFIED'):
+            self.finish(error='PROVIDER_LOGIN_REQUIRED')
+        self.assertIsNotNone(self.job()['attempt'])
+
+    def test_provider_evidence_cannot_claim_another_harness_or_model(self):
+        self.built(); job = self.launch(); attempt = job['attempt']
+        path = self.directory / 'jobs' / job['id'] / attempt['id'] / 'receipt.json'
+        for evidence in ({'provider': 'cursor', 'harness': 'CURSOR_CLI', 'model_requested': ''},
+                         {'provider': 'codex', 'harness': 'GROK_BUILD_CLI', 'model_requested': ''},
+                         {'provider': 'codex', 'harness': 'CODEX_CLI', 'model_requested': 'other'}, []):
+            common.atomic_json(path, {'attempt_id': attempt['id'], 'binding': attempt['binding'], 'error': None,
+                'report': report(job, 'reviewer'), 'process_group_quiescent': True, 'provider_evidence': evidence})
+            with self.subTest(evidence=evidence), self.assertRaisesRegex(common.AppError, 'PROVIDER_PROFILE_MISMATCH'):
+                self.engine.step(job)
+            self.assertIsNotNone(self.job()['attempt'])
+
     def test_user_question_keeps_scope_and_resumes_only_with_answer(self):
         self.prepared();job=self.launch();self.finish(report(job,'builder','needs_user',question='Choose the required external account.'))
         self.assertEqual(self.job()['state'],'needs_user')

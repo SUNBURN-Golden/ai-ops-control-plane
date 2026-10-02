@@ -8,3 +8,5 @@ p{color:#687460}.eyebrow,.workspace-label,.quiet-note,.host div>span{color:#7884
 ::placeholder{color:#849078}.role-card p,.role-fields input,.role-fields select{font-size:13px}.setting-row p{font-size:11px;color:#748264}
 .setup-banner p{color:#687d4c;font-size:11px}.setup-banner strong{color:#5d743e}.optional,.subtle-tag{color:#778769}
 @media(max-width:760px){.page-heading p{text-wrap:pretty}.autonomy-note div>span{font-size:10px}.form-caption{font-size:10px}.setup-banner p{font-size:10px}}
+
+.provider-hint{min-height:62px;overflow-wrap:anywhere}.role-card .provider-hint{font-size:11px;line-height:1.7;margin-top:15px;color:#66725a}.connection-row>div{min-width:0}.connection-help{overflow-wrap:anywhere}.connection-help code{font-size:11px;color:#586749}.connection-help a{text-decoration:underline;text-underline-offset:3px}.connection-row .status-pill{flex-shrink:0}@media(max-width:760px){.provider-hint{min-height:0}.connection-row{gap:12px}.role-fields{grid-template-columns:minmax(100px,0.85fr) minmax(0,1fr)}}

@@ -301,7 +301,7 @@ class Engine:
         attempt_id = uuid.uuid4().hex
         attempt_dir = private_directory(folder / attempt_id)
         profile = job['settings']['roles'][role]
-        agents.command(profile, role, attempt_dir)
+        agents.command(profile, role, attempt_dir, checkout=self.repos.path(job))
         self.repos.assert_binding(job)
         if role != 'builder' and not self.repos.clean(job): raise AppError('READ_ONLY_INPUT_IS_DIRTY')
         head = self.repos.head(job)
@@ -346,6 +346,10 @@ class Engine:
             raise AppError('RECEIPT_BINDING_MISMATCH')
         if receipt.get('process_group_quiescent') is not True:
             raise AppError('WORKER_OUTCOME_UNKNOWN', '실행 프로세스 종료 상태가 확인되지 않았습니다.')
+        # A failed provider can still have edited the checkout. Check before
+        # clearing any reservation, including login/setup and malformed output.
+        if attempt['role'] != 'builder' and (self.repos.head(job) != attempt['head'] or not self.repos.clean(job)):
+            raise AppError('READ_ONLY_ROLE_MODIFIED_CHECKOUT')
         if receipt.get('error'):
             error = receipt['error']
             if error == 'CHILD_PROCESS_GROUP_NOT_QUIESCENT':
@@ -365,9 +369,15 @@ class Engine:
         report = receipt['report']; role = attempt['role']
         if not isinstance(report, dict) or report.get('status') not in ('complete', 'fail', 'needs_user'):
             raise AppError('INVALID_RECEIPT_REPORT')
-        if role != 'builder' and (self.repos.head(job) != attempt['head'] or not self.repos.clean(job)):
-            raise AppError('READ_ONLY_ROLE_MODIFIED_CHECKOUT')
-        self.store.update(job['id'], attempt=None, failures=0, not_before=0, summary=report['summary'])
+        provider_evidence = receipt.get('provider_evidence')
+        if provider_evidence is not None:
+            profile = job['settings']['roles'][role]
+            if (not isinstance(provider_evidence, dict) or provider_evidence.get('provider') != profile['provider'] or
+                    provider_evidence.get('harness') != agents.CATALOG[profile['provider']]['harness'] or
+                    provider_evidence.get('model_requested') != profile['model']):
+                raise AppError('PROVIDER_PROFILE_MISMATCH')
+        self.store.update(job['id'], attempt=None, failures=0, not_before=0, summary=report['summary'],
+                          last_provider_evidence=provider_evidence)
         self.store.event(job['id'], 'result', report['summary'])
         if report['status'] == 'needs_user':
             self.store.update(job['id'], state='needs_user', question=report['question']); self.notify(job); return
@@ -400,7 +410,8 @@ class Engine:
             if report.get('reviewed_head') != attempt['head'] or set(report.get('covered_tasks') or []) != expected or not report.get('checks') or report.get('findings'):
                 self.store.update(job['id'], state=ROLE_STATE[role], feedback=['정확한 HEAD와 모든 task id, 실제 검증 근거가 필요합니다. 미해결 사항은 fail로 반환하세요.'], not_before=time.time() + 10)
                 return
-            evidence = {'head': attempt['head'], 'attempt': attempt['id'], 'profile': job['settings']['roles'][role], 'report': report}
+            evidence = {'head': attempt['head'], 'attempt': attempt['id'], 'profile': job['settings']['roles'][role],
+                        'report': report, 'provider_evidence': provider_evidence}
             if role == 'reviewer':
                 self.store.update(job['id'], review=evidence, phase='supervising', state='supervising', feedback=[])
             else:

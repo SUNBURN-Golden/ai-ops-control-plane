@@ -11,9 +11,9 @@
     <a class="brand" href="#workspace" aria-label="AIOPS 작업실"><img src="/icon.svg" alt="" width="30" height="30"><span>AIOPS<span class="brand-tag">MAC</span></span></a>
     <div class="workspace-label">나의 개발 작업실</div>
     <nav aria-label="주요 메뉴">
-      <button class="nav-item active" data-page="workspace"><span class="nav-icon">▦</span>작업실<span id="job-count" class="count">0</span></button>
-      <button class="nav-item" data-page="models"><span class="nav-icon">◈</span>모델 설정</button>
-      <button class="nav-item" data-page="connect"><span class="nav-icon">⌘</span>연결</button>
+      <button class="nav-item active" data-page="workspace"><span class="nav-icon" aria-hidden="true">▦</span>작업실<span id="job-count" class="count">0</span></button>
+      <button class="nav-item" data-page="models"><span class="nav-icon" aria-hidden="true">◈</span>모델 설정</button>
+      <button class="nav-item" data-page="connect"><span class="nav-icon" aria-hidden="true">⌘</span>연결</button>
     </nav>
     <div class="sidebar-bottom"><div class="host"><span class="dot" id="host-dot"></span><div><strong>내 Mac에서 실행</strong><span id="connection-label">연결 확인 중</span></div></div><div class="quiet-note">개발은 AIOPS에게.<br>당신은 결과에 집중하세요.</div></div>
   </aside>
@@ -37,12 +37,12 @@
       <section id="job-detail" class="detail card" aria-label="작업 상세" hidden></section>
     </section>
     <section id="models-page" class="page" hidden>
-      <div class="simple-heading"><div class="eyebrow">YOUR TEAM, YOUR MODELS</div><h1>역할마다, 원하는 모델로.</h1><p>개발과 검토는 서로 다른 세션에서 진행합니다. 설정은 다음 작업부터 적용됩니다.</p></div>
+      <div class="simple-heading"><div class="eyebrow">YOUR TEAM, YOUR MODELS</div><h1>역할마다, 원하는 모델로.</h1><p>Codex · Claude · Cursor · GLM · Grok Build · Devin<br>개발과 검토는 서로 다른 세션에서 진행합니다. 설정은 다음 작업부터 적용됩니다.</p></div>
       <form id="model-form"><div id="role-grid" class="role-grid"></div><div class="settings-card card"><h2>실행 방식</h2><div class="setting-row"><div><label for="session-minutes">한 세션의 최대 실행 시간</label><p>긴 작업은 체크포인트를 남기며 여러 단계로 이어갑니다.</p></div><div class="number-input"><input id="session-minutes" type="number" min="5" max="720" value="90" required><span>분</span></div></div><div class="setting-row"><div><label for="max-calls">작업당 모델 실행 한도</label><p>0이면 횟수 제한 없이 결과 검수 단계까지 진행합니다.</p></div><div class="number-input"><input id="max-calls" type="number" min="0" max="100000" value="0" required><span>회</span></div></div><label class="setting-row"><div><strong>작업 중 Mac 깨어 있기</strong><p>전원이 연결된 Mac의 유휴 잠자기를 방지합니다.</p></div><input type="checkbox" id="keep-awake" class="switch" checked></label><label class="setting-row"><div><strong>GitHub에 검수용 PR 만들기</strong><p>결과와 검증 근거를 한곳에서 확인합니다. 병합·배포는 별도입니다.</p></div><input type="checkbox" id="publish-pr" class="switch" checked></label></div><div class="save-row"><p>다른 모델로 자동 전환하거나 추가 사용량을 구매하지 않습니다.</p><button class="button primary" type="submit">설정 저장 <span>✓</span></button></div></form>
     </section>
     <section id="connect-page" class="page" hidden>
       <div class="simple-heading"><div class="eyebrow">ONE SETUP. MANY WAYS TO ASK.</div><h1>한 번 연결하고, 편하게 시키세요.</h1><p>이 화면에서도, 맥에 연결된 봇에서도 같은 AIOPS 작업을 시작할 수 있어요.</p></div>
-      <div class="card connections-card"><div class="card-title"><h2>이 Mac의 연결 상태</h2><button class="button secondary small" id="doctor">다시 확인 ↻</button></div><div id="connection-list"></div><p class="help-note">GitHub: <code>gh auth login</code> · Codex: <code>codex login</code><br>Claude Code를 선택했다면 해당 앱에서 먼저 로그인해 주세요.</p></div>
+      <div class="card connections-card"><div class="card-title"><h2>이 Mac의 연결 상태</h2><button class="button secondary small" id="doctor">다시 확인 ↻</button></div><div id="connection-list"></div><p class="help-note">GitHub 연결: <code>gh auth login</code><br>모델 설정에서 선택한 도구만 설치하고 로그인하면 됩니다. 도구의 설치 여부와 실제 모델 실행 가능 여부는 다릅니다. GLM은 OpenCode에서 Z.AI Coding Plan을 연결하세요.</p></div>
       <div class="card integration-card"><span class="subtle-tag">CLI</span><h2>봇에는 이렇게 요청하세요</h2><blockquote>“이 레포에 적힌 산출물이 완성될 때까지 AIOPS로 개발해 줘.<br>내가 꼭 필요한 경우에만 부르고, 결과가 나오면 알려 줘.”</blockquote><p>맥에 명령을 실행할 수 있는 봇은 아래 명령을 사용하면 됩니다.</p><pre id="cli-example"></pre><button class="button secondary small" id="copy-cli">명령 복사</button></div>
       <div class="card integration-card"><span class="subtle-tag">MCP</span><h2>에이전트 도구로 연결하기</h2><p>로컬 MCP를 지원하는 앱에 아래 설정을 추가하세요. 시작·상태 확인·일시정지가 제공됩니다.</p><pre id="mcp-example"></pre><button class="button secondary small" id="copy-mcp">설정 복사</button><p class="help-note">다른 기기의 봇은 인증된 SSH 연결로 맥의 CLI를 호출하세요. AIOPS는 인터넷에 포트를 공개하지 않습니다.</p></div>
     </section>

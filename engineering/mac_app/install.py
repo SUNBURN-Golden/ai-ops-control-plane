@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 
-from common import AppError, private_directory
+from common import AppError, VERSION, private_directory
 
 
 def install(destination=None, data=None):
@@ -38,8 +38,8 @@ def install(destination=None, data=None):
     registry = source.parent / '.github/control-plane/projects.json'
     if registry.exists(): shutil.copy2(registry, resources / 'projects.json')
     info = {'CFBundleName': 'AIOPS', 'CFBundleDisplayName': 'AIOPS',
-            'CFBundleIdentifier': 'local.aiops.mac', 'CFBundleVersion': '0.1.0',
-            'CFBundleShortVersionString': '0.1.0', 'CFBundleExecutable': 'AIOPS',
+            'CFBundleIdentifier': 'local.aiops.mac', 'CFBundleVersion': VERSION,
+            'CFBundleShortVersionString': VERSION, 'CFBundleExecutable': 'AIOPS',
             'CFBundlePackageType': 'APPL', 'LSUIElement': True}
     with open(app / 'Contents/Info.plist', 'wb') as stream: plistlib.dump(info, stream)
     python = str(Path(sys.executable).resolve()); entry = str(resources / 'aiops.py')

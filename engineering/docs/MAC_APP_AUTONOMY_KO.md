@@ -11,6 +11,7 @@
 - 개발·감사·감리 모델을 사용자가 설정한다. 특정 Opus/Fable 모델을 앱에 강제하지 않는다.
 - 직관적인 UI와 봇에서 호출하기 쉬운 인터페이스를 제공한다.
 - 복구 페이지·복구 설치 패키지는 추가하지 않는다.
+- 후속 명시 지시로 Codex·Claude뿐 아니라 Cursor, GLM, Grok Build, Devin도 포함한다. 기존 AIOPS 저장소의 실제 어댑터 구조를 바탕으로 Mac 소프트웨어를 계속 개발한다.
 
 이 기록은 새 Mac 앱 소스의 요구사항 근거다. 기존 Linux 호스트의 활성화 파일·보호 서비스 승인 기록을 대체하거나 실제 설치 완료를 주장하는 문서가 아니다.
 
@@ -21,6 +22,18 @@
 이번 사용자 요구에 맞추어 이 앱의 작업 실행 루프와 역할별 모델 설정을 구현한다. 기존 `AGENTS.md`의 고정 모델·루틴·기계적 lane 배정 계약이 적용되는 **레거시 프로그램 모드**는 변경하지 않는다. 레거시 실행에 사용되는 `control_plane_program.py`, `control_plane_host.py`, 활성화 기록 및 호스트 정책은 그대로다. 새 모드 도입·기존 호스트 소유권 이관은 독립적인 정확한 소스 검토와 실제 Mac 설치 확인 뒤 수행해야 한다.
 
 최초 버전은 한 서비스 프로세스와 한 활성 모델 세션을 사용한다. 단일 작업 안의 단계는 같은 체크아웃·브랜치에 누적한다. 여러 독립 작업을 제출하면 대기열에 넣는다. 알 수 없는 실행이 남으면 다른 작업에도 같은 실행 자원을 재할당하지 않는다.
+
+## 공급자 확장 — 0.2
+
+기존 `adapters/imported/astra-{devin,grok,glm}-supervisor`와 `adapters/cursor/astra-cursor-supervisor`, `docs/BUILDER_LANES.md`, 프로그램 배정·소유권 코드 및 중앙 프로젝트 등록을 확인했다. 기존 네 lane은 각각 Devin 로컬 CLI, xAI Grok Build CLI, OpenCode + Z.AI Coding Plan, Cursor CLI이다. Mac 앱에서도 이 구분을 유지하고 Codex·Claude와 함께 여섯 실행 도구를 제공한다. 이름이 비슷한 모델을 다른 공급자 자격으로 실행하지 않는다.
+
+역할별 도구·모델 선택은 새 Mac 모드의 사용자 설정이다. 기존 Linux 프로그램의 `DEVIN → GROK_BUILD → GLM → CURSOR` 순서, 활성화 파일, 보호된 lane 정책을 변경하지 않는다. 기존 CLI 명령 의미를 참고하되 Linux의 UID·`/proc`·`sudo`·host signer를 Mac에서 작동한다고 가정하지 않는다. Mac의 공통 worker가 CLI 하나를 소유하고 종료·결과를 기록한다.
+
+Cursor에는 `ask` 모드, GLM에는 역할별 OpenCode 권한, Grok에는 읽기 전용 sandbox/도구 차단, Devin에는 역할별 config의 쓰기·exec 차단을 적용한다. 실제 CLI의 제한 강도는 동일하지 않다. GLM 권한은 도구 정책이며 OS sandbox가 아니다. 모든 읽기 역할은 CLI 성공·오류와 관계없이 HEAD/작업트리 변경을 검사하고 변경이 있으면 소유권을 해제하지 않는다. 개인 Mac 동일 사용자 신뢰와 실제 호스트 qualification 경계는 그대로다.
+
+결과는 Cursor의 terminal 성공과 마지막 완료 assistant 메시지, OpenCode의 최종 `step_finish=stop` 메시지, Grok의 `end_turn` 및 정확한 세션 ID, Devin ATIF export의 마지막 agent 메시지에서만 읽는다. 로그 안의 임의 JSON·도구 출력·이전 단계·잘린 응답을 통과 결과로 읽지 않는다. 모든 결과는 공통 JSON 계약과 현재 HEAD 검증을 통과해야 한다. 새 worker 영수증에는 실제 실행 경로, 요청한 모델, 관측한 provider 세션 ID를 남긴다. 요청한 모델 이름을 실제 계정 모델 qualification 증거로 표시하지 않는다.
+
+실행·권한·형식별 표와 실기기 확인 항목은 `mac_app/PROVIDERS_KO.md`를 참조한다.
 
 ## 자동 진행과 멈춤의 의미
 
@@ -42,7 +55,7 @@
 - `launchd`는 사용자 로그인 세션에서 서비스를 관리한다. UI 종료와 작업 종료는 별개다.
 - HTTP는 loopback만 허용하며 Host/Origin 검사, 인증, 동일 출처 세션 쿠키와 제한된 정적 asset 경로를 사용한다. raw 셸·임의 파일 읽기 API는 없다.
 - 봇 토큰은 시작·읽기·일시정지에 사용한다. 앱에서만 모델 설정, 질문 답변, 검수 승인·수정 요청을 처리한다.
-- CLI에는 계정의 기존 OAuth/keychain 로그인을 사용한다. provider 자식 환경에 GitHub 토큰이나 API key를 넘기지 않는다. 이 설계는 **개인 Mac의 동일 사용자 계정**을 신뢰하며, 레거시 root-owned service와 동등한 적대적 다중 사용자 격리라고 주장하지 않는다.
+- CLI에는 계정의 기존 OAuth/keychain/도구 자체 인증 저장소를 사용한다. GLM의 Z.AI Coding Plan 키도 OpenCode 인증 저장소에서 사용한다. provider 자식 환경에 GitHub 토큰이나 API key를 넘기지 않는다. 이 설계는 **개인 Mac의 동일 사용자 계정**을 신뢰하며, 레거시 root-owned service와 동등한 적대적 다중 사용자 격리라고 주장하지 않는다.
 - 작업 중 로컬 상태 화면을 갱신하는 동작은 모델을 다시 호출하지 않는다. PR 게시 뒤에는 그 PR의 CI만 60초 간격으로 확인한다. 작업이 ready/paused/needs_user가 되면 새 모델 호출은 없다.
 
 ## 검증과 실제 설치의 경계

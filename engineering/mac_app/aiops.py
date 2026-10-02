@@ -18,6 +18,7 @@ import uuid
 import webbrowser
 
 import agents
+from provider_catalog import public_catalog
 from common import AppError, VERSION, atomic_json, encoded, parse_json, private_directory, read_json
 from core import Engine, Store, service_lock
 
@@ -56,6 +57,7 @@ class Application:
 
     def state(self):
         return {'version': VERSION, 'settings': self.store.settings(), 'jobs': self.store.jobs(),
+                'providers': public_catalog(),
                 'connections': self.doctor, 'data_directory': str(self.store.directory),
                 'cli_path': str(Path(__file__).resolve()), 'python_path': sys.executable}
 
