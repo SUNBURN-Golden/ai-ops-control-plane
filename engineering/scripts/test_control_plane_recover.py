@@ -707,6 +707,44 @@ class RecoveryTests(unittest.TestCase):
                 return original(token,cfg,**kw,confirm=lambda:True,run=lambda *a,**k:types.SimpleNamespace(returncode=0,stdout=raw,stderr=b''))
             with patch.object(t,'validate',side_effect=validate):
                 self.assertEqual(FAKE,t.reissue({},inst)['value'])
+    def enrollment_existing(self, value, events, rc=0):
+        import control_plane_fable as fable
+        path=self.root/'existing-token';r.atomic(path,value.encode())
+        os.utime(path,(100,100))
+        inst=types.SimpleNamespace(verify=lambda:None,manifest={'files':[
+            {'destination':'/opt/aiops/lib/fable/control_plane_fable.py','sha256':'fake'}]})
+        original_stat=os.fstat
+        def root_stat(fd):
+            info=original_stat(fd)
+            return types.SimpleNamespace(st_mode=info.st_mode,st_uid=0,st_nlink=info.st_nlink,st_mtime=info.st_mtime)
+        original_validate=t.validate
+        def validate(token,cfg,**kw):
+            return original_validate(token,cfg,**kw,confirm=lambda:True,
+                run=lambda *a,**k:types.SimpleNamespace(returncode=rc,stdout=events,stderr=b''))
+        with patch.object(t,'protected_parent'),patch.object(t.os,'fstat',side_effect=root_stat), \
+             patch.object(t,'pinned_module',return_value=fable),patch.object(t,'validate',side_effect=validate), \
+             patch.object(t,'reissue',return_value=dict(TOKEN)) as reissue,patch.object(t,'capture') as capture:
+            if rc == 1:
+                reissue.side_effect=lambda *a: self.fail('401 must not reissue')
+                capture.side_effect=lambda *a: self.fail('401 must not open login')
+            result=t.enrollment_token({},inst,path)
+            capture.assert_not_called()
+            return result,reissue.call_count
+    def test_enroll_existing_token_reused_without_login(self):
+        result,calls=self.enrollment_existing(FAKE,self.token_events({'status':'allowed','isUsingOverage':False}))
+        self.assertEqual(0,calls);self.assertEqual(FAKE,result['value'])
+        self.assertEqual(100,result['issued_at']);self.assertEqual(100+365*86400,result['expires_at'])
+        self.backend.h=None
+        r.prepare_enrollment(self.cp,input_fn=lambda _:'y')
+        self.cp.save(self.key,result,enrollment=True,salt=self.salt)
+        self.assertEqual(result,self.cp.restore('offline-fake-password')[0]['claude_token'])
+    def test_enroll_invalid_token_uses_new_issuance(self):
+        result,calls=self.enrollment_existing('invalid',b'')
+        self.assertEqual(1,calls);self.assertEqual(TOKEN,result)
+    def test_enroll_existing_token_401_stops_without_reissue(self):
+        events=json.dumps({'type':'result','is_error':True,'status_code':401}).encode()
+        self.expect('TOKEN_REISSUE_REQUIRED',self.enrollment_existing,FAKE,events,1)
+
     def test_f7_exact_platform_check(self):
         import platform
         manifest={'python_version':[3,13],'platform':'debian-13-x86_64-glibc-2.41'}

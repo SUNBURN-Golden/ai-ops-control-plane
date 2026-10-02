@@ -954,7 +954,7 @@ def recover_main(argv=None):
                 del password
                 token_item = next(x for x in inst.manifest['files'] if x['destination'] == '/opt/aiops/lib/control_plane_recover_token.py')
                 token_module = pinned_module(Path(token_item['destination']), token_item['sha256'])
-                token = token_module.reissue(cfg, inst)
+                token = token_module.enrollment_token(cfg, inst, TOKEN)
                 atomic(TOKEN, token['value'].encode())
                 cp.save(key, token, github_token=gh if cfg.get('store_github_token') is True else None, enrollment=True, salt=salt)
                 keyring('set', key)

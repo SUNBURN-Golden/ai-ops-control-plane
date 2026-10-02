@@ -232,6 +232,31 @@ def validate(token, cfg, run=subprocess.run, confirm=confirm_model, now=None, po
             'verified': True}
 
 
+def enrollment_token(cfg, installer, path):
+    """Reuse a protected existing OAuth credential; never reissue on 401."""
+    protected_parent(path)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return reissue(cfg, installer)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            fail('INSTALLATION_DRIFT')
+        raw = stream.read(4097)
+    try:
+        token = raw.decode('ascii').strip()
+    except UnicodeError:
+        token = ''
+    if len(token) > 4096 or not OAUTH.fullmatch(token):
+        return reissue(cfg, installer)
+    installer.verify()
+    fable_item = next(x for x in installer.manifest['files'] if x['destination'] == '/opt/aiops/lib/fable/control_plane_fable.py')
+    fable = pinned_module(Path(fable_item['destination']), fable_item['sha256'])
+    return validate(token, cfg, policy=fable.overage_policy, now=int(info.st_mtime))
+
+
 def reissue(cfg, installer):
     installer.verify()
     prerequisites(cfg)
