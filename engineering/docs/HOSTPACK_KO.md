@@ -1,6 +1,8 @@
 # 전체 호스트 설치·복구 묶음 `aiops-hostpack` — 운영 안내 (초안)
 
-상태: **DRAFT / 소스 구현·미설치·실호스트 미검증 / NOT_READY**. 설치·활성화·병합을 승인하지 않는다.
+상태: **소스 구현 / 병합·활성화 전**. 대표 결정 기록: https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/54#issuecomment-5950850220
+(① 단일 패키지 P1–P5 채택 ② 레인 로그인 4개 암호화 보관 허용 ③ 사라진 원장 1회 새 init 후 GitHub 기록으로 대사 ④ 이 도구를 계정 6개 생성·sudoers 설치의 승인된 경로로 인정. 활성화는 감사 PASS 뒤에만.)
+이 문서와 결정 기록은 병합·활성화를 승인하지 않는다.
 구성 요소의 근거와 단계는 [HOSTPACK_INVENTORY_KO.md](HOSTPACK_INVENTORY_KO.md)에 있다.
 
 ## 1. 무엇을 하나
@@ -70,7 +72,7 @@ COMMIT = os.environ['AIOPS_HOSTPACK_COMMIT']
 EVIDENCE = os.environ['AIOPS_BOUNDARY_EVIDENCE_URL']
 REPOSITORY = 'BeautifulMind-JT/ai-ops-control-plane'
 PINNED_SHA256 = {
- "engineering/scripts/control_plane_hostpack.py": "587a358fbb2a2feb301abe75630882c6bfd0b709cda686c93b2d8abf33dd8669",
+ "engineering/scripts/control_plane_hostpack.py": "27849816d3616dcd97eba963e37040a33b0859c7a6b80dc2de4877d5258e9dfd",
  "engineering/hostpack/aiops-hostpack": "5492b8d848348b381a69744499c4cd651a1cff2d8042ade9d9b4d8f3dc4b21b0",
  "engineering/hostpack/manifest.json": "1030c68e4f2300837734cb9d3aa3fa4579ee551e06e8ffb3864165327592047e",
  "engineering/hostpack/hostpack.example.json": "fd22710cce91cd77fcd09348b9598067e35975b85f9c0043e6696c620f9d6a31"
@@ -151,3 +153,10 @@ AIOPS_HOSTPACK_PY
 - 원장 스냅샷은 SUBMITTING 행을 담을 수 있다. 복원하면 그 행은 UNKNOWN으로 취급된다.
 - 디렉터리가 이미 있고 모드·소유자가 다르면 덮어쓰지 않고 INSTALLATION_DRIFT로 멈춘다.
 - `aiops-base` 규칙의 기준 예시는 `.github/control-plane/sudoers-aiops-base.example`이며 테스트가 모듈 템플릿과 같은지 비교한다.
+
+## 설치 경로와 검증 메모 (A3 2차 반영)
+
+- **설치 경로는 둘이다.** 호스트 전체는 이 도구가 기준이다. 기존 `control_plane_install.py`(비활성 pin 설치)는 sudoers를 복사하지 않는 별도 경로이며, 같은 호스트에는 한 경로만 쓴다. 활성화 때 `activated_runtime_sha`는 감사를 통과한 최종 head로 맞추고, 설치된 바이트와 다르면 host-preflight가 발송 전에 거부한다.
+- 이 도구의 `verify`, `install`, `save`, `restore`는 모두 `GH_TOKEN`이 필요하다(고정 커밋의 파일을 GitHub에서 받아 확인한다). 토큰은 같은 셸에서 `read -rs`로만 넣는다.
+- 새 규칙 파일(`sudoers-aiops-base.example`, `hostpack/manifest.json`, `control_plane_hostpack.py`, `hostpack/aiops-hostpack`, `hostpack/astra-runner-launch`)은 `RUNTIME_PATHS`에 들어 있다. 병합 뒤 새 A3 감사와 activation-only PR이 필요하다.
+- 해시 표와 시험은 CI의 `offline` 잡이 바이트 단위로 확인한다(`test_bootstrap_hash_table_matches_the_files_it_pins`, `test_manifest_matches_repository_bytes`).

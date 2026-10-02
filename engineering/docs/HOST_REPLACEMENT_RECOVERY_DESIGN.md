@@ -3,6 +3,7 @@
 상태: **소스 구현·미설치 / NOT_READY: 실호스트 시운전 전**.
 이 PR에서는 모델·감사·호스트 작업·설치·병합을 실행하지 않는다.
 범위는 aiops-fable 감사 호스트다. 레인·runner 자동 재개 QUALIFIED_RESUME는 범위 밖이다.
+**범위 확장(대표 결정 https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/54#issuecomment-5950850220):** 호스트 전체(helper, 계정, sudoers, 레인, runner 시작)의 설치·복구는 별도 도구 `aiops-hostpack`이 맡는다([HOSTPACK_KO.md](HOSTPACK_KO.md)). 이 문서의 감사 호스트 복구 범위는 그대로이고, 호스트팩은 같은 상태 저장소를 `host-state` 브랜치로 따로 쓴다.
 
 기준 소스는 병합된 main `a964c0d72285a752cb567c39bfc4a7fb83ff3eae`다.
 원본 aiops-fable 파일 바이트와 EFFORT=low는 보존한다. #49 기존 HEAD와 main의

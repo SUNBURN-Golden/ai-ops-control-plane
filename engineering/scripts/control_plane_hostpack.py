@@ -267,7 +267,7 @@ def base_sudoers_template():
     lines = ['# /etc/sudoers.d/aiops-base  (root:root 0440; no dot in the file name)',
              '# Fixed runner -> astra-control host commands and control -> lane adapter commands. Nothing else.',
              '# Replace RUNNER_USER with the exact user field of the existing "status --launch-request-id" rule.',
-             '# Installed by aiops-hostpack (the authorized install path, decision pointer in HOSTPACK_KO.md).',
+             '# Installed by aiops-hostpack. Decision: https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/54#issuecomment-5950850220',
              '',
              'Cmnd_Alias AIOPS_BASE_HOST = \\',
              f'    {HELPER} launch, \\']
