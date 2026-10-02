@@ -1,0 +1,82 @@
+"""Detached local subprocess wrapper. A receipt survives the app window closing."""
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+import signal
+import re
+import subprocess
+import time
+
+import agents
+from common import AppError, atomic_json, read_json
+
+
+def failure_code(folder, returncode):
+    # Classify terminal CLI errors, never forward stderr (which may contain secrets).
+    path = Path(folder) / 'stderr.log'
+    with path.open('rb') as stream:
+        stream.seek(max(0, path.stat().st_size - 32768))
+        message = stream.read().decode('utf-8', 'replace').lower()
+    if re.search(r'(unknown|invalid|unsupported|unavailable) model|model.{0,100}(does not exist|not found|not supported|not available)', message):
+        return 'MODEL_UNAVAILABLE'
+    if re.search(r'not (logged|signed) in|authentication (failed|required)|login required|please (log|sign) in|401 unauthorized', message):
+        return 'PROVIDER_LOGIN_REQUIRED'
+    if re.search(r'unexpected argument|unrecognized (argument|option)|unknown option|sandbox.{0,80}(unavailable|not available)', message):
+        return 'CLI_SETUP_REQUIRED'
+    return 'PROVIDER_EXIT_' + str(returncode)
+
+
+def run(folder):
+    folder = Path(folder).resolve()
+    request = read_json(folder / 'request.json')
+    # O_EXCL is the second admission fence, independent of the app's SQLite lock.
+    claim = os.open(folder / 'claimed', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(claim, 'w') as stream:
+        stream.write(str(os.getpid())); stream.flush(); os.fsync(stream.fileno())
+    receipt = {'attempt_id': request['attempt_id'], 'binding': request['binding'],
+               'started': time.time(), 'exit_code': None, 'report': None, 'error': None,
+               'process_group_quiescent': False}
+    atomic_json(folder / 'running.json', {'pid': os.getpid(), 'started': receipt['started']})
+    child = None
+    try:
+        argv = agents.command(request['profile'], request['role'], folder)
+        with open(folder / 'stdout.log', 'wb') as stdout, open(folder / 'stderr.log', 'wb') as stderr:
+            child = subprocess.Popen(argv, cwd=request['checkout'], stdin=subprocess.PIPE,
+                                     stdout=stdout, stderr=stderr, env=agents.environment(), start_new_session=True)
+            try:
+                child.communicate(request['prompt'].encode(), timeout=request['timeout_seconds'])
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGTERM)
+                try: child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL); child.wait(timeout=10)
+                raise AppError('SESSION_TIMEOUT')
+            receipt['exit_code'] = child.returncode
+            # Fence descendants left behind by a CLI: no next writer until the group is gone.
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError: pass
+            else:
+                os.killpg(child.pid, signal.SIGTERM)
+                raise AppError('CHILD_PROCESS_GROUP_NOT_QUIESCENT')
+            if child.returncode != 0: raise AppError(failure_code(folder, child.returncode))
+        receipt['report'] = agents.result(request['profile'], folder)
+    except (OSError, AppError, ValueError) as exc:
+        receipt['error'] = exc.code if isinstance(exc, AppError) else type(exc).__name__
+    finally:
+        if child is None:
+            receipt['process_group_quiescent'] = True
+        else:
+            # Even a timed-out session may be continued only after its entire
+            # admitted process group is gone. A timeout alone is not that proof.
+            try: os.killpg(child.pid, 0)
+            except ProcessLookupError: receipt['process_group_quiescent'] = True
+        receipt['finished'] = time.time()
+        atomic_json(folder / 'receipt.json', receipt)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(); parser.add_argument('--attempt', required=True)
+    run(parser.parse_args().attempt)
