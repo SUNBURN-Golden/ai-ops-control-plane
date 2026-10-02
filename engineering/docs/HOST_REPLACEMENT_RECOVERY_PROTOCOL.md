@@ -82,6 +82,19 @@ GitHub private 접근과 CAS 실제 권한을 대신 검증하지 않는다. 실
 설치·모델 실행·감사는 이 요청에서 금지되어 미실행이다. 자세한 전제는
 [설계](HOST_REPLACEMENT_RECOVERY_DESIGN.md)의 설치·과금 절에 기록한다.
 
+## 수동 Fable A3 재감사(43ac23f, FAIL) 대응
+
+근거: [#49 감사 기록](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/49#issuecomment-5943407971).
+
+| 지적 | 수정 | 회귀 시험 |
+| --- | --- | --- |
+| F1 `/usr/local` 그룹 쓰기 | 부트스트랩 apt 뒤 `/usr/local`, `/usr/local/bin`을 root:root 0755로 맞춤 | 블록 순서 확인 |
+| F2 로그인 실패 뒤 영구 재생 | 캡처·추출 실패 기록은 `failed-N`으로 옮기고 다음 명시적 명령에서 새 URL | 오입력·비정상 종료·화면 없음·추출 실패·정리 |
+| F3 체크포인트 무한 증가 | 대용량 run 산출물 제외, 초과 시 가장 큰 파일 표시 | 제외·복원 일치·제외 경로 거부·한도 메시지 |
+| F4 업로드 중간 실패 | pending marker로 자기 원장 재발행·자기 다음 커밋 확인, 등록 중단 재개 | 결과 저장 실패·wrapper 출력 보존·ACK 유실·남의 커밋·marker 없는 변경·소진 marker·등록 재개 |
+| F5 등록 암호 오타 | 두 번 입력 일치, 등록 직후 같은 키로 재복호화 확인 | 불일치 거부·오타 키 거부 |
+| N2 consult·preflight 분류 | ANSWERED/USER_REQUIRED·완료 preflight를 RESULT로, consult `--again` y/N | 분류·consult 재상담 |
+
 ## F1~F7 검증 대응과 결과
 
 | 수정 | 회귀 시험 |

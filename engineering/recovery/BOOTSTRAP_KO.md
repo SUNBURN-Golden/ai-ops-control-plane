@@ -22,6 +22,13 @@ apt나 다운로드 전에 PIN_COMMIT_REQUIRED로 종료하므로 그대로 실�
 상태 브랜치가 있으면 복원, 없으면 생성 전용 CAS 등록을 실행한다. 최초 원장이
 없으면 별도 y/N 확인을 받는다. 복원 실패를 빈 원장 등록으로 바꾸지 않는다.
 
+apt 단계 뒤에 `/usr/local`, `/usr/local/bin`을 root:root 0755로 맞춘다. Debian은
+이 둘을 root:staff 2775로 만들 수 있는데, 설치기·복구 wrapper·원본 aiops-fable은
+group 쓰기 가능한 상위 디렉터리를 모두 거부하기 때문이다. 다른 디렉터리 권한은 바꾸지 않는다.
+
+등록(`--enroll`)은 상태 암호를 두 번 받아 일치할 때만 진행하고, 올린 체크포인트를
+같은 키로 다시 내려받아 복호화되는지 확인한다. 이 암호를 잃으면 체크포인트를 열 수 없다.
+
 ```bash
 (
 set +x
@@ -33,6 +40,10 @@ export AIOPS_BOOTSTRAP_COMMIT='__MERGED_SOURCE_COMMIT_40HEX__'
 [[ "$AIOPS_BOOTSTRAP_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo 'PIN_COMMIT_REQUIRED'; exit 1; }
 apt-get update
 apt-get install -y --no-install-recommends python3 ca-certificates keyutils util-linux passwd
+# Debian may create /usr/local and /usr/local/bin as root:staff 2775. The installer,
+# the recovery wrappers and the original aiops-fable refuse group-writable parents.
+chown root:root /usr/local /usr/local/bin
+chmod 0755 /usr/local /usr/local/bin
 read -rs -p 'GH_TOKEN: ' GH_TOKEN
 printf '\n'
 export GH_TOKEN
@@ -44,12 +55,12 @@ REPOSITORY = 'BeautifulMind-JT/ai-ops-control-plane'
 PINNED_SHA256 = {
  "engineering/recovery/aiops-fable": "e59e29e068978b6e901653d40cdbd00f463c8b52ba44827d057c8a81f7579b97",
  "engineering/recovery/aiops-recover": "30cd439ab638631a475db6d4dbfb9ef4b1c2b3b08a0ce763a035ef8d26c30a29",
- "engineering/scripts/control_plane_recover.py": "5ea062b4352f2ee7114d1d8e31b843c05eda09e6beff63ff431451cd47a6bf57",
- "engineering/scripts/control_plane_recover_token.py": "921d829c72137e2a25ffb6f0ef91b9a3aecb44ca43e0fc250f476ac0ea7e723b",
+ "engineering/scripts/control_plane_recover.py": "567602b3efe2529a2302a2206ced14fb87024e9f12371be067523bab4dea0c6f",
+ "engineering/scripts/control_plane_recover_token.py": "8ad84c6d334d66a6fd07f0d57cdb2a48364183837cc91ef2960ae3055cb42eb4",
  "engineering/recovery/claude": "bf32f8635cbaf9026b061584bc5a3f55cfd88d3742eae261a400f30a0ee8fc0f",
  "engineering/scripts/control_plane_fable.py": "b3d49498dc0364b10db9e4d034bd252b5fce1201475e4c7b29c692c7fb3fbfd6",
- "engineering/recovery/manifest.json": "a39f6ba4e5f58612dcabf3d2619c86567978127a2781fee086bdccf39a2c4406",
- "engineering/recovery/recovery.example.json": "f2e57c7fa5a109e6c6a8f9985741864541fea4514c04597c8cc3d431b9e9113c"
+ "engineering/recovery/manifest.json": "9db78e6a89b774cf8c9c50ea35c9d90ba14c9c10d5a7142e5a701cf1bd91a76d",
+ "engineering/recovery/recovery.example.json": "b7a87e1e99eaff05b6eaa99390b4cdfd8abf6fd0e318d468f4657e86be81911c"
 }
 INSTALL = {
  'engineering/recovery/aiops-fable': ('/opt/aiops/bin/aiops-fable', 0o755),

@@ -155,40 +155,57 @@ def capture(cfg, path, popen=subprocess.Popen, read_code=getpass.getpass, emit=p
     screen = pyte.HistoryScreen(500, 60, history=10000)
     stream = pyte.Stream(screen)
     decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
-    with popen(['/usr/bin/script', '-q', '-e', '-c', command, str(path)],
-               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=ENV) as proc:
-        sent = False
-        try:
-            while True:
-                block = proc.stdout.read(1)
-                if not block:
-                    break
-                stream.feed(decoder.decode(block))
-                if not sent and block in (b':', b'>', b'\n', b'\r'):
-                    rows = terminal_lines(screen)
-                    # Wait for the code prompt so a wrapped URL is complete.
-                    prompt = any(re.search(r'(paste|enter).{0,80}code', row, re.I) for row in rows)
-                    url = login_url(screen) if prompt else None
-                    if url:
-                        emit(url)
-                        emit('브라우저에서 승인 → 받은 코드를 붙여 넣고 Enter')
-                        code = read_code('승인 코드: ')
-                        if not code or len(code) > 8192 or '\n' in code or '\r' in code:
-                            fail('LOGIN_CODE_INVALID_TRANSCRIPT_RETAINED')
-                        proc.stdin.write((code + '\n').encode())
-                        proc.stdin.flush()
-                        del code
-                        sent = True
-            if proc.wait():
-                fail('TOKEN_ISSUANCE_FAILED_TRANSCRIPT_RETAINED')
-        except BaseException:
-            proc.terminate()
+    try:
+        with popen(['/usr/bin/script', '-q', '-e', '-c', command, str(path)],
+                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=ENV) as proc:
+            sent = False
             try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill(); proc.wait()
-            raise
+                while True:
+                    block = proc.stdout.read(1)
+                    if not block:
+                        break
+                    stream.feed(decoder.decode(block))
+                    if not sent and block in (b':', b'>', b'\n', b'\r'):
+                        rows = terminal_lines(screen)
+                        # Wait for the code prompt so a wrapped URL is complete.
+                        prompt = any(re.search(r'(paste|enter).{0,80}code', row, re.I) for row in rows)
+                        url = login_url(screen) if prompt else None
+                        if url:
+                            emit(url)
+                            emit('브라우저에서 승인 → 받은 코드를 붙여 넣고 Enter')
+                            code = read_code('승인 코드: ')
+                            if not code or len(code) > 8192 or '\n' in code or '\r' in code:
+                                fail('LOGIN_CODE_INVALID_RETRY')
+                            proc.stdin.write((code + '\n').encode())
+                            proc.stdin.flush()
+                            del code
+                            sent = True
+                if proc.wait():
+                    fail('TOKEN_ISSUANCE_FAILED_RETRY')
+                if not sent:
+                    fail('LOGIN_PROMPT_NOT_SHOWN_RETRY')
+            except BaseException:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill(); proc.wait()
+                raise
+    except BaseException:
+        # An unfinished login holds no token: keep the record aside and let the next
+        # explicit --reissue-token/--enroll show a fresh login URL.
+        set_aside(path, 'failed')
+        raise
     return path
+
+
+def set_aside(path, prefix):
+    if not os.path.lexists(path):
+        return
+    index = 0
+    while (path.parent / f'{prefix}-{index}.typescript').exists():
+        index += 1
+    os.rename(path, path.parent / f'{prefix}-{index}.typescript')
 
 
 def validate(token, cfg, run=subprocess.run, confirm=confirm_model, now=None, policy=None):
@@ -268,16 +285,18 @@ def reissue(cfg, installer):
             fail('TOKEN_TRANSCRIPT_UNSAFE')
         # A NEW explicit --reissue-token invocation authorizes fresh issuance
         # after 401. Preserve the rejected record; never retry in this run.
-        index = 0
-        while (path.parent / f'rejected-{index}.typescript').exists():
-            index += 1
-        os.rename(path, path.parent / f'rejected-{index}.typescript')
+        set_aside(path, 'rejected')
         rejected.unlink()
     if not path.exists():
         path = capture(cfg, TRANSCRIPT)
-    # Capture still retained after failure; run this command again to replay it.
+    # A completed capture is replayed, so a validation failure needs no new approval.
     raw = read_regular(path, boundary=path.parent, mode=0o600, limit=16 << 20)
-    token = replay(raw)
+    try:
+        token = replay(raw)
+    except RecoveryError:
+        # The pinned extractor is deterministic: replaying these bytes can never succeed.
+        set_aside(path, 'failed')
+        fail('TOKEN_EXTRACTION_FAILED_RETRY')
     try:
         fable_item = next(x for x in installer.manifest['files'] if x['destination'] == '/opt/aiops/lib/fable/control_plane_fable.py')
         fable = pinned_module(Path(fable_item['destination']), fable_item['sha256'])
@@ -297,6 +316,8 @@ def cleanup(cfg):
     if path.exists():
         read_regular(path, boundary=path.parent, mode=0o600, limit=16 << 20)
         path.unlink()
-        for old in path.parent.glob('rejected-*.typescript'):
-            read_regular(old, boundary=path.parent, mode=0o600, limit=16 << 20)
-            old.unlink()
+    if path.parent.exists():
+        for pattern in ('rejected-*.typescript', 'failed-*.typescript'):
+            for old in path.parent.glob(pattern):
+                read_regular(old, boundary=path.parent, mode=0o600, limit=16 << 20)
+                old.unlink()

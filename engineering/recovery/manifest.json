@@ -26,13 +26,13 @@
       "cache_path": "engineering/scripts/control_plane_recover.py",
       "destination": "/opt/aiops/lib/control_plane_recover.py",
       "mode": 420,
-      "sha256": "5ea062b4352f2ee7114d1d8e31b843c05eda09e6beff63ff431451cd47a6bf57"
+      "sha256": "567602b3efe2529a2302a2206ced14fb87024e9f12371be067523bab4dea0c6f"
     },
     {
       "cache_path": "engineering/scripts/control_plane_recover_token.py",
       "destination": "/opt/aiops/lib/control_plane_recover_token.py",
       "mode": 420,
-      "sha256": "921d829c72137e2a25ffb6f0ef91b9a3aecb44ca43e0fc250f476ac0ea7e723b"
+      "sha256": "8ad84c6d334d66a6fd07f0d57cdb2a48364183837cc91ef2960ae3055cb42eb4"
     },
     {
       "cache_path": "engineering/recovery/aiops-fable",

@@ -865,6 +865,186 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(0o755,(fixture/'opt/aiops/bin').stat().st_mode&0o777)
         finally:os.umask(previous)
 
+    # Re-audit fixes (manual Fable A3 at 43ac23f, F1-F5 and N2).
+    def capture_with(self, raw, rc=0, approval='fake-approval-code'):
+        import io
+        proc=types.SimpleNamespace(stdout=io.BytesIO(raw),stdin=io.BytesIO(),wait=lambda **kw:rc,terminate=lambda:None,kill=lambda:None)
+        class Process:
+            def __enter__(self):return proc
+            def __exit__(self,*a):return False
+        output=[];original=Path.lstat
+        def owner(path):
+            s=original(path)
+            if str(path).endswith('aiops-recover-token'):
+                return types.SimpleNamespace(st_mode=s.st_mode,st_uid=0)
+            return s
+        with patch.object(t,'check_tmpfs'),patch.object(Path,'lstat',owner):
+            path=t.capture({},self.root/'unused',popen=lambda *a,**kw:Process(),read_code=lambda _:approval,emit=output.append)
+        return path,output
+    def login_screen(self):
+        url='https://claude.ai/oauth/authorize?client_id=fake&state=fake'
+        return url,('Open:\r\n'+url+'\r\n\r\nPaste code here:\r\n').encode()
+    def test_f2r_failed_issuance_set_aside_then_fresh_url(self):
+        url,raw=self.login_screen();folder=self.root/'aiops-recover-token'
+        self.expect('TOKEN_ISSUANCE_FAILED_RETRY',self.capture_with,raw,rc=1)
+        self.assertFalse((folder/'typescript').exists());self.assertTrue((folder/'failed-0.typescript').exists())
+        path,output=self.capture_with(raw+FAKE.encode())
+        self.assertEqual(url,output[0]);self.assertEqual(folder/'typescript',path)
+    def test_f2r_invalid_code_set_aside(self):
+        _,raw=self.login_screen();folder=self.root/'aiops-recover-token'
+        self.expect('LOGIN_CODE_INVALID_RETRY',self.capture_with,raw,approval='')
+        self.assertFalse((folder/'typescript').exists());self.assertTrue((folder/'failed-0.typescript').exists())
+    def test_f2r_no_prompt_set_aside(self):
+        folder=self.root/'aiops-recover-token'
+        self.expect('LOGIN_PROMPT_NOT_SHOWN_RETRY',self.capture_with,b'unexpected screen\r\n')
+        self.assertFalse((folder/'typescript').exists())
+    def test_f2r_extraction_failure_never_replayed_again(self):
+        folder=self.root/'aiops-recover-token';folder.mkdir(mode=0o700)
+        r.atomic(folder/'typescript',b'no credential on this screen')
+        inst=types.SimpleNamespace(verify=lambda:None,manifest={'files':[
+            {'destination':'/opt/aiops/lib/fable/control_plane_fable.py','sha256':'fake'}]})
+        with patch.object(t,'TRANSCRIPT',self.root/'unused'),patch.object(t,'prerequisites'), \
+             patch.object(t,'read_regular',r.read_regular),patch.object(t,'capture') as capture:
+            self.expect('TOKEN_EXTRACTION_FAILED_RETRY',t.reissue,{},inst)
+            capture.assert_not_called()
+            self.assertTrue((folder/'failed-0.typescript').exists());self.assertFalse((folder/'typescript').exists())
+            capture.side_effect=r.RecoveryError('FRESH_LOGIN_STARTED')
+            self.expect('FRESH_LOGIN_STARTED',t.reissue,{},inst)
+            capture.assert_called_once()
+    def test_f2r_cleanup_removes_failed_records(self):
+        folder=self.root/'aiops-recover-token';folder.mkdir(mode=0o700)
+        r.atomic(folder/'failed-0.typescript',b'x');r.atomic(folder/'typescript',FAKE.encode())
+        with patch.object(t,'TRANSCRIPT',self.root/'unused'),patch.object(t,'read_regular',r.read_regular):
+            t.cleanup({})
+        self.assertEqual([],list(folder.iterdir()))
+    def run_artifacts(self):
+        run=self.state/'runs'/'20261002T000000Z-abcdef12';(run/'work'/'audit').mkdir(parents=True)
+        r.atomic(run/'run.json',b'{"result":"PASS"}');r.atomic(run/'comment.md',b'body')
+        r.atomic(run/'claude-output.jsonl',b'x'*(3<<20));r.atomic(run/'claude-stderr.txt',b'stderr')
+        r.atomic(run/'work'/'audit'/'diff.patch',b'y'*(2<<20))
+        (run/'work'/'link').symlink_to('/etc/passwd')
+        return run
+    def test_f3r_large_run_artifacts_excluded(self):
+        self.restore();run=self.run_artifacts()
+        names={x['path'] for x in r.inventory(self.state,self.uid,self.gid)}
+        prefix=str(run.relative_to(self.state))
+        self.assertIn(prefix+'/run.json',names);self.assertIn(prefix+'/comment.md',names)
+        for name in ('claude-output.jsonl','claude-stderr.txt','work','work/audit/diff.patch','work/link'):
+            self.assertNotIn(prefix+'/'+name,names)
+        h=self.cp.save(self.key,TOKEN);envelope,cipher=self.backend.data[h]
+        self.assertLess(len(cipher),1<<20)
+    def test_f3r_restore_after_exclusion_matches(self):
+        self.restore();self.run_artifacts();self.cp.save(self.key,TOKEN)
+        import shutil;shutil.rmtree(self.state);self.binding.unlink();self.tokenfile.unlink()
+        self.restore();self.cp.current()
+        self.assertTrue(any(p.name=='run.json' for p in self.state.rglob('*')))
+        self.assertFalse(any(p.name=='claude-output.jsonl' for p in self.state.rglob('*')))
+    def test_f3r_payload_with_excluded_artifact_rejected(self):
+        payload=copy.deepcopy(self.payload)
+        payload['files']=[{'path':'runs','kind':'dir','uid':0,'gid':0,'mode':0o755},
+                          {'path':'runs/r','kind':'dir','uid':0,'gid':0,'mode':0o755},
+                          {'path':'runs/r/claude-output.jsonl','kind':'file','uid':0,'gid':0,'mode':0o644,
+                           'bytes':base64.b64encode(b'x').decode(),'sha256':r.sha(b'x'),'size':1}]
+        self.expect('STATE_CORRUPT',r.validate_payload,payload,self.uid,self.gid)
+    def test_f3r_too_large_names_largest_file(self):
+        self.restore();r.atomic(self.state/'big',b'z'*4096)
+        with patch.object(r,'MAX_STATE',3000):
+            with self.assertRaises(r.RecoveryError) as ctx:
+                r.inventory(self.state,self.uid,self.gid)
+        self.assertEqual('STATE_TOO_LARGE',ctx.exception.code);self.assertIn('largest=big',ctx.exception.detail)
+        self.assertEqual('STATE_TOO_LARGE',r.hold(ctx.exception)['reason'])
+    def flaky_publish(self,failures=1,code='STATE_AUTHORITY_UNAVAILABLE'):
+        original=self.backend.publish;left=[failures]
+        def publish(*a):
+            if left[0]:
+                left[0]-=1;r.fail(code)
+            return original(*a)
+        self.backend.publish=publish
+    def test_f4r_result_publish_failure_republished_without_model(self):
+        self.restore();guard=r.AuditGuard(self.cp,self.key,TOKEN,None)
+        guard.before('BeautifulMind-JT/ZARI',36,'d'*40,[]);r.atomic(self.state/'run-evidence',b'sealed')
+        self.flaky_publish()
+        self.expect('STATE_AUTHORITY_UNAVAILABLE',guard.after,'BeautifulMind-JT/ZARI',36,'d'*40,{'result':'PASS'},{'model_attempted':True})
+        self.assertTrue(self.cp.pending.exists())
+        self.expect('STATE_PUBLISH_PENDING',self.cp.current)
+        self.cp.current(key=self.key)
+        self.assertFalse(self.cp.pending.exists());self.cp.current()
+        self.assertEqual({'status':'AUDIT_EXISTS','result':'PASS','head':'d'*40},guard.inspect('BeautifulMind-JT/ZARI',36,'d'*40,[]))
+    def test_f4r_wrapper_shows_result_and_next_command_finishes(self):
+        import io
+        from contextlib import redirect_stdout
+        self.restore();calls=self.fake_wrapper();original=self.backend.publish;count=[0]
+        def publish(*a):
+            count[0]+=1
+            if count[0]==2:r.fail('STATE_AUTHORITY_UNAVAILABLE')
+            return original(*a)
+        self.backend.publish=publish;out=io.StringIO()
+        with redirect_stdout(out):self.assertEqual(1,r.fable_main(self.audit_args()))
+        self.assertIn('"result": "PASS"',out.getvalue());self.assertIn('STATE_AUTHORITY_UNAVAILABLE',out.getvalue())
+        out=io.StringIO()
+        with redirect_stdout(out):self.assertEqual(0,r.fable_main(self.audit_args()))
+        self.assertEqual(1,len(calls));self.assertIn('AUDIT_EXISTS',out.getvalue());self.cp.current()
+    def test_f4r_lost_ack_acknowledged_only_for_own_child(self):
+        self.restore()
+        with patch.object(self.cp,'bind',side_effect=r.RecoveryError('ACK_LOST')):
+            self.expect('ACK_LOST',self.cp.save,self.key,TOKEN)
+        self.expect('STATE_ROLLBACK_DETECTED',self.cp.current)
+        local=self.cp.current(key=self.key)
+        self.assertEqual(self.backend.h,local['commit']);self.assertFalse(self.cp.pending.exists())
+    def test_f4r_foreign_child_still_rollback(self):
+        self.restore();self.cp.mark_pending()
+        other=copy.deepcopy(self.payload);other['files'][0]['bytes']=base64.b64encode(b'foreign').decode()
+        other['files'][0]['sha256']=r.sha(b'foreign');other['files'][0]['size']=7
+        child=format(int(self.backend.h,16)+1,'040x')
+        self.backend.data[child]=r.encrypt(other,self.key,self.salt,2,self.backend.h);self.backend.h=child
+        self.expect('STATE_ROLLBACK_DETECTED',self.cp.current,key=self.key)
+    def test_f4r_unmarked_local_change_still_corrupt(self):
+        self.restore();(self.state/'claim').write_bytes(b'changed')
+        self.expect('STATE_CORRUPT',self.cp.current,key=self.key)
+    def test_f4r_stale_marker_is_spent(self):
+        self.restore();self.cp.mark_pending();self.cp.save(self.key,TOKEN)
+        r.atomic(self.cp.pending,r.canonical({'format':'AUDIT_HOST_PENDING_V1','base':'e'*40}))
+        self.assertIsNone(self.cp.read_pending());self.assertFalse(self.cp.pending.exists())
+    def test_f4r_enrollment_bind_lost_resumed_by_restore(self):
+        self.backend.h=None;r.prepare_enrollment(self.cp,input_fn=lambda _:'y')
+        with patch.object(self.cp,'bind',side_effect=r.RecoveryError('ACK_LOST')):
+            self.expect('ACK_LOST',self.cp.save,self.key,TOKEN,enrollment=True,salt=self.salt)
+        self.assertFalse(self.binding.exists());self.assertIsNotNone(self.backend.h)
+        self.expect('STATE_CAS_CONFLICT',r.prepare_enrollment,self.cp,input_fn=lambda _:self.fail('no prompt'))
+        payload,_=self.cp.restore('offline-fake-password')
+        self.cp.current();self.assertEqual(FAKE,self.tokenfile.read_text());self.assertFalse(self.cp.pending.exists())
+    def test_f5r_password_confirmation(self):
+        answers=iter(['secret-one','secret-two'])
+        self.expect('STATE_PASSWORD_MISMATCH',r.new_state_password,prompt=lambda _:next(answers))
+        answers=iter(['same-secret','same-secret'])
+        self.assertEqual('same-secret',r.new_state_password(prompt=lambda _:next(answers)))
+    def test_f5r_enrollment_read_back(self):
+        self.backend.h=None;r.prepare_enrollment(self.cp,input_fn=lambda _:'y')
+        self.cp.save(self.key,TOKEN,enrollment=True,salt=self.salt);r.verify_enrollment(self.cp,self.key)
+        self.expect('STATE_PASSWORD_OR_INTEGRITY_ERROR',r.verify_enrollment,self.cp,r.derive('typo-password',self.salt))
+    def test_n2_consult_and_preflight_success_are_results(self):
+        self.assertEqual('RESULT',r.execution_state({'kind':'consult','result':'ANSWERED'},{'model_attempted':True}))
+        self.assertEqual('RESULT',r.execution_state({'kind':'consult','result':'USER_REQUIRED'},{'model_attempted':True}))
+        self.assertEqual('RESULT',r.execution_state({'status':'PASS','run':'20261002T000000Z-abcdef12'},{'model_attempted':True}))
+        self.assertEqual('UNKNOWN',r.execution_state({'status':'PASS'},{'model_attempted':True}))
+    def test_n2_consult_again_y_only(self):
+        self.restore();calls=self.fake_wrapper(event={'kind':'consult','result':'ANSWERED'})
+        consult=['consult','--repository','BeautifulMind-JT/ZARI','--issue','36','--comment','1']
+        self.assertEqual(0,r.fable_main(consult));self.assertEqual(0,r.fable_main(consult));self.assertEqual(1,len(calls))
+        with patch('builtins.input',return_value='n'):
+            self.assertEqual(0,r.fable_main(consult+['--again']))
+        self.assertEqual(1,len(calls))
+        with patch('builtins.input',return_value='y'):
+            self.assertEqual(0,r.fable_main(consult+['--again']))
+        self.assertEqual(2,len(calls));self.assertIn('--again',calls[1])
+    def test_n2_preflight_again_rejected(self):
+        self.assertEqual(1,r.fable_main(['preflight','--again']))
+    def test_f1r_bootstrap_normalizes_usr_local(self):
+        text=(Path(__file__).resolve().parents[1]/'recovery'/'BOOTSTRAP_KO.md').read_text()
+        shell=text.split("<<'AIOPS_BOOTSTRAP_PY'")[0]
+        self.assertLess(shell.index('apt-get install'),shell.index('chown root:root /usr/local /usr/local/bin'))
+        self.assertLess(shell.index('chmod 0755 /usr/local /usr/local/bin'),shell.index("read -rs -p 'GH_TOKEN: '"))
+
 
 if __name__ == '__main__':
     unittest.main()
