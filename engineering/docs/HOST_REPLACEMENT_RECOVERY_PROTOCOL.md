@@ -6,29 +6,30 @@ QUALIFIED_RESUME는 이번 범위 밖이다.
 
 ## 명령과 순서
 
-1. `aiops-recover`: 보호 설정·매니페스트 → 고정 파일·계정 → 원격 private/latest
-   → 상태 암호 1회 → 복호화·전체 원장·토큰 복원 → root keyring. 모델 호출 없음.
-2. `aiops-recover --reissue-token`: 설치 검증 → 현재 원장 → pyte 버전·추출기 자체
-   시험 → script 확인 → PTY 내부 stty cols 500 확인 → CLI 버전 → foreground
-   setup-token. 원시 화면을 복사하지 않고 script 기록을 pyte로 재생한다.
-3. 기록은 tmpfs `/dev/shm/aiops-recover-token/typescript`, 부모 root 0700,
-   파일 root 0600. 추출 실패·401·확인 취소 때 보존한다. 같은 명령을 다시
-   실행하면 추출 실패 기록을 재추출하며 재승인하지 않는다. 401로 검증 실패한
-   경우에는 다음 명시적 재발급 명령에서 기존 기록을 보존하고 새 발급을 한다.
-   같은 실행 안에서 자동 재발급하지 않는다. 검증 및 체크포인트
-   확정 뒤에만 삭제한다. 401은 길이·접두사 유효 여부와 재발급 명령만 출력한다.
-4. 토큰 형식은 `^sk-ant-oat01-[A-Za-z0-9_-]{80,}$`, 최대 4096자.
-   최소 `claude -p ok` 호출은 y/N 확인 뒤, aiops-auditor로 도구 없이 low로
-   실행한다. 발급 기록의 시각으로 일 년 만료를 기록하고 30일 전부터 경고한다.
-5. 감사 wrapper: 설치 receipt·전체 해시·최신 상태 → 같은 HEAD 기존 댓글/UNKNOWN
-   점검 → CLI·토큰·과금 → STARTED checkpoint CAS → 원본 감사 → 결과 checkpoint CAS.
-   같은 HEAD의 기존 결과는 FAIL이어도 재호출하지 않는다. --again은 허용하지 않는다.
-6. `--preflight`와 직접 `aiops-fable preflight`: y/N 기본 N, 확인 없으면 실행하지 않는다.
-   암호 오류, 손상, rollback, CAS 충돌 또는 UNKNOWN이 자동 retry 권한을 만들지 않는다.
+1. 새 VM은 [고정 root bootstrap 블록](../recovery/BOOTSTRAP_KO.md)으로 시작한다.
+   병합된 커밋·파일 해시를 고정하고 GH_TOKEN을 read -rs로 받는다. apt로
+   keyutils 등을 설치한다. 새 sudo 규칙이나 workspace sudo 실행은 없다.
+2. 상태 브랜치가 있으면 recover, 없으면 --enroll이다. --enroll은 encrypted
+   branch를 생성 전용 CAS로 만든다. enrollment_commit 설정은 없다. 기록 없는
+   등록은 별도 y/N 확인이며, restore가 실패했다고 빈 원장으로 바꾸지 않는다.
+3. 복구는 상태 암호 1회로 전체 원장과 토큰을 복원한다. 감사 소유 역할은 현재
+   UID/GID로 매핑한다. 파생 키는 root keyring 또는 root0600 tmpfs 파일에 둔다.
+4. --reissue-token은 pyte·자체 시험·script·PTY cols500·CLI 버전을 먼저 확인한다.
+   pyte로 복원한 로그인 URL만 한 줄로 표시하고 브라우저 승인 코드를 마스킹
+   입력하여 foreground script에 전달한다. 자동 브라우저 열기·토큰 화면 복사는 없다.
+5. raw transcript는 root0600 tmpfs에 보존한다. 추출 실패는 동일 기록 재생,
+   401은 구조화된 유형·상태로만 판단한다. 같은 실행에서 자동 재발급하지 않는다.
+   형식·길이와 y/N 뒤 최소 claude -p ok 및 원본 overage_policy로 검증한다.
+   암호화 checkpoint 확정 뒤 기록을 삭제한다. 발급 시각·30일 전 경고를 유지한다.
+6. 감사 wrapper는 설치·최신 상태·CLI·토큰을 검사하고 STARTED를 checkpoint한다.
+   과금은 원본 Fable의 rate_limit_event guard에 맡긴다. 비모델 helper는 없다.
+   실제 판정은 RESULT, BUSY/모델 미시도/PRE_MODEL_FAILED는 NOT_STARTED,
+   나머지 불명 실행은 UNKNOWN이다. 정상 결과의 UUID·해시·줄 번호 401은 그대로 표시한다.
+7. audit --again은 이전 상태를 표시하고 y/N을 받는다. y일 때만 1회 실행하고
+   원본 도구에 --again을 전달한다. preflight는 매번 y/N 뒤 실행하며 1회 제한이 없다.
 
-모든 비밀 출력은 차단한다. 오류 메시지는 고정 reason 코드다. 비밀을 포함할 수
-있는 provider stdout/stderr, auth URL, 원시 transcript는 오류에 붙이지 않는다.
-선택 GH 토큰 저장은 기본 꺼짐이며 초기 원격 인증은 별도로 필요하다.
+NOT_READY 사유는 실호스트 시운전 전이다. 병합 뒤 bootstrap 소스 핀 갱신과
+최초 private README 저장소 생성은 대표 작업이다. 실호스트·모델·감사·설치는 미실행이다.
 
 ## T01~T30 범위 대응
 
@@ -51,7 +52,7 @@ qualification이나 보류한 레인 재개까지 통과했다고 해석하지 �
 | T11 | `test_install_hash_failure`, `test_manifest_bad_destination`, `test_symlink_installed`, `test_inventory_symlink`, `test_package_wheel_hash_failure` |
 | T12 | `test_unbound_ledger_never_overwritten`, `test_state_root_writable`, `test_tampered_restore_receipt`; 범용 mount qualification은 범위 밖 |
 | T13 | `test_payload_owner`, `test_payload_permissions`, `test_current_inventory_permission_drift`; 실제 UID·ACL qualification 미실행 |
-| T14 | `test_expired_token`, `test_expiry_warning`, `test_prerequisites_version_before_login`, `test_billing_overage_block`, `test_validate_401_safe` |
+| T14 | `test_expired_token`, `test_expiry_warning`, `test_prerequisites_version_before_login`, `test_f1_token_validate_actual_overage`, `test_validate_401_safe` |
 | T15 | `test_manifest_matches_committed_sources`, `test_install_receipt_manifest_drift`, `test_scope_rejects_program_resume`; runner sender bypass는 범위 밖 |
 | T16 | `test_manifest_wrong_source`, `test_manifest_matches_committed_sources`, `test_install_drift` |
 | T17 | `test_preflight_default_no`, `test_confirmation_explicit`, `test_validate_no_confirmation_no_call` |
@@ -65,7 +66,7 @@ qualification이나 보류한 레인 재개까지 통과했다고 해석하지 �
 | T25 | `test_crash_before_rename`, `test_resume_after_rename`, `test_resume_after_token`, `test_checkpoint_ack_lost_holds`, `test_unknown_with_partial_mutation` |
 | T26 | 범위 밖: partition된 old runner와 외부 task 소유권 |
 | T27 | `test_missing_checkpoint`, `test_checkpoint_missing_chunk`, `test_checkpoint_chunk_hash_corruption`, `test_wrong_password`, `test_payload_owner` |
-| T28 | `test_billing_missing_fail_closed`, `test_prerequisites_success_no_model`, `test_validate_no_confirmation_no_call` |
+| T28 | `test_f1_token_validate_unknown_overage`, `test_prerequisites_success_no_model`, `test_validate_no_confirmation_no_call` |
 | T29 | `test_scope_rejects_program_resume`, `test_manifest_matches_committed_sources`, `test_preflight_default_no`; program 전체 내부 호출 inventory는 범위 밖 |
 | T30 | `test_duplicate_json_rejected`, `test_redirect_never_forwards_credentials`, `test_validate_401_safe`; bounded HOLD, 비밀 출력 없음 |
 
@@ -76,17 +77,28 @@ qualification이나 보류한 레인 재개까지 통과했다고 해석하지 �
 ## 남은 qualification
 
 오프라인 시험은 provider의 실제 로그인 화면·버전 변화, 토큰 만료·401,
-브라우저 연결, keyutils/kernel 지원, 계정 UID/GID, 비모델 과금 helper,
+브라우저 연결, keyutils/kernel 지원, 계정 UID/GID,
 GitHub private 접근과 CAS 실제 권한을 대신 검증하지 않는다. 실제 호스트
 설치·모델 실행·감사는 이 요청에서 금지되어 미실행이다. 자세한 전제는
 [설계](HOST_REPLACEMENT_RECOVERY_DESIGN.md)의 설치·과금 절에 기록한다.
 
-## 이번 구현 검증 결과
+## F1~F7 검증 대응과 결과
 
-- 중앙 전체: **743건 PASS** (기존 645 + 신규 복구 98).
-- 저장소 일반 시험: **47건 PASS**.
-- 중앙 5개 target profile의 validate-repo: 모두 PASS.
-- Python compile, Claude launcher shell syntax, whitespace, 매니페스트와
-  커밋할 소스 바이트 일치: PASS. 원본 aiops-fable 변경 없음, EFFORT=low 유지.
-- 시험 실행은 오프라인 가짜 상태 저장소·파일시스템·CLI 응답이다. 실제
-  aiops-state 접근·토큰·브라우저 로그인·호스트 설치·모델 호출·감사·병합 없음.
+| 수정 | 회귀 시험 |
+| --- | --- |
+| F1 | billing mock 없는 audit/consult/preflight/reissue 경로, 원본 stream overage 가드, 실제 overage·미확인 신호 차단 |
+| F2 | headless URL 표시·코드 입력, 여러 줄 URL의 pyte 복원, 토큰 화면 미출력 |
+| F3 | 정상 UUID·해시·줄 번호 401 통과, 구조화된 인증 오류만 진단 |
+| F4 | BUSY/HEAD_MOVED/PRE_MODEL_FAILED→NOT_STARTED, 실제 판정→RESULT, UNKNOWN→--again y/N, preflight 반복 |
+| F5 | 고정 8파일 해시, 해시 오류 시 설치 없음, restore/enroll 선택, heredoc 이후 입력 복원, umask077에서도 감사 계정 경로 접근 |
+| F6 | 브랜치 없음/이미 있음 생성 CAS, 원장 없음 y/N, 기존 원장 보존, restore의 빈 원장 fallback 거부 |
+| F7 | 실제 Python3.13.5와 고정 wheel로 시험, Debian13/glibc2.41 검사, uid996 수용·소유 역할 매핑, keyctl 부재 tmpfs 대체 |
+
+- 중앙 전체 **778건 PASS** = 기존 중앙 645 + 복구 133.
+- 이번 수정 회귀 40건 추가, 삭제한 비모델 helper 가정 시험 5건을 새 가드 시험으로 대체.
+- 저장소 일반 시험 **47건 PASS**; 중앙 5개 target validate-repo 모두 PASS.
+- 시험 환경은 scratch의 Python **3.13.5**, 고정 pyte0.8.2/wcwidth0.9.1/
+  cryptography46.0.0/cffi2.0.0/pycparser3.0이다. root/account/CLI/GitHub는 가짜다.
+- 원본 aiops-fable 바이트·low 유지. bootstrap shell syntax, Python compile,
+  source/manifest/bootstrap SHA256 대응을 검증했다.
+- 실제 Grok VM·설치·토큰 발급·모델·감사·병합은 실행하지 않았다.

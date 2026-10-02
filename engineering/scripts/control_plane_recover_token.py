@@ -7,15 +7,17 @@ import re
 import stat
 import subprocess
 import time
-import webbrowser
+import getpass
+import codecs
+import urllib.parse
 
 from control_plane_recover import (RecoveryError, OAUTH, fail, confirm_model,
-                                  read_regular, protected_parent, sha, token_warning, pinned_module, billing, atomic, canonical, strict_json)
+                                  read_regular, protected_parent, sha, token_warning, pinned_module, atomic, canonical, strict_json, authentication_error)
 
 TRANSCRIPT = Path('/dev/shm/aiops-token.typescript')
 EXPECTED_CLI = '2.1.286 (Claude Code)'
 ENV = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8',
-       'DISABLE_AUTOUPDATER': '1', 'DISABLE_UPDATES': '1'}
+       'DISABLE_AUTOUPDATER': '1', 'DISABLE_UPDATES': '1', 'BROWSER': '/bin/false'}
 
 
 def replay(data, columns=500, lines=60):
@@ -102,46 +104,90 @@ def check_tmpfs(path, mounts=Path('/proc/self/mountinfo')):
         fail('TOKEN_TRANSCRIPT_NOT_TMPFS')
 
 
-def capture(cfg, path, popen=subprocess.Popen, open_url=webbrowser.open):
+def terminal_lines(screen):
+    rows = list(screen.history.top) + [screen.buffer[i] for i in range(screen.lines)]
+    return [''.join(row[i].data for i in range(screen.columns)).rstrip() for row in rows]
+
+
+def login_url(screen):
+    """Join only URL continuation cells, never emit the remaining CLI screen."""
+    rows = terminal_lines(screen)
+    for index, row in enumerate(rows):
+        start = row.find('https://')
+        if start < 0:
+            continue
+        parts = []
+        for line in rows[index:]:
+            piece = line[start:] if not parts else line.strip()
+            start = 0
+            if parts and not re.fullmatch(r'[A-Za-z0-9:/?&=_%.~+\-#]+', piece):
+                break
+            match = re.match(r'[A-Za-z0-9:/?&=_%.~+\-#]+', piece)
+            if not match:
+                break
+            parts.append(match[0])
+            if len(match[0]) != len(piece):
+                break
+        candidate = ''.join(parts)
+        parsed = urllib.parse.urlparse(candidate)
+        if (parsed.scheme == 'https' and parsed.hostname in ('claude.ai', 'console.anthropic.com')
+                and not parsed.username and not parsed.password and len(candidate) <= 16384
+                and 'sk-ant-' not in candidate):
+            return candidate
+    return None
+
+
+def capture(cfg, path, popen=subprocess.Popen, read_code=getpass.getpass, emit=print):
+    import pyte
     check_tmpfs(path)
-    # A private parent prevents another principal replacing the transcript.
     parent = path.parent / 'aiops-recover-token'
     if not parent.exists():
         parent.mkdir(mode=0o700)
-    s = parent.lstat()
-    if not stat.S_ISDIR(s.st_mode) or s.st_uid != 0 or stat.S_IMODE(s.st_mode) != 0o700:
+    info = parent.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
         fail('TOKEN_TRANSCRIPT_UNSAFE')
     path = parent / 'typescript'
     if path.exists():
-        return path  # A failed extraction never starts another authorization.
+        return path
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     os.close(fd)
-    # Synchronous foreground subprocess. Never tmux, a service or a detached job.
     command = '/usr/bin/stty cols 500 && exec /usr/local/bin/claude setup-token'
+    screen = pyte.HistoryScreen(500, 60, history=10000)
+    stream = pyte.Stream(screen)
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
     with popen(['/usr/bin/script', '-q', '-e', '-c', command, str(path)],
-               stdin=None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=ENV) as proc:
-        pending = b''
-        opened = False
-        while True:
-            block = proc.stdout.read(1)
-            if not block:
-                break
-            pending = (pending + block)[-16384:]
-            # Open the authorization URL without printing it or the transcript.
-            if not opened:
-                match = re.search(rb'https://(?:claude\.ai|console\.anthropic\.com)/[^\s\x1b]+[\r\n]', pending)
-                if match:
-                    if not open_url(match[0].strip().decode(), new=2):
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            proc.kill(); proc.wait()
-                        fail('LOGIN_BROWSER_UNAVAILABLE_TRANSCRIPT_RETAINED')
-                    opened = True
-        rc = proc.wait()
-        if rc:
-            fail('TOKEN_ISSUANCE_FAILED_TRANSCRIPT_RETAINED')
+               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=ENV) as proc:
+        sent = False
+        try:
+            while True:
+                block = proc.stdout.read(1)
+                if not block:
+                    break
+                stream.feed(decoder.decode(block))
+                if not sent and block in (b':', b'>', b'\n', b'\r'):
+                    rows = terminal_lines(screen)
+                    # Wait for the code prompt so a wrapped URL is complete.
+                    prompt = any(re.search(r'(paste|enter).{0,80}code', row, re.I) for row in rows)
+                    url = login_url(screen) if prompt else None
+                    if url:
+                        emit(url)
+                        emit('브라우저에서 승인 → 받은 코드를 붙여 넣고 Enter')
+                        code = read_code('승인 코드: ')
+                        if not code or len(code) > 8192 or '\n' in code or '\r' in code:
+                            fail('LOGIN_CODE_INVALID_TRANSCRIPT_RETAINED')
+                        proc.stdin.write((code + '\n').encode())
+                        proc.stdin.flush()
+                        del code
+                        sent = True
+            if proc.wait():
+                fail('TOKEN_ISSUANCE_FAILED_TRANSCRIPT_RETAINED')
+        except BaseException:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill(); proc.wait()
+            raise
     return path
 
 
@@ -158,18 +204,17 @@ def validate(token, cfg, run=subprocess.run, confirm=confirm_model, now=None, po
                   '--output-format', 'stream-json', '--verbose', '--restricted', '--safe-mode',
                   '--disable-slash-commands', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
                   '--permission-mode', 'dontAsk', '--no-session-persistence'],
-                 capture_output=True, timeout=120, env=env, user=cfg.get('account', {}).get('uid'),
-                 group=cfg.get('account', {}).get('gid'), extra_groups=[], umask=0o077, cwd='/')
-    output = result.stdout + result.stderr
-    if b'401' in output or b'authentication_error' in output:
-        # Only safe length/prefix diagnostics may leave this boundary.
-        raise RecoveryError('TOKEN_REISSUE_REQUIRED')
-    if result.returncode:
-        fail('TOKEN_VALIDATION_FAILED_TRANSCRIPT_RETAINED')
-    events = []
+                 capture_output=True, timeout=120, env=env, user=cfg.get('_auditor', {}).get('uid'),
+                 group=cfg.get('_auditor', {}).get('gid'), extra_groups=[], umask=0o077, cwd='/')
     try:
         events = [json.loads(x) for x in result.stdout.splitlines() if x.strip()]
+        if any(not isinstance(x, dict) for x in events):
+            fail('TOKEN_VALIDATION_FAILED_TRANSCRIPT_RETAINED')
     except (ValueError, UnicodeError):
+        fail('TOKEN_VALIDATION_FAILED_TRANSCRIPT_RETAINED')
+    if any(authentication_error(event) for event in events):
+        fail('TOKEN_REISSUE_REQUIRED')
+    if result.returncode:
         fail('TOKEN_VALIDATION_FAILED_TRANSCRIPT_RETAINED')
     if policy is not None:
         signals = [x.get('rate_limit_info') for x in events if x.get('type') == 'rate_limit_event']
@@ -211,7 +256,6 @@ def reissue(cfg, installer):
     try:
         fable_item = next(x for x in installer.manifest['files'] if x['destination'] == '/opt/aiops/lib/fable/control_plane_fable.py')
         fable = pinned_module(Path(fable_item['destination']), fable_item['sha256'])
-        billing(cfg, fable, token)
         return validate(token, cfg, policy=fable.overage_policy, now=int(path.stat().st_mtime))
     except RecoveryError as error:
         if error.code == 'TOKEN_REISSUE_REQUIRED':

@@ -22,7 +22,9 @@ class Backend:
         self.h = 'a' * 40
         self.data = {}
         self.conflict = False
-    def head(self):
+    def head(self, *, missing=False):
+        if self.h is None and not missing:
+            r.fail('STATE_CORRUPT')
         return self.h
     def load(self, h):
         if h not in self.data:
@@ -31,7 +33,7 @@ class Backend:
     def publish(self, expected, envelope, cipher):
         if expected != self.h or self.conflict:
             r.fail('STATE_CAS_CONFLICT')
-        self.h = format(int(self.h, 16) + 1, '040x')
+        self.h = format(int(self.h or 'a'*40, 16) + 1, '040x')
         self.data[self.h] = envelope, cipher
         return self.h
 
@@ -61,7 +63,7 @@ class RecoveryTests(unittest.TestCase):
         self.salt = b'0123456789abcdef'
         self.key = r.derive('offline-fake-password', self.salt)
         self.payload = {'format': 'AUDIT_HOST_ONLY_V1', 'files': [
-            {'path': 'claim', 'kind': 'file', 'uid': self.uid, 'gid': self.gid, 'mode': 0o600,
+            {'path': 'claim', 'kind': 'file', 'uid': 'AUDITOR' if self.uid else 0, 'gid': 'AUDITOR' if self.gid else 0, 'mode': 0o600,
              'bytes': base64.b64encode(b'consumed').decode(), 'sha256': r.sha(b'consumed'), 'size': 8}],
              'claude_token': dict(TOKEN)}
         self.envelope, self.cipher = r.encrypt(self.payload, self.key, self.salt, 1, 'b' * 40)
@@ -162,7 +164,8 @@ class RecoveryTests(unittest.TestCase):
     def test_enrollment_requires_salt(self):
         self.state.mkdir()
         r.atomic(self.state / 'claim', b'consumed')
-        self.expect('STATE_CORRUPT', self.cp.save, self.key, TOKEN, enrollment=True, expected=self.backend.h)
+        self.backend.h = None
+        self.expect('STATE_CORRUPT', self.cp.save, self.key, TOKEN, enrollment=True)
     def test_payload_path_traversal(self):
         p = copy.deepcopy(self.payload); p['files'][0]['path'] = '../claim'
         self.expect('STATE_CORRUPT', r.validate_payload, p, self.uid, self.gid)
@@ -245,11 +248,11 @@ class RecoveryTests(unittest.TestCase):
         self.expect('UNKNOWN_REPRESENTATIVE_DECISION_REQUIRED', self.cp.current)
     def test_result_checkpoint_after_call(self):
         self.restore(); guard = r.AuditGuard(self.cp, self.key, TOKEN, None)
-        guard.before('BeautifulMind-JT/ZARI', 36, 'd' * 40, []); guard.after('BeautifulMind-JT/ZARI', 36, 'd' * 40, True)
+        guard.before('BeautifulMind-JT/ZARI', 36, 'd' * 40, []); guard.after('BeautifulMind-JT/ZARI', 36, 'd' * 40, {'result':'PASS'}, {'model_attempted':True})
         self.assertEqual('AUDIT_EXISTS', guard.before('BeautifulMind-JT/ZARI', 36, 'd' * 40, [])['status'])
     def test_failed_call_is_unknown(self):
         self.restore(); guard = r.AuditGuard(self.cp, self.key, TOKEN, None)
-        guard.before('BeautifulMind-JT/ZARI', 36, 'd' * 40, []); guard.after('BeautifulMind-JT/ZARI', 36, 'd' * 40, False)
+        guard.before('BeautifulMind-JT/ZARI', 36, 'd' * 40, []); guard.after('BeautifulMind-JT/ZARI', 36, 'd' * 40, {'status':'ERROR'}, {'model_attempted':True})
         self.expect('UNKNOWN_REPRESENTATIVE_DECISION_REQUIRED', guard.before, 'BeautifulMind-JT/ZARI', 36, 'd' * 40, [])
     def test_expiry_warning(self):
         self.assertTrue(r.token_warning({'expires_at': 30 * 86400}, now=1)['expires_within_30_days'])
@@ -281,7 +284,7 @@ class RecoveryTests(unittest.TestCase):
     def test_extractor_selftest(self):
         t.selftest()
     def test_validate_401_safe(self):
-        fake_run = lambda *a, **k: types.SimpleNamespace(returncode=1, stdout=b'401', stderr=b'')
+        fake_run = lambda *a, **k: types.SimpleNamespace(returncode=1, stdout=b'{"type":"result","is_error":true,"error":{"type":"authentication_error","status_code":401}}', stderr=b'')
         self.expect('TOKEN_REISSUE_REQUIRED', t.validate, FAKE, {}, run=fake_run, confirm=lambda: True)
     def test_validate_no_confirmation_no_call(self):
         with patch.object(t.subprocess, 'run') as run:
@@ -298,20 +301,6 @@ class RecoveryTests(unittest.TestCase):
     def test_validate_missing_result(self):
         run = lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=b'{}', stderr=b'')
         self.expect('TOKEN_VALIDATION_FAILED_TRANSCRIPT_RETAINED', t.validate, FAKE, {}, run=run, confirm=lambda: True)
-    def test_billing_missing_fail_closed(self):
-        self.expect('BILLING_PREFLIGHT_UNAVAILABLE', r.billing, {}, None, FAKE)
-    def test_billing_unverified(self):
-        self.expect('OVERAGE_UNVERIFIED', r.billing, {}, None, FAKE, probe=lambda: {})
-    def test_billing_policy_pass(self):
-        fable = types.SimpleNamespace(overage_policy=lambda x: (None, None) if x == {'isUsingOverage':False} else ('OVERAGE_UNVERIFIED', None))
-        r.billing({}, fable, FAKE, probe=lambda: {'token_sha256': r.sha(FAKE.encode()), 'observed_at': int(r.time.time()), 'rate_limit_info': {'isUsingOverage':False}})
-    def test_billing_overage_block(self):
-        fable = types.SimpleNamespace(overage_policy=lambda _: ('OVERAGE_NOT_BLOCKED', None))
-        self.expect('OVERAGE_NOT_BLOCKED', r.billing, {}, fable, FAKE,
-                    probe=lambda: {'token_sha256':r.sha(FAKE.encode()),'observed_at':int(r.time.time()),'rate_limit_info':{}})
-    def test_billing_stale(self):
-        self.expect('OVERAGE_UNVERIFIED', r.billing, {}, None, FAKE,
-                    probe=lambda: {'token_sha256':r.sha(FAKE.encode()),'observed_at':1})
     def test_private_repository_required(self):
         self.expect('STATE_REPOSITORY_NOT_PRIVATE', r.GithubState, 'BeautifulMind-JT/aiops-state','audit-host','fake', request=lambda *a: {'private':False})
     def test_redirect_never_forwards_credentials(self):
@@ -357,7 +346,7 @@ class RecoveryTests(unittest.TestCase):
         with patch.object(t, 'TRANSCRIPT', self.root / 'unused'), patch.object(t, 'prerequisites'), \
              patch.object(t, 'read_regular', r.read_regular), patch.object(t, 'capture') as capture, \
              patch.object(t, 'pinned_module', return_value=types.SimpleNamespace(overage_policy=lambda _:None)), \
-             patch.object(t, 'billing'), patch.object(t, 'validate', return_value=TOKEN):
+             patch.object(t, 'validate', return_value=TOKEN):
             self.assertEqual(TOKEN, t.reissue({}, inst)); capture.assert_not_called()
         self.assertTrue((path / 'typescript').exists())
     def test_audit_cas_conflict_before_model(self):
@@ -447,13 +436,13 @@ class RecoveryTests(unittest.TestCase):
         with patch.object(r.os,'geteuid',return_value=1001):
             self.expect('PRIVILEGED_EXECUTOR_UNAVAILABLE',r.config)
     def test_existing_account_identity_drift(self):
-        cfg={'account':{'name':'aiops-auditor','uid':991,'gid':991,'home':'/var/lib/aiops-auditor'}}
-        fake=types.SimpleNamespace(pw_uid=992,pw_gid=991,pw_dir='/var/lib/aiops-auditor',pw_shell='/usr/sbin/nologin')
+        cfg={'account':{'name':'aiops-auditor','home':'/var/lib/aiops-auditor'}}
+        fake=types.SimpleNamespace(pw_uid=0,pw_gid=996,pw_dir='/var/lib/aiops-auditor',pw_shell='/usr/sbin/nologin')
         with patch.object(r.pwd,'getpwnam',return_value=fake),patch.object(r.subprocess,'run') as run:
             self.expect('INSTALLATION_DRIFT',r.ensure_account,cfg)
             run.assert_not_called()
     def test_audit_does_not_create_missing_account(self):
-        cfg={'account':{'name':'aiops-auditor','uid':991,'gid':991,'home':'/var/lib/aiops-auditor'}}
+        cfg={'account':{'name':'aiops-auditor','home':'/var/lib/aiops-auditor'}}
         with patch.object(r.pwd,'getpwnam',side_effect=KeyError()),patch.object(r.subprocess,'run') as run:
             self.expect('INSTALLATION_DRIFT',r.ensure_account,cfg,create=False)
             run.assert_not_called()
@@ -474,7 +463,7 @@ class RecoveryTests(unittest.TestCase):
         out=io.StringIO()
         with patch.object(t,'TRANSCRIPT',self.root/'unused'),patch.object(t,'prerequisites'), \
              patch.object(t,'read_regular',r.read_regular),patch.object(t,'pinned_module',return_value=types.SimpleNamespace(overage_policy=None)), \
-             patch.object(t,'billing'),patch.object(t,'validate',side_effect=r.RecoveryError('TOKEN_REISSUE_REQUIRED')), \
+             patch.object(t,'validate',side_effect=r.RecoveryError('TOKEN_REISSUE_REQUIRED')), \
              redirect_stdout(out):
             self.expect('TOKEN_REISSUE_REQUIRED',t.reissue,{},inst)
         self.assertNotIn(FAKE,out.getvalue());self.assertIn('length',out.getvalue())
@@ -486,6 +475,357 @@ class RecoveryTests(unittest.TestCase):
     def test_protected_parent_rejects_directory_symlink(self):
         parent=self.root/'alias';parent.symlink_to(self.root,target_is_directory=True)
         self.expect('INSTALLATION_DRIFT',self.original_protected_parent,parent/'file',boundary=self.root,owner=self.uid)
+
+    def fake_wrapper(self, event=None, attempted=True, failure=None, comments=(), stream=None):
+        """Real recovery admission/checkpoint and original stream guard, fake CLI/GH."""
+        import io
+        import contextlib
+        import control_plane_fable as baseline
+        cfg={'claude_version':t.EXPECTED_CLI,'account':{'name':'aiops-auditor','home':'/var/lib/aiops-auditor'}}
+        ctx=types.SimpleNamespace(runner=types.SimpleNamespace(last_execution={}),last_failure=None)
+        fake=types.SimpleNamespace(production_context=lambda **kw:(ctx,t.EXPECTED_CLI))
+        fake.GitHub=lambda token:types.SimpleNamespace(pages=lambda path:list(comments))
+        calls=[]
+        def main(args):
+            calls.append(list(args)); fake.production_context()
+            ctx.runner.last_execution={'model_attempted':attempted};ctx.last_failure=failure
+            actual=dict(event or {'kind':args[0],'result':'PASS','session':'f401a','output_sha256':'401'+'a'*61,'line':401})
+            if stream is not None:
+                _, stopped = baseline.read_stream(io.BytesIO(stream))
+                if stopped:
+                    actual = {'status':'ERROR','reason':stopped['error_code']}
+            print(json.dumps(actual))
+            return 1 if actual.get('status')=='ERROR' else 0
+        fake.main=main
+        from contextlib import ExitStack
+        stack=ExitStack();self.addCleanup(stack.close)
+        for target,value in [('config',lambda:cfg),('components',lambda cfg:(types.SimpleNamespace(verify=lambda:None),self.cp,{'destination':'fake','sha256':'fake'},'fake-gh')),
+                             ('keyring',lambda *a:self.key),('pinned_module',lambda *a:fake),('TOKEN',self.tokenfile)]:
+            stack.enter_context(patch.object(r,target,value))
+        stack.enter_context(patch.object(r,'barrier',lambda *a:contextlib.nullcontext()))
+        stack.enter_context(patch.object(r.subprocess,'run',return_value=types.SimpleNamespace(returncode=0,stdout=t.EXPECTED_CLI.encode())))
+        return calls
+    def audit_args(self):
+        return ['audit','--repository','BeautifulMind-JT/ZARI','--pr','36','--head','d'*40,'--gate','ARCHITECTURE','--depth','A3']
+    def test_f1_audit_without_billing_mock(self):
+        self.restore();calls=self.fake_wrapper()
+        self.assertEqual(0,r.fable_main(self.audit_args()));self.assertEqual(1,len(calls))
+        self.assertFalse(hasattr(r,'billing'))
+    def test_f1_consult_without_billing_mock(self):
+        self.restore();calls=self.fake_wrapper()
+        self.assertEqual(0,r.fable_main(['consult','--repository','BeautifulMind-JT/ZARI','--issue','36','--comment','1']))
+        self.assertEqual(1,len(calls))
+    def test_f1_preflight_repeat_without_billing_mock(self):
+        self.restore();calls=self.fake_wrapper(event={'status':'PASS'})
+        with patch.object(r,'confirm_model',return_value=True):
+            self.assertEqual(0,r.fable_main(['preflight']));self.assertEqual(0,r.fable_main(['preflight']))
+        self.assertEqual(2,len(calls))
+    def token_events(self,signal=None,**result):
+        events=[] if signal is None else [{'type':'rate_limit_event','rate_limit_info':signal}]
+        events.append({'type':'result','is_error':False,'result':'ok','session_id':'f401a','hash':'401'+'a'*61,**result})
+        return b'\n'.join(r.canonical(x) for x in events)
+    def test_f1_token_validate_stream_guard_without_billing_mock(self):
+        import control_plane_fable as fable
+        raw=self.token_events({'status':'allowed','isUsingOverage':False})
+        run=lambda *a,**kw:types.SimpleNamespace(returncode=0,stdout=raw,stderr=b'')
+        self.assertEqual(FAKE,t.validate(FAKE,{},run=run,confirm=lambda:True,policy=fable.overage_policy)['value'])
+    def test_f1_token_validate_actual_overage(self):
+        import control_plane_fable as fable
+        raw=self.token_events({'status':'allowed','isUsingOverage':True})
+        run=lambda *a,**kw:types.SimpleNamespace(returncode=0,stdout=raw,stderr=b'')
+        self.expect('OVERAGE_NOT_BLOCKED',t.validate,FAKE,{},run=run,confirm=lambda:True,policy=fable.overage_policy)
+    def test_f1_token_validate_unknown_overage(self):
+        import control_plane_fable as fable
+        run=lambda *a,**kw:types.SimpleNamespace(returncode=0,stdout=self.token_events({}),stderr=b'')
+        self.expect('OVERAGE_UNVERIFIED',t.validate,FAKE,{},run=run,confirm=lambda:True,policy=fable.overage_policy)
+    def test_f1_original_stream_guard_stops_overage(self):
+        import io,control_plane_fable as fable
+        _,guard=fable.read_stream(io.BytesIO(self.token_events({'isUsingOverage':True})))
+        self.assertEqual('OVERAGE_NOT_BLOCKED',guard['error_code'])
+    def test_f2_wrapped_url_reconstructed(self):
+        import pyte
+        screen=pyte.HistoryScreen(40,10,history=100);stream=pyte.Stream(screen)
+        url='https://claude.ai/oauth/authorize?client_id=fake&code_challenge=fake&state=fake'
+        stream.feed('Open:\r\n'+url[:35]+'\r\n'+url[35:]+'\r\n\r\nPaste code here:')
+        self.assertEqual(url,t.login_url(screen))
+    def test_f2_headless_capture_code_input_no_token_output(self):
+        import io
+        url='https://claude.ai/oauth/authorize?client_id=fake&state=fake'
+        raw=('Open:\r\n'+url+'\r\n\r\nPaste code here:\r\n'+FAKE).encode()
+        stdin=io.BytesIO();proc=types.SimpleNamespace(stdout=io.BytesIO(raw),stdin=stdin,wait=lambda **kw:0,terminate=lambda:None,kill=lambda:None)
+        class Process:
+            def __enter__(self):return proc
+            def __exit__(self,*a):return False
+        output=[]
+        with patch.object(t,'check_tmpfs'),patch.object(t.os,'lstat',wraps=os.lstat):
+            # Fake only root identity for the private transcript parent in CI.
+            original=Path.lstat
+            def owner(path):
+                s=original(path)
+                if str(path).endswith('aiops-recover-token'):
+                    return types.SimpleNamespace(st_mode=s.st_mode,st_uid=0)
+                return s
+            with patch.object(Path,'lstat',owner):
+                t.capture({},self.root/'unused',popen=lambda *a,**kw:Process(),read_code=lambda _: 'fake-approval-code',emit=output.append)
+        self.assertEqual(b'fake-approval-code\n',stdin.getvalue());self.assertEqual(url,output[0])
+        self.assertNotIn(FAKE,' '.join(output));self.assertFalse(hasattr(t,'webbrowser'))
+    def test_f3_normal_401_identifiers_validate(self):
+        run=lambda *a,**k:types.SimpleNamespace(returncode=0,stdout=self.token_events(None,line=401,uuid='401a'),stderr=b'401 in diagnostic ID')
+        self.assertEqual(FAKE,t.validate(FAKE,{},run=run,confirm=lambda:True)['value'])
+    def test_f3_normal_401_audit_result_preserved(self):
+        import io
+        from contextlib import redirect_stdout
+        self.restore();self.fake_wrapper();out=io.StringIO()
+        with redirect_stdout(out):self.assertEqual(0,r.fable_main(self.audit_args()))
+        self.assertIn('f401a',out.getvalue());self.assertIn('"line": 401',out.getvalue());self.assertNotIn('TOKEN_REISSUE_REQUIRED',out.getvalue())
+    def test_f3_typed_401_only(self):
+        self.assertTrue(r.authentication_error({'type':'result','is_error':True,'error':{'status_code':401}}))
+        self.assertFalse(r.authentication_error({'type':'result','is_error':False,'status_code':401}))
+        self.assertFalse(r.authentication_error({'status':'ERROR','reason':'file line 401'}))
+    def test_f4_busy_is_not_started_and_retryable(self):
+        self.restore();calls=self.fake_wrapper(event={'status':'BUSY'},attempted=False)
+        self.assertEqual(0,r.fable_main(self.audit_args()));self.assertEqual(0,r.fable_main(self.audit_args()))
+        self.assertEqual(2,len(calls));entry=next(iter(r.AuditGuard(self.cp,self.key,TOKEN,None).entries().values()))
+        self.assertEqual('NOT_STARTED',entry['state'])
+    def test_f4_head_moved_is_not_started(self):
+        self.restore();calls=self.fake_wrapper(event={'status':'ERROR','reason':'HEAD_MOVED: fake'},attempted=False)
+        self.assertEqual(1,r.fable_main(self.audit_args()));self.assertEqual(1,r.fable_main(self.audit_args()))
+        self.assertEqual(2,len(calls))
+    def test_f4_pre_model_failure_is_not_started(self):
+        self.assertEqual('NOT_STARTED',r.execution_state({'status':'ERROR'},{'model_attempted':False,'failure':{'error_code':'PRE_MODEL_FAILED'}}))
+    def test_f4_unknown_again_no_no_call(self):
+        self.restore();guard=r.AuditGuard(self.cp,self.key,TOKEN,None);guard.before('BeautifulMind-JT/ZARI',36,'d'*40,[])
+        calls=self.fake_wrapper()
+        with patch('builtins.input',return_value='n'):
+            self.assertEqual(0,r.fable_main(self.audit_args()+['--again']))
+        self.assertEqual([],calls)
+    def test_f4_unknown_again_y_one_call_and_forwarded(self):
+        self.restore();guard=r.AuditGuard(self.cp,self.key,TOKEN,None);guard.before('BeautifulMind-JT/ZARI',36,'d'*40,[])
+        calls=self.fake_wrapper()
+        with patch('builtins.input',return_value='y'):
+            self.assertEqual(0,r.fable_main(self.audit_args()+['--again']))
+        self.assertEqual(1,len(calls));self.assertIn('--again',calls[0])
+        self.assertEqual('RESULT',next(iter(guard.entries().values()))['state'])
+    def test_f4_again_after_partial_local_mutation(self):
+        self.restore();guard=r.AuditGuard(self.cp,self.key,TOKEN,None);guard.before('BeautifulMind-JT/ZARI',36,'d'*40,[])
+        r.atomic(self.state/'partial',b'partial');calls=self.fake_wrapper()
+        with patch('builtins.input',return_value='y'):
+            self.assertEqual(0,r.fable_main(self.audit_args()+['--again']))
+        self.assertEqual(1,len(calls));self.cp.current()
+    def test_f4_result_fail_is_result(self):
+        self.assertEqual('RESULT',r.execution_state({'result':'FAIL'},{'model_attempted':True}))
+    def test_f4_model_attempted_without_result_unknown(self):
+        self.assertEqual('UNKNOWN',r.execution_state({'status':'ERROR'},{'model_attempted':True}))
+    def test_f6_empty_enroll_n_no_ledger(self):
+        self.backend.h=None
+        self.expect('ENROLLMENT_CANCELLED',r.prepare_enrollment,self.cp,input_fn=lambda _:'n')
+        self.assertFalse(self.state.exists())
+    def test_f6_empty_enroll_y_marker_and_create_only_publish(self):
+        self.backend.h=None;r.prepare_enrollment(self.cp,input_fn=lambda _:'y')
+        self.cp.save(self.key,TOKEN,enrollment=True,salt=self.salt)
+        self.assertTrue((self.state/'initial-registration.json').exists());self.cp.current()
+        self.expect('STATE_CAS_CONFLICT',r.prepare_enrollment,self.cp,input_fn=lambda _:self.fail('no confirmation'))
+    def test_f6_existing_branch_fails_before_call(self):
+        self.expect('STATE_CAS_CONFLICT',r.prepare_enrollment,self.cp,input_fn=lambda _:self.fail('no confirmation'))
+    def test_f6_existing_ledger_no_empty_confirmation(self):
+        self.backend.h=None;self.state.mkdir();r.atomic(self.state/'claim',b'old')
+        r.prepare_enrollment(self.cp,input_fn=lambda _:self.fail('nonempty needs no prompt'))
+        self.assertEqual(b'old',(self.state/'claim').read_bytes())
+    def test_f6_missing_branch_restore_no_empty_fallback(self):
+        self.backend.h=None;self.expect('STATE_CORRUPT',self.restore);self.assertFalse(self.state.exists())
+    def test_f6_github_initial_branch_create_cas(self):
+        requests=[];created=[False]
+        def request(method,path,data):
+            requests.append((method,path,data))
+            if not path:return {'private':True,'default_branch':'main'}
+            if method=='GET' and path=='/git/ref/heads/audit-host':
+                if not created[0]:r.fail('STATE_BRANCH_MISSING')
+                return {'object':{'sha':'b'*40}}
+            if method=='GET':return {'object':{'sha':'a'*40}}
+            if method=='POST' and path=='/git/refs':created[0]=True
+            return {'sha':'b'*40}
+        backend=r.GithubState('BeautifulMind-JT/aiops-state','audit-host','fake',request=request)
+        backend.publish(None,{'chunks':[r.sha(b'cipher')]},b'cipher')
+        self.assertFalse(any(x[0]=='PATCH' for x in requests));self.assertTrue(created[0])
+        self.expect('STATE_CAS_CONFLICT',backend.publish,None,{},b'cipher')
+    def test_f7_python313_and_cp313_manifest(self):
+        root=Path(__file__).resolve().parents[2];m=json.loads((root/'engineering/recovery/manifest.json').read_text())
+        self.assertEqual([3,13],m['python_version']);self.assertNotIn('uid',m['account'])
+        members=[x['cache_path'] for x in m['files'] if x['cache_path'].startswith('wheels/cffi-')]
+        self.assertTrue(all('cp313-cp313' in x for x in members))
+        with patch.object(r.sys,'version_info',(3,13,5)):
+            inst=self.install();inst.manifest['python_version']=[3,13];inst.install(lambda _:b'fixed')
+    def test_f7_symbolic_owner_restores_current_ids(self):
+        p=copy.deepcopy(self.payload);p['files'][0]['uid']='AUDITOR';p['files'][0]['gid']='AUDITOR'
+        # Restore chown uses the new VM's identity, not the old 996 allocation.
+        cp=r.Checkpoints(self.backend,self.state,self.binding,self.tokenfile,997,997,self.root)
+        e,c=r.encrypt(p,self.key,self.salt,1,'b'*40);self.backend.data[self.backend.h]=(e,c)
+        with patch.object(r,'inventory',return_value=p['files']),patch.object(r.os,'fchown') as owner:
+            cp.restore('offline-fake-password')
+        self.assertTrue(any(x.args[1:]==(997,997) for x in owner.call_args_list))
+    def test_f7_existing_uid996_accepted(self):
+        import grp
+        cfg={'account':{'name':'aiops-auditor','home':'/var/lib/aiops-auditor'}}
+        account=types.SimpleNamespace(pw_uid=996,pw_gid=996,pw_dir=cfg['account']['home'],pw_shell='/usr/sbin/nologin')
+        real=Path.lstat
+        def info(path):
+            if str(path)==cfg['account']['home']:
+                return types.SimpleNamespace(st_mode=0o40700,st_uid=996,st_gid=996)
+            return real(path)
+        with patch.object(r.pwd,'getpwnam',return_value=account),patch.object(grp,'getgrgid',return_value=types.SimpleNamespace(gr_name='aiops-auditor')), \
+             patch.object(r.os,'getgrouplist',return_value=[996]),patch.object(r.os.path,'lexists',return_value=True),patch.object(Path,'lstat',info), \
+             patch.object(r.subprocess,'run',return_value=types.SimpleNamespace(returncode=1,stdout=b'not allowed to run sudo',stderr=b'')):
+            self.assertEqual(996,r.ensure_account(cfg).pw_uid)
+    def test_f7_keyctl_missing_uses_tmpfs_fallback(self):
+        with patch.object(r.subprocess,'run',side_effect=FileNotFoundError()),patch.object(r,'tmpfs_key',return_value=self.key) as fallback:
+            self.assertEqual(self.key,r.keyring('get'));fallback.assert_called_once_with('get',None)
+    def test_f7_tmpfs_key_roundtrip_no_password(self):
+        parent=self.root/'tmpfs';parent.mkdir();directory=parent/'aiops-recover-key'
+        original=Path.lstat;original_read=Path.read_text
+        def info(path):
+            stat=original(path)
+            if path==directory:return types.SimpleNamespace(st_mode=stat.st_mode,st_uid=0)
+            return stat
+        def text(path,*a,**kw):
+            if str(path)=='/proc/self/mountinfo':return '1 0 0:1 / '+str(parent)+' rw - tmpfs tmpfs rw\n'
+            return original_read(path,*a,**kw)
+        with patch.object(r,'KEY_DIR',directory),patch.object(Path,'lstat',info),patch.object(Path,'read_text',text):
+            r.tmpfs_key('set',self.key);self.assertEqual(self.key,r.tmpfs_key('get'))
+        self.assertEqual(0o600,(directory/'derived-key').stat().st_mode&0o777)
+
+    def test_f1_reissue_actual_validation_without_billing_mock(self):
+        import control_plane_fable as fable
+        path=self.root/'aiops-recover-token';path.mkdir(mode=0o700);r.atomic(path/'typescript',FAKE.encode())
+        inst=types.SimpleNamespace(verify=lambda:None,manifest={'files':[
+            {'destination':'/opt/aiops/lib/fable/control_plane_fable.py','sha256':'fake'}]})
+        raw=self.token_events({'status':'allowed','isUsingOverage':False})
+        with patch.object(t,'TRANSCRIPT',self.root/'unused'),patch.object(t,'prerequisites'),patch.object(t,'read_regular',r.read_regular), \
+             patch.object(t,'pinned_module',return_value=fable),patch.object(t,'confirm_model',return_value=True):
+            # validate's default confirmation/run are injected explicitly to preserve its real policy/body.
+            original=t.validate
+            def validate(token,cfg,**kw):
+                return original(token,cfg,**kw,confirm=lambda:True,run=lambda *a,**k:types.SimpleNamespace(returncode=0,stdout=raw,stderr=b''))
+            with patch.object(t,'validate',side_effect=validate):
+                self.assertEqual(FAKE,t.reissue({},inst)['value'])
+    def test_f7_exact_platform_check(self):
+        import platform
+        manifest={'python_version':[3,13],'platform':'debian-13-x86_64-glibc-2.41'}
+        with patch.object(r.sys,'version_info',(3,13,5)),patch.object(platform,'freedesktop_os_release',return_value={'ID':'debian','VERSION_ID':'13'}), \
+             patch.object(platform,'machine',return_value='x86_64'),patch.object(platform,'libc_ver',return_value=('glibc','2.41')):
+            r.check_platform(manifest)
+        with patch.object(r.sys,'version_info',(3,12,14)):
+            self.expect('PYTHON_VERSION_DRIFT',r.check_platform,manifest)
+    def test_f7_no_extra_group_or_sudo_allowed(self):
+        import grp
+        cfg={'account':{'name':'aiops-auditor','home':'/var/lib/aiops-auditor'}}
+        account=types.SimpleNamespace(pw_uid=996,pw_gid=996,pw_dir=cfg['account']['home'],pw_shell='/usr/sbin/nologin')
+        with patch.object(r.pwd,'getpwnam',return_value=account),patch.object(grp,'getgrgid',return_value=types.SimpleNamespace(gr_name='aiops-auditor')), \
+             patch.object(r.os,'getgrouplist',return_value=[996,27]):
+            self.expect('INSTALLATION_DRIFT',r.ensure_account,cfg)
+        with patch.object(r.pwd,'getpwnam',return_value=account),patch.object(grp,'getgrgid',return_value=types.SimpleNamespace(gr_name='aiops-auditor')), \
+             patch.object(r.os,'getgrouplist',return_value=[996]),patch.object(Path,'exists',return_value=True), \
+             patch.object(r.subprocess,'run',return_value=types.SimpleNamespace(returncode=0,stdout=b'(ALL) ALL',stderr=b'')):
+            self.expect('AUDITOR_SUDO_FORBIDDEN',r.ensure_account,cfg)
+    def bootstrap_script(self):
+        root=Path(__file__).resolve().parents[2]
+        doc=(root/'engineering/recovery/BOOTSTRAP_KO.md').read_text()
+        return doc.split("<<'AIOPS_BOOTSTRAP_PY'\n",1)[1].split('\nAIOPS_BOOTSTRAP_PY',1)[0]
+    def test_f5_bootstrap_pins_and_masked_input(self):
+        import ast
+        root=Path(__file__).resolve().parents[2];doc=(root/'engineering/recovery/BOOTSTRAP_KO.md').read_text()
+        node=ast.parse(self.bootstrap_script())
+        pins=next(ast.literal_eval(x.value) for x in node.body if isinstance(x,ast.Assign) and any(isinstance(y,ast.Name) and y.id=='PINNED_SHA256' for y in x.targets))
+        self.assertEqual(8,len(pins))
+        for name,digest in pins.items():self.assertEqual(digest,r.sha((root/name).read_bytes()))
+        self.assertIn("os.dup2(terminal, 0)",doc);self.assertIn('read -rs',doc);self.assertIn('keyutils',doc);self.assertIn('__MERGED_SOURCE_COMMIT_40HEX__',doc)
+        self.assertNotIn('enrollment_commit',self.bootstrap_script())
+    def run_bootstrap_fake(self, bad_hash=False, missing=False):
+        import ast,io,urllib.error
+        from contextlib import redirect_stdout
+        root=Path(__file__).resolve().parents[2];node=ast.parse(self.bootstrap_script())
+        fixture=self.root/'bootstrap'
+        class Rewrite(ast.NodeTransformer):
+            def visit_Constant(_,n):
+                if isinstance(n.value,str) and n.value.startswith(('/opt/aiops/','/usr/local/bin/','/etc/aiops/','/var/cache/aiops-recover')):
+                    return ast.copy_location(ast.Constant(str(fixture)+n.value),n)
+                return n
+        node=ast.fix_missing_locations(Rewrite().visit(node))
+        calls=[]
+        class Response:
+            def __init__(self,data):self.data=data
+            def __enter__(self):return self
+            def __exit__(self,*a):return False
+            def read(self,*a):return r.canonical(self.data)
+        def request(req,**kw):
+            calls.append(req.full_url)
+            if '/contents/' in req.full_url:
+                name=req.full_url.split('/contents/',1)[1].split('?ref=',1)[0]
+                raw=(root/name).read_bytes()
+                if bad_hash:raw+=b'bad'
+                return Response({'encoding':'base64','content':base64.b64encode(raw).decode()})
+            if '/git/ref/' in req.full_url:
+                if missing:raise urllib.error.HTTPError(req.full_url,404,'missing',None,None)
+                return Response({'object':{'sha':'a'*40}})
+            return Response({'private':True})
+        class Executed(BaseException):
+            def __init__(self,args):self.args_passed=args
+        real_lstat=os.lstat;real_fstat=os.fstat;real_open=os.open
+        def fake_open(path,*a,**kw):
+            return real_open(os.devnull,os.O_RDWR) if str(path)=='/dev/tty' else real_open(path,*a,**kw)
+        def owner(s):
+            vals=list(s);vals[4]=0
+            # Trusted fake ancestors of the temporary filesystem only.
+            vals[0]&=~0o022
+            return os.stat_result(vals)
+        out=io.StringIO()
+        with patch.dict(os.environ,{'AIOPS_BOOTSTRAP_COMMIT':'a'*40,'GH_TOKEN':'fake-only'}),patch.object(r.os,'geteuid',return_value=0), \
+             patch.object(r.os,'lstat',side_effect=lambda *a,**kw:owner(real_lstat(*a,**kw))), \
+             patch.object(r.os,'fstat',side_effect=lambda fd:owner(real_fstat(fd))), \
+             patch.object(r.urllib.request,'build_opener',return_value=types.SimpleNamespace(open=request)), \
+             patch.object(r.os,'open',side_effect=fake_open),patch.object(r.os,'dup2'), \
+             patch.object(r.os,'execv',side_effect=lambda path,args:(_ for _ in ()).throw(Executed(args))),redirect_stdout(out):
+            try:exec(compile(node,'offline-bootstrap','exec'),{})
+            except Executed as result:return result.args_passed,out.getvalue(),fixture,calls
+            except SystemExit:return None,out.getvalue(),fixture,calls
+        self.fail('bootstrap must exec or stop')
+    def test_f5_bootstrap_hash_failure_no_install(self):
+        args,output,fixture,calls=self.run_bootstrap_fake(bad_hash=True)
+        self.assertIsNone(args);self.assertIn('BOOTSTRAP_HASH_MISMATCH',output);self.assertFalse(fixture.exists())
+        self.assertNotIn('fake-only',output)
+    def test_f5_bootstrap_restore_and_first_enroll_paths(self):
+        args,output,fixture,calls=self.run_bootstrap_fake()
+        self.assertEqual(1,len(args));self.assertEqual(8,sum('/contents/' in x for x in calls));self.assertEqual('',output)
+        # A separate fresh fake VM, never a fallback from failed restore.
+        import shutil;shutil.rmtree(fixture)
+        args,output,fixture,calls=self.run_bootstrap_fake(missing=True)
+        self.assertEqual('--enroll',args[1]);self.assertEqual('',output)
+
+    def test_f1_audit_and_preflight_actual_overage_stopped(self):
+        self.restore();calls=self.fake_wrapper(stream=self.token_events({'isUsingOverage':True}))
+        self.assertEqual(1,r.fable_main(self.audit_args()))
+        with patch.object(r,'confirm_model',return_value=True):
+            self.assertEqual(1,r.fable_main(['preflight']))
+        self.assertEqual(2,len(calls))
+    def test_f4_structured_401_error_diagnostic_keeps_original(self):
+        import io
+        from contextlib import redirect_stdout
+        self.restore();self.fake_wrapper(event={'status':'ERROR','reason':'MODEL_EXECUTION_FAILED: HTTP 401'},failure={'api_error_status':401})
+        output=io.StringIO()
+        with redirect_stdout(output):self.assertEqual(1,r.fable_main(self.audit_args()))
+        self.assertIn('MODEL_EXECUTION_FAILED: HTTP 401',output.getvalue());self.assertIn('TOKEN_REISSUE_REQUIRED',output.getvalue())
+
+    def test_f5_bootstrap_restrictive_umask_keeps_auditor_traversal(self):
+        previous=os.umask(0o077)
+        try:
+            inst=self.install()
+            self.assertEqual(0o755,inst.path('/opt/aiops/bin').stat().st_mode&0o777)
+            self.backend.h=None;r.prepare_enrollment(self.cp,input_fn=lambda _:'y')
+            self.assertEqual(0o750,self.state.stat().st_mode&0o777)
+            self.assertEqual(0o755,(self.state/'runs').stat().st_mode&0o777)
+            args,output,fixture,calls=self.run_bootstrap_fake()
+            self.assertEqual('',output)
+            self.assertEqual(0o755,(fixture/'opt/aiops/bin').stat().st_mode&0o777)
+        finally:os.umask(previous)
 
 
 if __name__ == '__main__':

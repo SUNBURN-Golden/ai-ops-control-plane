@@ -173,6 +173,7 @@ class GithubState:
         self.repository, self.branch, self.token = repository, branch, token
         self.request_override = request
         repo = self.request('GET', '')
+        self.default_branch = repo.get('default_branch', 'main')
         if repo.get('private') is not True:
             fail('STATE_REPOSITORY_NOT_PRIVATE')
 
@@ -190,14 +191,23 @@ class GithubState:
                     fail('STATE_AUTHORITY_UNAVAILABLE')
                 return strict_json(response.read(12 << 20))
         except urllib.error.HTTPError as e:
-            if method == 'PATCH' and e.code in (409, 422):
+            if method == 'GET' and '/git/ref/heads/' in suffix and e.code == 404:
+                fail('STATE_BRANCH_MISSING')
+            if method in ('PATCH', 'POST') and suffix.startswith('/git/ref') and e.code in (409, 422):
                 fail('STATE_CAS_CONFLICT')
             fail('STATE_AUTHORITY_UNAVAILABLE')
         except (OSError, ValueError):
             fail('STATE_AUTHORITY_UNAVAILABLE')
 
-    def head(self):
-        value = self.request('GET', '/git/ref/heads/' + self.branch)
+    def head(self, *, missing=False):
+        try:
+            value = self.request('GET', '/git/ref/heads/' + self.branch)
+        except RecoveryError as error:
+            if error.code != 'STATE_BRANCH_MISSING':
+                raise
+            if missing:
+                return None
+            fail('STATE_CORRUPT')
         h = (value.get('object') or {}).get('sha', '')
         if not re.fullmatch(r'[a-f0-9]{40}', h):
             fail('STATE_CORRUPT')
@@ -237,8 +247,13 @@ class GithubState:
         return envelope, cipher
 
     def publish(self, expected, envelope, cipher):
-        if self.head() != expected:
+        if self.head(missing=True) != expected:
             fail('STATE_CAS_CONFLICT')
+        parent = expected
+        if expected is None:
+            parent = self.request('GET', '/git/ref/heads/' + self.default_branch).get('object', {}).get('sha')
+            if not re.fullmatch('[a-f0-9]{40}', parent or ''):
+                fail('STATE_CORRUPT')
         entries = []
         for name, content in [('checkpoint.json', canonical(envelope))] + [
                 (f'cipher-{i:06d}', cipher[i * CHUNK:(i + 1) * CHUNK])
@@ -247,9 +262,12 @@ class GithubState:
             entries.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': b['sha']})
         tree = self.request('POST', '/git/trees', {'tree': entries})
         commit = self.request('POST', '/git/commits', {'message': 'Encrypted audit-host checkpoint',
-                              'tree': tree['sha'], 'parents': [expected]})
+                              'tree': tree['sha'], 'parents': [parent]})
         # GitHub rejects a competing child because it is not a fast-forward.
-        self.request('PATCH', '/git/refs/heads/' + self.branch, {'sha': commit['sha'], 'force': False})
+        if expected is None:
+            self.request('POST', '/git/refs', {'ref': 'refs/heads/' + self.branch, 'sha': commit['sha']})
+        else:
+            self.request('PATCH', '/git/refs/heads/' + self.branch, {'sha': commit['sha'], 'force': False})
         if self.head() != commit['sha']:
             fail('STATE_CAS_CONFLICT')
         return commit['sha']
@@ -307,7 +325,8 @@ def inventory(root, auditor_uid, auditor_gid):
                 or info.st_mode & 0o022 or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))):
             fail('STATE_CORRUPT')
         record = {'path': name, 'kind': 'dir' if path.is_dir() else 'file',
-                  'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid}
+                  'mode': stat.S_IMODE(info.st_mode), 'uid': 'AUDITOR' if info.st_uid == auditor_uid and auditor_uid != 0 else 0,
+                  'gid': 'AUDITOR' if info.st_gid == auditor_gid and auditor_gid != 0 else 0}
         if record['kind'] == 'file':
             data = read_regular(path, protected=False, hardlinks=True)
             total += len(data)
@@ -316,7 +335,7 @@ def inventory(root, auditor_uid, auditor_gid):
             record.update(size=len(data), sha256=sha(data), bytes=base64.b64encode(data).decode())
         records.append(record)
     if not records:
-        fail('STATE_CORRUPT')  # Never enroll or restore an invented empty ledger.
+        fail('STATE_CORRUPT')  # Only explicit enrollment may establish the initial marker.
     return records
 
 
@@ -333,7 +352,7 @@ def validate_payload(payload, uid, gid):
             fail('STATE_CORRUPT')
         try:
             name = str(safe_relative(item['path']))
-            if name in names or item['uid'] not in (0, uid) or item['gid'] not in (0, gid):
+            if name in names or item['uid'] not in (0, 'AUDITOR') or item['gid'] not in (0, 'AUDITOR'):
                 fail('STATE_CORRUPT')
             names.add(name)
             mode = item['mode']
@@ -431,16 +450,17 @@ class Checkpoints:
         protected_parent(self.token_path, self.boundary)
         stage = self.root.parent / ('.audit-restore-' + secrets.token_hex(8))
         stage.mkdir(mode=0o750)
+        os.chmod(stage, 0o750)
         os.chown(stage, 0, self.gid)
         try:
             for item in sorted(payload['files'], key=lambda x: (len(PurePosixPath(x['path']).parts), x['path'])):
                 path = stage / item['path']
                 if item['kind'] == 'dir':
                     path.mkdir(mode=item['mode'])
-                    os.chown(path, item['uid'], item['gid'])
+                    os.chown(path, self.uid if item['uid'] == 'AUDITOR' else 0, self.gid if item['gid'] == 'AUDITOR' else 0)
                     os.chmod(path, item['mode'])
                 else:
-                    atomic(path, base64.b64decode(item['bytes']), item['mode'], item['uid'], item['gid'], replace=False)
+                    atomic(path, base64.b64decode(item['bytes']), item['mode'], self.uid if item['uid'] == 'AUDITOR' else 0, self.gid if item['gid'] == 'AUDITOR' else 0, replace=False)
             if inventory(stage, self.uid, self.gid) != payload['files']:
                 fail('STATE_CORRUPT')
             if self.backend.head() != h:
@@ -465,7 +485,7 @@ class Checkpoints:
 
     def save(self, key, token, *, github_token=None, enrollment=False, expected=None, salt=None):
         if enrollment:
-            if self.binding.exists() or expected != self.backend.head():
+            if self.binding.exists() or expected is not None or self.backend.head(missing=True) is not None:
                 fail('STATE_CAS_CONFLICT')
             if salt is None or len(salt) != 16:
                 fail('STATE_CORRUPT')
@@ -496,6 +516,18 @@ def confirm_model(input_fn=input):
     return input_fn('모델 호출이 발생합니다. 실행할까요? [y/N] ').strip().lower() == 'y'
 
 
+def check_platform(manifest):
+    if manifest.get('python_version') and list(sys.version_info[:2]) != manifest['python_version']:
+        fail('PYTHON_VERSION_DRIFT')
+    if manifest.get('platform'):
+        import platform
+        release = platform.freedesktop_os_release()
+        if (manifest['platform'] != 'debian-13-x86_64-glibc-2.41' or release.get('ID') != 'debian'
+                or release.get('VERSION_ID') != '13' or platform.machine() != 'x86_64'
+                or platform.libc_ver() != ('glibc', '2.41')):
+            fail('HOST_PLATFORM_DRIFT')
+
+
 class Installer:
     """Fixed destinations; source hashes are verified on already-open descriptors."""
     def __init__(self, manifest, prefix=Path('/'), owner=0):
@@ -524,6 +556,7 @@ class Installer:
             fail('INSTALLATION_DRIFT')
 
     def verify(self, *, receipt=True):
+        check_platform(self.manifest)
         if receipt:
             value = strict_json(read_regular(self.path('/etc/aiops/recovery-install.json'), boundary=self.prefix, mode=0o600))
             if value != {'complete': True, 'manifest_sha256': sha(canonical(self.manifest))}:
@@ -532,13 +565,13 @@ class Installer:
             self.check_file(item)
 
     def install(self, fetch):
-        if self.manifest.get('python_version') and list(sys.version_info[:2]) != self.manifest['python_version']:
-            fail('PYTHON_VERSION_DRIFT')
+        check_platform(self.manifest)
         for directory in ('/opt/aiops', '/opt/aiops/bin', '/opt/aiops/lib', '/opt/aiops/lib/fable', '/etc/aiops', '/usr/local/bin'):
             path = self.path(directory)
             if not path.exists():
                 protected_parent(path, self.prefix, self.owner)
                 path.mkdir(mode=0o755)
+                os.chmod(path, 0o755)
             protected_parent(path / 'sentinel', self.prefix, self.owner)
         for item in self.manifest['files']:
             parent = self.path(item['destination']).parent
@@ -548,6 +581,7 @@ class Installer:
             for parent in reversed(missing_parents):
                 protected_parent(parent, self.prefix, self.owner)
                 parent.mkdir(mode=0o755)
+                os.chmod(parent, 0o755)
             protected_parent(self.path(item['destination']), self.prefix, self.owner)
         # Validate ALL existing files and ALL incoming bytes before writing anything.
         missing = []
@@ -568,8 +602,11 @@ class Installer:
         atomic(receipt, canonical({'complete': True, 'manifest_sha256': sha(canonical(self.manifest))}))
 
 
+KEY_DIR = Path('/dev/shm/aiops-recover-key')
+
+
 def keyring(action, value=None):
-    """Derived encryption key only; password is never persisted, argv contains no key."""
+    """Root-only kernel key; on unsupported kernels, root-private tmpfs key."""
     tool = '/usr/bin/keyctl'
     env = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
     try:
@@ -586,8 +623,36 @@ def keyring(action, value=None):
         if len(key) != 32:
             fail('STATE_KEY_UNAVAILABLE')
         return key
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError, RecoveryError):
+        return tmpfs_key(action, value)
+
+
+def tmpfs_key(action, value=None):
+    # /dev/shm is sticky, so all secrets are in a separate root-private directory.
+    mounts = Path('/proc/self/mountinfo').read_text().splitlines()
+    if not any(x.split()[4] == str(KEY_DIR.parent) and x.split(' - ', 1)[1].split()[0] == 'tmpfs'
+               for x in mounts if ' - ' in x):
         fail('STATE_KEY_UNAVAILABLE')
+    if not KEY_DIR.exists():
+        if action != 'set':
+            fail('STATE_KEY_UNAVAILABLE')
+        KEY_DIR.mkdir(mode=0o700)
+    info = KEY_DIR.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+        fail('STATE_KEY_UNAVAILABLE')
+    path = KEY_DIR / 'derived-key'
+    if action == 'set':
+        if not isinstance(value, bytes) or len(value) != 32:
+            fail('STATE_KEY_UNAVAILABLE')
+        atomic(path, value)
+        return
+    try:
+        key = read_regular(path, boundary=KEY_DIR, mode=0o600, limit=32)
+    except RecoveryError:
+        fail('STATE_KEY_UNAVAILABLE')
+    if len(key) != 32:
+        fail('STATE_KEY_UNAVAILABLE')
+    return key
 
 
 def config():
@@ -612,7 +677,7 @@ def pinned_module(path, digest):
     return module
 
 
-def components(cfg):
+def components(cfg, *, create_account=False):
     manifest_bytes = read_regular('/etc/aiops/recovery-manifest.json')
     if sha(manifest_bytes) != cfg['manifest_sha256']:
         fail('MANIFEST_REJECTED')
@@ -626,51 +691,48 @@ def components(cfg):
     backend = GithubState(cfg['state_repository'], cfg['state_branch'], token)
     if cfg.get('account') != manifest.get('account') or cfg.get('claude_version') != manifest.get('claude_version'):
         fail('MANIFEST_REJECTED')
-    account = cfg['account']
-    cp = Checkpoints(backend, STATE, BINDING, TOKEN, account['uid'], account['gid'])
+    account = ensure_account(cfg, create=create_account)
+    cfg['_auditor'] = {'uid': account.pw_uid, 'gid': account.pw_gid}
+    cp = Checkpoints(backend, STATE, BINDING, TOKEN, account.pw_uid, account.pw_gid)
     item = next(x for x in manifest['files'] if x['destination'] == '/opt/aiops/lib/fable/control_plane_fable.py')
     return inst, cp, item, token
 
 
 def ensure_account(cfg, *, create=True):
+    import grp
     item = cfg['account']
-    if (item.get('name') != 'aiops-auditor' or item.get('home') != '/var/lib/aiops-auditor'
-            or type(item.get('uid')) is not int or type(item.get('gid')) is not int
-            or item['uid'] < 100 or item['gid'] < 100):
+    if item.get('name') != 'aiops-auditor' or item.get('home') != '/var/lib/aiops-auditor':
         fail('MANIFEST_REJECTED')
     try:
         existing = pwd.getpwnam(item['name'])
     except KeyError:
         if not create:
             fail('INSTALLATION_DRIFT')
-        import grp
-        try:
-            pwd.getpwuid(item['uid'])
-            fail('INSTALLATION_DRIFT')
-        except KeyError:
-            pass
-        try:
-            g = grp.getgrgid(item['gid'])
-            if g.gr_name != item['name']:
-                fail('INSTALLATION_DRIFT')
-        except KeyError:
-            subprocess.run(['/usr/sbin/groupadd', '--gid', str(item['gid']), item['name']], check=True, capture_output=True)
-        subprocess.run(['/usr/sbin/useradd', '--uid', str(item['uid']), '--gid', str(item['gid']),
-                        '--home-dir', item['home'], '--shell', '/usr/sbin/nologin', '--no-create-home', item['name']],
+        subprocess.run(['/usr/sbin/useradd', '--system', '--user-group', '--home-dir', item['home'],
+                        '--shell', '/usr/sbin/nologin', '--no-create-home', item['name']],
                        check=True, capture_output=True)
         existing = pwd.getpwnam(item['name'])
-    if (existing.pw_uid, existing.pw_gid, existing.pw_dir, existing.pw_shell) != (
-            item['uid'], item['gid'], item['home'], '/usr/sbin/nologin'):
+    if (existing.pw_uid == 0 or existing.pw_gid == 0 or existing.pw_dir != item['home']
+            or existing.pw_shell != '/usr/sbin/nologin'
+            or grp.getgrgid(existing.pw_gid).gr_name != item['name']
+            or set(os.getgrouplist(item['name'], existing.pw_gid)) != {existing.pw_gid}):
         fail('INSTALLATION_DRIFT')
+    # Query the effective sudo policy, not just membership in a group named sudo.
+    if Path('/usr/bin/sudo').exists():
+        policy = subprocess.run(['/usr/bin/sudo', '-n', '-l', '-U', item['name']], capture_output=True,
+                                env={'PATH': '/usr/bin:/bin', 'LANG': 'C'}, timeout=30)
+        if policy.returncode != 1 or b'not allowed to run sudo' not in policy.stdout + policy.stderr:
+            fail('AUDITOR_SUDO_FORBIDDEN')
     home = Path(item['home'])
     if not os.path.lexists(home):
         if not create:
             fail('INSTALLATION_DRIFT')
         home.mkdir(mode=0o700)
-        os.chown(home, item['uid'], item['gid'])
+        os.chown(home, existing.pw_uid, existing.pw_gid)
     info = home.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != item['uid'] or info.st_gid != item['gid'] or stat.S_IMODE(info.st_mode) != 0o700:
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != existing.pw_uid or info.st_gid != existing.pw_gid or stat.S_IMODE(info.st_mode) != 0o700:
         fail('INSTALLATION_DRIFT')
+    return existing
 
 
 def fetch_artifact(item, cfg):
@@ -715,32 +777,71 @@ def fetch_artifact(item, cfg):
     return data
 
 
-def billing(cfg, fable, token, probe=None):
-    """No implicit model invocation. Missing live non-model proof is a closed gate."""
-    if probe is None:
-        spec = cfg.get('billing_probe')
-        if not isinstance(spec, dict) or spec.get('non_model') is not True:
-            fail('BILLING_PREFLIGHT_UNAVAILABLE')
-        path = spec.get('path', '')
-        if not path.startswith('/opt/aiops/lib/'):
-            fail('BILLING_PREFLIGHT_UNAVAILABLE')
-        raw = read_regular(path)
-        if sha(raw) != spec.get('sha256'):
-            fail('INSTALLATION_DRIFT')
-        # Fixed approved helper; credential via stdin only. No stdout/log forwarding.
-        result = subprocess.run([path], input=canonical({'claude_token': token}), capture_output=True,
-                                timeout=30, env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
-        if result.returncode:
-            fail('BILLING_PREFLIGHT_UNAVAILABLE')
-        proof = strict_json(result.stdout)
+
+
+def authentication_error(event):
+    """Only typed error fields. IDs, hashes, result text and line numbers are data."""
+    if not isinstance(event, dict):
+        return False
+    if event.get('type') == 'result' and event.get('is_error') is not True:
+        return False
+    if event.get('type') == 'result' and event.get('is_error') is True:
+        scopes = [event, event.get('error'), *(event.get('errors') or [])]
+    elif event.get('status') == 'ERROR' or event.get('type') == 'error':
+        scopes = [event, event.get('error')]
     else:
-        proof = probe()
-    if (not isinstance(proof, dict) or proof.get('token_sha256') != sha(token.encode())
-            or type(proof.get('observed_at')) is not int or not 0 <= time.time() - proof['observed_at'] <= 30):
-        fail('OVERAGE_UNVERIFIED')
-    code, _ = fable.overage_policy(proof.get('rate_limit_info'))
-    if code:
-        fail(code)
+        return False
+    for error in scopes:
+        if not isinstance(error, dict):
+            continue
+        if any(error.get(k) in (401, '401') for k in ('status_code', 'http_status', 'api_error_status', 'status')):
+            return True
+        if error.get('type') == 'authentication_error' or error.get('error_code') in ('TOKEN_REISSUE_REQUIRED', 'AUTHENTICATION_ERROR'):
+            return True
+    return False
+
+
+def invoke_fable(fable, args):
+    """Observe original tool execution without changing its pinned file bytes."""
+    observed = {'model_attempted': False, 'failure': None}
+    original = fable.production_context
+    contexts = []
+    def context(*a, **kw):
+        ctx, version = original(*a, **kw)
+        contexts.append(ctx)
+        return ctx, version
+    fable.production_context = context
+    output = io.StringIO()
+    try:
+        try:
+            with redirect_stdout(output):
+                rc = fable.main(args)
+        except SystemExit as error:
+            rc = error.code if isinstance(error.code, int) else 1
+    finally:
+        fable.production_context = original
+        for ctx in contexts:
+            execution = getattr(ctx.runner, 'last_execution', {})
+            observed['model_attempted'] |= execution.get('model_attempted') is True
+            if isinstance(getattr(ctx, 'last_failure', None), dict):
+                observed['failure'] = ctx.last_failure
+    rendered = output.getvalue().strip()
+    try:
+        event = json.loads(rendered)
+        if not isinstance(event, dict):
+            event = {}
+    except ValueError:
+        event = {}
+    return rc, rendered, event, observed
+
+
+def execution_state(event, observed):
+    if event.get('result') in ('PASS', 'PASS_WITH_NOTES', 'FAIL', 'DECISION_REQUIRED'):
+        return 'RESULT'
+    failure = observed.get('failure') or {}
+    if event.get('status') == 'BUSY' or observed.get('model_attempted') is False or failure.get('error_code') == 'PRE_MODEL_FAILED':
+        return 'NOT_STARTED'
+    return 'UNKNOWN'
 
 
 class AuditGuard:
@@ -757,62 +858,96 @@ class AuditGuard:
             fail('STATE_CORRUPT')
         return value
 
-    def inspect(self, repository, number, head, comments):
-        self.cp.current()
+    def inspect(self, repository, number, head, comments, *, again=False):
+        self.cp.current(check_inventory=not again)
         key = f'{repository}#{number}@{head}'
-        entries = self.entries()
-        # Existing exact-head audit always wins dedupe, including FAIL. Never honor --again.
+        old = self.entries().get(key)
+        prior = None
         for c in reversed(comments):
             body = c.get('body') or ''
             match = re.search(r'ASTRA_AUDIT_V1\s+pr=(\d+)\s+head=([a-f0-9]{40})\s+result=(PASS_WITH_NOTES|PASS|FAIL|DECISION_REQUIRED)\b', body)
             if match and int(match[1]) == number and match[2] == head:
-                return {'status': 'AUDIT_EXISTS', 'result': match[3], 'head': head}
-        old = entries.get(key)
+                prior = {'status': 'AUDIT_EXISTS', 'result': match[3], 'head': head}
+                break
+        if again:
+            # Show bounded previous state only, no provider output or credentials.
+            print(json.dumps({'status': 'PREVIOUS_EXECUTION', 'state': (old or {}).get('state', 'NO_LOCAL_RECORD'),
+                              'result': (prior or old or {}).get('result'), 'head': head}))
+            if input('다시 실행할까요? [y/N] ').strip().lower() != 'y':
+                return {'status': 'CANCELLED', 'model_called': False}
+            return None
+        if prior:
+            return prior
         if old is not None:
             if old.get('state') == 'RESULT':
-                return {'status': 'AUDIT_EXISTS', 'head': head}
-            fail('UNKNOWN_REPRESENTATIVE_DECISION_REQUIRED')
+                return {'status': 'AUDIT_EXISTS', 'result': old.get('result'), 'head': head}
+            if old.get('state') != 'NOT_STARTED':
+                fail('UNKNOWN_REPRESENTATIVE_DECISION_REQUIRED')
         return None
 
-    def before(self, repository, number, head, comments):
-        existing = self.inspect(repository, number, head, comments)
-        if existing:
-            return existing
+    def before(self, repository, number, head, comments, *, again=False, admitted=False):
+        if not admitted:
+            existing = self.inspect(repository, number, head, comments, again=again)
+            if existing:
+                return existing
         key = f'{repository}#{number}@{head}'
         entries = self.entries()
-        entries[key] = {'state': 'STARTED', 'head': head}
+        old = entries.get(key)
+        history = list((old or {}).get('history', []))
+        if old:
+            history.append({k: v for k, v in old.items() if k != 'history'})
+        entries[key] = {'state': 'STARTED', 'head': head, 'history': history}
         atomic(self.journal, canonical(entries))
         self.cp.save(self.key, self.token, github_token=self.github_token)
         return None
 
-    def after(self, repository, number, head, completed):
+    def after(self, repository, number, head, event, observed):
         key = f'{repository}#{number}@{head}'
         entries = self.entries()
         if entries.get(key, {}).get('state') != 'STARTED':
             fail('STATE_CORRUPT')
-        # An error may have reached the provider. It never becomes permission to rerun.
-        entries[key]['state'] = 'RESULT' if completed else 'UNKNOWN'
+        entries[key]['state'] = execution_state(event, observed)
+        if event.get('result') in ('PASS', 'PASS_WITH_NOTES', 'FAIL', 'DECISION_REQUIRED'):
+            entries[key]['result'] = event['result']
         atomic(self.journal, canonical(entries))
         self.cp.save(self.key, self.token, github_token=self.github_token)
+
+
+def prepare_enrollment(cp, input_fn=input):
+    if cp.binding.exists() or cp.backend.head(missing=True) is not None:
+        fail('STATE_CAS_CONFLICT')
+    if cp.root.exists() and any(cp.root.iterdir()):
+        inventory(cp.root, cp.uid, cp.gid)
+        return
+    if input_fn('기존 기록 없이 시작합니다. 중복 감사는 PR 댓글로만 막습니다. 계속할까요? [y/N] ').strip().lower() != 'y':
+        fail('ENROLLMENT_CANCELLED')
+    protected_parent(cp.root, cp.boundary)
+    if not cp.root.exists():
+        cp.root.mkdir(mode=0o750)
+        os.chmod(cp.root, 0o750)
+        os.chown(cp.root, 0, cp.gid)
+    # An explicit initial-registration marker; restore never manufactures this.
+    runs = cp.root / 'runs'
+    runs.mkdir(mode=0o755, exist_ok=True)
+    os.chmod(runs, 0o755)
+    atomic(cp.root / 'initial-registration.json', canonical({'format': 'HR_D3_INITIAL_REGISTRATION_V1',
+                                                            'without_existing_records_confirmed': True}))
+    inventory(cp.root, cp.uid, cp.gid)
 
 
 def recover_main(argv=None):
     parser = argparse.ArgumentParser(prog='aiops-recover')
     parser.add_argument('--reissue-token', action='store_true')
     parser.add_argument('--preflight', action='store_true')
-    parser.add_argument('--enroll', action='store_true', help='initial host only; requires protected enrollment_commit and an existing ledger')
+    parser.add_argument('--enroll', action='store_true', help='create-only registration; explicitly confirm if no prior ledger exists')
     args = parser.parse_args(argv)
     try:
         cfg = config()
         with barrier('/etc/aiops/recovery.lock'):
-            inst, cp, fable_item, gh = components(cfg)
+            inst, cp, fable_item, gh = components(cfg, create_account=True)
             inst.install(lambda item: fetch_artifact(item, cfg))
-            ensure_account(cfg)
             if args.enroll:
-                expected = cfg.get('enrollment_commit')
-                if not re.fullmatch('[a-f0-9]{40}', expected or '') or cp.binding.exists() or expected != cp.backend.head():
-                    fail('ENROLLMENT_NOT_AUTHORIZED')
-                inventory(cp.root, cp.uid, cp.gid)
+                prepare_enrollment(cp)
                 password = getpass.getpass('상태 암호: ')
                 salt = secrets.token_bytes(16)
                 key = derive(password, salt)
@@ -821,7 +956,7 @@ def recover_main(argv=None):
                 token_module = pinned_module(Path(token_item['destination']), token_item['sha256'])
                 token = token_module.reissue(cfg, inst)
                 atomic(TOKEN, token['value'].encode())
-                cp.save(key, token, github_token=gh if cfg.get('store_github_token') is True else None, enrollment=True, expected=expected, salt=salt)
+                cp.save(key, token, github_token=gh if cfg.get('store_github_token') is True else None, enrollment=True, salt=salt)
                 keyring('set', key)
                 token_module.cleanup(cfg)
                 result = {'status': 'AUDIT_HOST_ENROLLED'}
@@ -864,7 +999,7 @@ def recover_main(argv=None):
 
 def fable_main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0] not in ('audit', 'consult', 'preflight') or '--again' in args:
+    if not args or args[0] not in ('audit', 'consult', 'preflight') or ('--again' in args and args[0] != 'audit'):
         print(json.dumps({'status': 'HOLD', 'reason': 'AUDIT_HOST_ONLY'}))
         return 1
     if args[0] == 'preflight' and not confirm_model():
@@ -875,8 +1010,8 @@ def fable_main(argv=None):
         with barrier('/etc/aiops/recovery.lock'):
             inst, cp, fable_item, gh = components(cfg)
             inst.verify()
-            ensure_account(cfg, create=False)
-            local = cp.current()
+            again = args[0] == 'audit' and '--again' in args
+            cp.current(check_inventory=not again)
             key = keyring('get')
             _, _, payload, _ = cp.fetch(key=key)
             token = payload['claude_token']
@@ -899,36 +1034,32 @@ def fable_main(argv=None):
                 if number < 1:
                     fail('REQUEST_REJECTED')
                 comments = fable.GitHub(gh).pages(f'/repos/{target.repository}/issues/{number}/comments')
-                existing = guard.inspect(target.repository, number, target.head, comments)
+                existing = guard.inspect(target.repository, number, target.head, comments, again=again)
                 if existing:
                     print(json.dumps(existing))
                     return 0
             else:
                 # Consult/preflight also persist a one-shot start under exact arguments.
                 target = argparse.Namespace(repository='BeautifulMind-JT/ai-ops-control-plane',
-                                            head=hashlib.sha1(canonical([args, sha(token['value'].encode())])).hexdigest())
+                                            head=secrets.token_hex(20) if args[0] == 'preflight' else hashlib.sha1(canonical([args, sha(token['value'].encode())])).hexdigest())
                 number = 0
                 comments = []
-                existing = guard.inspect(target.repository, number, target.head, comments)
+                existing = guard.inspect(target.repository, number, target.head, comments, again=again)
                 if existing:
                     print(json.dumps(existing))
                     return 0
             warning = token_warning(token)
-            billing(cfg, fable, token['value'])
-            guard.before(target.repository, number, target.head, comments)
-            output = io.StringIO()
-            try:
-                with redirect_stdout(output):
-                    rc = fable.main(args)
-                guard.after(target.repository, number, target.head, rc == 0)
-            except BaseException:
-                # STARTED is already remote; no rollback or second model run after interruption.
-                raise
-            rendered = output.getvalue().strip()
-            if '401' in rendered or 'authentication_error' in rendered.lower():
-                print(json.dumps({'status': 'HOLD', 'reason': 'TOKEN_REISSUE_REQUIRED', 'prefix_valid': True, 'length': len(token['value']), 'command': 'aiops-recover --reissue-token'}))
-                return 1
+            guard.before(target.repository, number, target.head, comments, again=again, admitted=True)
+            rc, rendered, event, observed = invoke_fable(fable, args)
+            guard.after(target.repository, number, target.head, event, observed)
+            # Preserve the actual audit output, including normal IDs containing 401.
             print(rendered)
+            failure = observed.get('failure') or {}
+            if authentication_error(event) or failure.get('api_error_status') == 401:
+                print(json.dumps({'status': 'HOLD', 'reason': 'TOKEN_REISSUE_REQUIRED',
+                                  'prefix_valid': True, 'length': len(token['value']),
+                                  'command': 'aiops-recover --reissue-token'}))
+                return 1
             if warning['expires_within_30_days']:
                 print(json.dumps({'warning': 'TOKEN_EXPIRES_WITHIN_30_DAYS', **warning}))
             return rc
