@@ -73,7 +73,7 @@ def api(suffix):
 def directory(path):
  if not os.path.lexists(path):
   directory(path.parent); path.mkdir(mode=0o755); os.chmod(path, 0o755)
- info = path.lstat()
+ info = os.lstat(path)
  if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
   raise Stop('BOOTSTRAP_PARENT_DRIFT')
 def parent(path):
