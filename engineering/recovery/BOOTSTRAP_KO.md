@@ -55,12 +55,12 @@ REPOSITORY = 'BeautifulMind-JT/ai-ops-control-plane'
 PINNED_SHA256 = {
  "engineering/recovery/aiops-fable": "e59e29e068978b6e901653d40cdbd00f463c8b52ba44827d057c8a81f7579b97",
  "engineering/recovery/aiops-recover": "30cd439ab638631a475db6d4dbfb9ef4b1c2b3b08a0ce763a035ef8d26c30a29",
- "engineering/scripts/control_plane_recover.py": "567602b3efe2529a2302a2206ced14fb87024e9f12371be067523bab4dea0c6f",
- "engineering/scripts/control_plane_recover_token.py": "8ad84c6d334d66a6fd07f0d57cdb2a48364183837cc91ef2960ae3055cb42eb4",
+ "engineering/scripts/control_plane_recover.py": "a18114cf177f0cb652c4f9b7ab9567788a631896946aad72b0601214258c27d4",
+ "engineering/scripts/control_plane_recover_token.py": "7d7168caedd17300a2d500aa67ffc0545e132f40e722197d6fc201b5328928f4",
  "engineering/recovery/claude": "bf32f8635cbaf9026b061584bc5a3f55cfd88d3742eae261a400f30a0ee8fc0f",
  "engineering/scripts/control_plane_fable.py": "b3d49498dc0364b10db9e4d034bd252b5fce1201475e4c7b29c692c7fb3fbfd6",
- "engineering/recovery/manifest.json": "9db78e6a89b774cf8c9c50ea35c9d90ba14c9c10d5a7142e5a701cf1bd91a76d",
- "engineering/recovery/recovery.example.json": "b7a87e1e99eaff05b6eaa99390b4cdfd8abf6fd0e318d468f4657e86be81911c"
+ "engineering/recovery/manifest.json": "4ea150c78b542ad1337d548a4a48d0365bf3dd3b48e8666535f9e6f86c4fcbc9",
+ "engineering/recovery/recovery.example.json": "7a3243b93821263623290561eef03beb1eb0e87c44ec0fee5dad7f385049b301"
 }
 INSTALL = {
  'engineering/recovery/aiops-fable': ('/opt/aiops/bin/aiops-fable', 0o755),

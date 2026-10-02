@@ -841,10 +841,15 @@ def ensure_account(cfg, *, create=True):
             or set(os.getgrouplist(item['name'], existing.pw_gid)) != {existing.pw_gid}):
         fail('INSTALLATION_DRIFT')
     # Query the effective sudo policy, not just membership in a group named sudo.
+    # Listing another user exits 0 (sudo 1.9.15/1.9.16) or 1 with this exact line
+    # when that user has no rule; any listed rule refuses the account.
     if Path('/usr/bin/sudo').exists():
         policy = subprocess.run(['/usr/bin/sudo', '-n', '-l', '-U', item['name']], capture_output=True,
                                 env={'PATH': '/usr/bin:/bin', 'LANG': 'C'}, timeout=30)
-        if policy.returncode != 1 or b'not allowed to run sudo' not in policy.stdout + policy.stderr:
+        listing = policy.stdout + policy.stderr
+        if (policy.returncode not in (0, 1)
+                or b'User ' + item['name'].encode() + b' is not allowed to run sudo' not in listing
+                or b'may run the following commands' in listing):
             fail('AUDITOR_SUDO_FORBIDDEN')
     home = Path(item['home'])
     if not os.path.lexists(home):

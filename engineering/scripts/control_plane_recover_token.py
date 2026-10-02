@@ -130,7 +130,8 @@ def login_url(screen):
                 break
         candidate = ''.join(parts)
         parsed = urllib.parse.urlparse(candidate)
-        if (parsed.scheme == 'https' and parsed.hostname in ('claude.ai', 'console.anthropic.com')
+        # CLI 2.1.286 setup-token shows https://claude.com/cai/oauth/authorize?...
+        if (parsed.scheme == 'https' and parsed.hostname in ('claude.com', 'claude.ai', 'console.anthropic.com')
                 and not parsed.username and not parsed.password and len(candidate) <= 16384
                 and 'sk-ant-' not in candidate):
             return candidate
