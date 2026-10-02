@@ -4,7 +4,7 @@
 Brings a reset host to the state the control plane's runtime expects: accounts,
 protected directories, the host admission helper, the four builder lanes
 (wrapper, adapter, supervisor), the boundary hook, the runner launch wrapper and
-the ordinary program sudoers; and preserves the host ledger, host policy and
+the runner/lane sudoers; and preserves the host ledger, the lane configs and
 (opt-in, encrypted) lane logins so the next reset does not lose them.
 
 It adds no daemon, timer or boot hook. Every command is an operator command.
@@ -41,7 +41,6 @@ RECOVER_MODULE = Path('/opt/aiops/lib/control_plane_recover.py')
 RECOVERY_MANIFEST = Path('/etc/aiops/recovery-manifest.json')
 LOCK = Path('/etc/aiops/hostpack.lock')
 BINDING = Path('/etc/aiops/hostpack-binding.json')
-RECEIPT = Path('/etc/aiops/hostpack-install.json')
 STATE_FORMAT = 'AIOPS_HOSTPACK_STATE_V1'
 MANIFEST_SCHEMA = 'AIOPS_HOSTPACK_MANIFEST_V1'
 CONFIG_SCHEMA = 'AIOPS_HOSTPACK_CONFIG_V1'
@@ -54,11 +53,11 @@ LANES = ('DEVIN', 'GROK_BUILD', 'GLM', 'CURSOR')
 REPOSITORIES = ('BeautifulMind-JT/kix-protocol', 'BeautifulMind-JT/ZARI',
                 'BeautifulMind-JT/film-unit-mv-studio', 'BeautifulMind-JT/maeum-gyeol',
                 'BeautifulMind-JT/kix-commerce-apps')
+CONTROL_REPOSITORY = 'BeautifulMind-JT/ai-ops-control-plane'
 
-# lane -> (unix account, wrapper, adapter, supervisor, repo adapter dir, login paths under HOME).
-# Account names are the adapters' own LANE_USER constants; login paths are the CLI state
-# directories each provider keeps under HOME (to be confirmed per provider on the live host;
-# a missing path is simply not captured).
+# Account names are the adapters' own LANE_USER constants. Login paths are the CLI state
+# directories each provider keeps under HOME; they are confirmed per provider on the live
+# host and a path that does not exist is simply not captured.
 LANE_SPECS = {
     'DEVIN': {'account': 'astra-builder-devin', 'wrapper': 'astra-builder-devin',
               'adapter': 'astra-devin-adapter', 'supervisor': 'astra-devin-supervisor',
@@ -76,18 +75,24 @@ LANE_SPECS = {
 CONTROL_ACCOUNT = 'astra-control'
 DEFAULT_RUNNER = 'astra-runner'
 
-SUDOERS_SOURCE = '.github/control-plane/sudoers-aiops-program.example'
-SUDOERS_DESTINATION = '/etc/sudoers.d/aiops-program'
+PROGRAM_SUDOERS_SOURCE = '.github/control-plane/sudoers-aiops-program.example'
+PROGRAM_SUDOERS_DESTINATION = '/etc/sudoers.d/aiops-program'
+BASE_SUDOERS_DESTINATION = '/etc/sudoers.d/aiops-base'
+BOUNDARY_EXAMPLE_SOURCE = '.github/control-plane/boundary-policy.example.json'
+BOUNDARY_POLICY = '/opt/astra/boundary/policy.json'
+BOUNDARY_EXPECTED = '/etc/astra/boundary-expected.json'
 LEDGER_DIR = '/var/lib/astra/control'
 LEDGER_DB = 'admission.sqlite3'
 HOST_POLICY = '/etc/astra/control-plane-host.json'
 LANE_CONFIG_DIR = '/etc/astra'
+LANES_HOME = '/var/lib/astra-lanes'
+HELPER = '/opt/astra/bin/astra-host-control'
 
 
 class PackError(RuntimeError):
     def __init__(self, code, detail=None):
         self.code = code
-        self.detail = detail  # Bounded, secret-free: names and counts only.
+        self.detail = detail  # Bounded and secret-free: names and counts only.
         super().__init__(code)
 
 
@@ -125,7 +130,7 @@ def result(status, **fields):
 
 def file_specs():
     """The complete, fixed list of host-installed artifacts: (repo path, destination, mode, group, category)."""
-    specs = [('scripts/control_plane_host.py', '/opt/astra/bin/astra-host-control', 0o755, 'root', 'host'),
+    specs = [('scripts/control_plane_host.py', HELPER, 0o755, 'root', 'host'),
              ('scripts/control_plane_boundary.py', '/opt/astra/boundary/control_plane_boundary.py', 0o644, CONTROL_ACCOUNT, 'boundary'),
              ('scripts/control_plane_boundary_hook.sh', '/opt/astra/boundary/control_plane_boundary_hook.sh', 0o755, CONTROL_ACCOUNT, 'boundary'),
              ('hostpack/astra-runner-launch', '/opt/astra/bin/astra-runner-launch', 0o755, 'root', 'runner')]
@@ -142,7 +147,7 @@ def account_specs(runner_user=DEFAULT_RUNNER):
                 {'name': runner_user, 'role': 'runner', 'home': '/var/lib/astra-runner'}]
     for lane in LANES:
         accounts.append({'name': LANE_SPECS[lane]['account'], 'role': 'lane:' + lane,
-                         'home': '/var/lib/astra-lanes/' + LANE_SPECS[lane]['account']})
+                         'home': LANES_HOME + '/' + LANE_SPECS[lane]['account']})
     return accounts
 
 
@@ -153,12 +158,13 @@ def build_manifest(root):
         data = (Path(root) / source).read_bytes()
         files.append({'cache_path': 'engineering/' + source, 'destination': destination, 'mode': mode,
                       'group': group, 'sha256': sha(data), 'category': category})
-    sudoers = (Path(root) / SUDOERS_SOURCE).read_bytes()
     return {'schema': MANIFEST_SCHEMA, 'files': files,
-            'sudoers': {'cache_path': 'engineering/' + SUDOERS_SOURCE, 'destination': SUDOERS_DESTINATION,
-                        'mode': 0o440, 'source_sha256': sha(sudoers), 'placeholder': 'RUNNER_USER'},
-            'accounts': account_specs(), 'lanes': {lane: {k: v for k, v in LANE_SPECS[lane].items() if k != 'source'}
-                                                   for lane in LANES}}
+            'program_sudoers': {'cache_path': 'engineering/' + PROGRAM_SUDOERS_SOURCE, 'destination': PROGRAM_SUDOERS_DESTINATION,
+                                'mode': 0o440, 'source_sha256': sha((Path(root) / PROGRAM_SUDOERS_SOURCE).read_bytes()),
+                                'placeholder': 'RUNNER_USER'},
+            'boundary': {'example_cache_path': 'engineering/' + BOUNDARY_EXAMPLE_SOURCE,
+                         'example_sha256': sha((Path(root) / BOUNDARY_EXAMPLE_SOURCE).read_bytes())},
+            'accounts': account_specs()}
 
 
 def validate_manifest(manifest):
@@ -168,18 +174,35 @@ def validate_manifest(manifest):
     expected = {destination for _, destination, _, _, _ in file_specs()}
     for item in manifest.get('files', []):
         path = item.get('destination', '')
-        if (not path.startswith(('/opt/astra/', '/etc/astra/')) or '..' in Path(path).parts or path in seen
+        if (not path.startswith('/opt/astra/') or '..' in Path(path).parts or path in seen
                 or not SHA256.fullmatch(item.get('sha256', '')) or item.get('mode') not in (0o644, 0o755)
                 or item.get('group') not in ('root', CONTROL_ACCOUNT)):
             fail('MANIFEST_REJECTED')
         seen.add(path)
     if seen != expected:
         fail('MANIFEST_REJECTED')
-    sudoers = manifest.get('sudoers') or {}
-    if (sudoers.get('destination') != SUDOERS_DESTINATION or sudoers.get('mode') != 0o440
-            or not SHA256.fullmatch(sudoers.get('source_sha256', '')) or sudoers.get('placeholder') != 'RUNNER_USER'):
+    program = manifest.get('program_sudoers') or {}
+    if (program.get('destination') != PROGRAM_SUDOERS_DESTINATION or program.get('mode') != 0o440
+            or not SHA256.fullmatch(program.get('source_sha256', '')) or program.get('placeholder') != 'RUNNER_USER'):
+        fail('MANIFEST_REJECTED')
+    if not SHA256.fullmatch((manifest.get('boundary') or {}).get('example_sha256', '')):
         fail('MANIFEST_REJECTED')
     return manifest
+
+
+def evidence_url(value):
+    """Same rule as the host helper's validate_policy: a real http(s) URL, not a placeholder host."""
+    from urllib.parse import urlsplit
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname or ''
+        return (parsed.scheme in ('http', 'https') and bool(host) and not parsed.username
+                and host not in ('localhost', 'example.com', 'example.org', 'example.net')
+                and not host.endswith(('.invalid', '.example')) and not any(c.isspace() for c in value))
+    except ValueError:
+        return False
 
 
 def validate_config(cfg, manifest_sha256=None):
@@ -198,26 +221,29 @@ def validate_config(cfg, manifest_sha256=None):
     repos = cfg.get('allowed_repositories', [])
     if not isinstance(repos, list) or not repos or any(r not in REPOSITORIES for r in repos):
         fail('CONFIG_REJECTED', 'allowed_repositories')
-    if not isinstance(cfg.get('max_active_sessions'), int) or not 1 <= cfg['max_active_sessions'] <= len(builders):
+    sessions = cfg.get('max_active_sessions')
+    if type(sessions) is not int or not 1 <= sessions <= len(builders):
         fail('CONFIG_REJECTED', 'max_active_sessions')
     limit = cfg.get('max_launches_per_24h')
-    if limit is not None and (not isinstance(limit, int) or limit < 1):
+    if limit is not None and (type(limit) is not int or limit < 1):
         fail('CONFIG_REJECTED', 'max_launches_per_24h')
     logins = cfg.get('preserve_logins', [])
     if not isinstance(logins, list) or any(b not in LANES for b in logins):
         fail('CONFIG_REJECTED', 'preserve_logins')
-    if cfg.get('state_repository') != 'BeautifulMind-JT/aiops-state' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,60}', cfg.get('state_branch', '')):
+    pointer = cfg.get('boundary_evidence_pointer', 'PENDING')
+    if not isinstance(pointer, str) or not pointer or len(pointer) > 300:
+        fail('CONFIG_REJECTED', 'boundary_evidence_pointer')
+    if cfg.get('state_repository') != 'BeautifulMind-JT/aiops-state' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,60}', str(cfg.get('state_branch', ''))):
         fail('CONFIG_REJECTED', 'state')
     return cfg
 
 
-# --------------------------------------------------------------------------- host policy
+# --------------------------------------------------------------------------- rendered host files
 
 def render_host_policy(cfg, uids):
-    """Policy for control-plane-host.json from facts only: real numeric UIDs and the operator's config."""
-    lanes = {lane: uids[LANE_SPECS[lane]['account']] for lane in LANES}
+    """control-plane-host.json from facts only: real numeric UIDs and the operator's config."""
     return {'control_uid': uids[CONTROL_ACCOUNT], 'runner_uid': uids[cfg.get('runner_user', DEFAULT_RUNNER)],
-            'builder_uids': lanes,
+            'builder_uids': {lane: uids[LANE_SPECS[lane]['account']] for lane in LANES},
             'allowed_repositories': list(cfg['allowed_repositories']),
             'enabled_builders': list(cfg['enabled_builders']),
             'max_active_sessions': cfg['max_active_sessions'],
@@ -225,19 +251,66 @@ def render_host_policy(cfg, uids):
             'ledger_path': LEDGER_DIR + '/' + LEDGER_DB,
             'wrapper_paths': {lane: '/opt/astra/bin/' + LANE_SPECS[lane]['wrapper'] for lane in LANES},
             'boundary_evidence_pointer': cfg.get('boundary_evidence_pointer', 'PENDING'),
-            'control_repository': 'BeautifulMind-JT/ai-ops-control-plane',
+            'control_repository': CONTROL_REPOSITORY,
             'control_source_sha': cfg['source_commit'],
             'control_runtime_enabled': False}
 
 
-def render_sudoers(source_bytes, runner_user):
+def render_base_sudoers(runner_user):
+    """The runner's fixed host commands and the control account's lane commands that the wrappers use.
+
+    The program example adds status --lanes / task-status / reap / materialize-*, CURSOR preflight and
+    every --quiescence rule; these are the rules it calls "existing": launch, the other preflights,
+    status by launch id, and the lane adapters' --preflight / --launch. No shell, init, reconcile or root.
+    """
+    if not SAFE_NAME.fullmatch(runner_user):
+        fail('CONFIG_REJECTED', 'runner_user')
+    lines = ['# /etc/sudoers.d/aiops-base  (root:root 0440; rendered by aiops-hostpack, no dot in the file name)',
+             '# Fixed runner -> astra-control host commands and control -> lane adapter commands. Nothing else.',
+             '',
+             'Cmnd_Alias AIOPS_BASE_HOST = \\',
+             f'    {HELPER} launch, \\']
+    for builder in ('DEVIN', 'GROK_BUILD', 'GLM'):
+        lines.append(f'    {HELPER} preflight --builder-id {builder}, \\')
+    lines.append(f'    {HELPER} ^status --launch-request-id [0-9a-f]{{24}}$')
+    lines += ['', f'{runner_user} ALL=({CONTROL_ACCOUNT}) NOPASSWD: AIOPS_BASE_HOST', '']
+    for lane in ('DEVIN', 'GROK_BUILD', 'GLM'):
+        spec = LANE_SPECS[lane]
+        adapter = '/opt/astra/libexec/' + spec['adapter']
+        lines.append(f"{CONTROL_ACCOUNT} ALL=({spec['account']}) NOPASSWD: {adapter} --preflight, {adapter} --launch")
+    return ('\n'.join(lines) + '\n').encode()
+
+
+def render_program_sudoers(source_bytes, runner_user):
     text = source_bytes.decode()
-    if 'RUNNER_USER' not in text or not SAFE_NAME.fullmatch(runner_user):
+    if not SAFE_NAME.fullmatch(runner_user) or len(re.findall(r'(?m)^RUNNER_USER ', text)) != 1:
         fail('MANIFEST_REJECTED', 'sudoers placeholder')
     rendered = re.sub(r'(?m)^RUNNER_USER ', runner_user + ' ', text)
     if re.search(r'(?m)^RUNNER_USER\b', rendered):
         fail('MANIFEST_REJECTED', 'sudoers placeholder left')
     return rendered.encode()
+
+
+def render_boundary_policy(example, *, repository_id, owner_id, actor_id, workflow_sha, main_ref='refs/heads/main'):
+    """Boundary policy for exactly one main commit: GITHUB_WORKFLOW_SHA moves with every main commit."""
+    if not COMMIT.fullmatch(workflow_sha):
+        fail('BOUNDARY_REJECTED', 'workflow commit')
+    for value in (repository_id, owner_id, actor_id):
+        if type(value) is not int or value < 1:
+            fail('BOUNDARY_REJECTED', 'github ids')
+    rule = {'name': 'control-plane-runtime-main',
+            'claims': {'env:GITHUB_REPOSITORY': CONTROL_REPOSITORY, 'env:GITHUB_REPOSITORY_ID': str(repository_id),
+                       'env:GITHUB_REPOSITORY_OWNER_ID': str(owner_id), 'env:GITHUB_REF': main_ref,
+                       'env:GITHUB_WORKFLOW_REF': f'{CONTROL_REPOSITORY}/.github/workflows/control-plane-runtime.yml@{main_ref}',
+                       'env:GITHUB_WORKFLOW_SHA': workflow_sha, 'env:GITHUB_EVENT_NAME': 'workflow_dispatch',
+                       'env:GITHUB_JOB': 'control', 'env:GITHUB_ACTOR_ID': str(actor_id),
+                       'event:repository.id': repository_id, 'event:repository.owner.id': owner_id,
+                       'event:sender.id': actor_id}}
+    policy = dict(example)
+    policy['policy_id'] = 'prod-boundary-' + workflow_sha[:12]
+    policy['description'] = 'Rendered by aiops-hostpack for one main commit; re-render after every main commit.'
+    policy['allow'] = [rule]
+    return policy
 
 
 # --------------------------------------------------------------------------- crypto and state
@@ -276,11 +349,12 @@ def decrypt(envelope, cipher, key):
 
 
 def safe_member(name):
-    parts = Path(name).parts
-    if (not isinstance(name, str) or not parts or Path(name).is_absolute() or str(Path(*parts)) != name
-            or any(p in ('', '.', '..') for p in parts)):
+    if not isinstance(name, str) or not name:
         fail('STATE_CORRUPT')
-    return Path(*parts)
+    path = Path(name)
+    if path.is_absolute() or str(path) != name or any(p in ('', '.', '..') for p in path.parts):
+        fail('STATE_CORRUPT')
+    return path
 
 
 def read_tree_files(base, relative_roots, *, limit, label):
@@ -290,8 +364,13 @@ def read_tree_files(base, relative_roots, *, limit, label):
         top = Path(base) / rel
         if not os.path.lexists(top):
             continue
+        if os.path.islink(top):
+            fail('STATE_UNSUPPORTED_FILE', f'{label}: {rel}')
         for current, dirs, names in os.walk(top, followlinks=False):
             dirs.sort()
+            for name in dirs:
+                if os.path.islink(Path(current) / name):
+                    fail('STATE_UNSUPPORTED_FILE', f'{label}: {(Path(current) / name).relative_to(base)}')
             for name in sorted(names):
                 path = Path(current) / name
                 info = os.lstat(path)
@@ -303,14 +382,11 @@ def read_tree_files(base, relative_roots, *, limit, label):
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
                 with os.fdopen(fd, 'rb') as stream:
                     out.append((str(path.relative_to(base)), stat.S_IMODE(info.st_mode), stream.read()))
-            for name in dirs:
-                if os.path.islink(Path(current) / name):
-                    fail('STATE_UNSUPPORTED_FILE', f'{label}: {(Path(current) / name).relative_to(base)}')
     return out
 
 
 def sqlite_snapshot(db_path):
-    """One consistent copy of the ledger through SQLite's own backup API (never a raw copy of a live WAL)."""
+    """One consistent copy through SQLite's own backup API (never a raw copy of a live WAL)."""
     source = sqlite3.connect(Path(db_path).as_uri() + '?mode=ro', uri=True, timeout=30)
     try:
         if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
@@ -331,7 +407,7 @@ def sqlite_snapshot(db_path):
 
 
 def collect_payload(prefix, cfg, manifest_sha256):
-    """The preserved host state. Credentials of lanes are included only for lanes the operator opted in."""
+    """The preserved host state. Lane logins are included only for lanes the operator opted in."""
     prefix = Path(prefix)
     entries = []
 
@@ -344,33 +420,30 @@ def collect_payload(prefix, cfg, manifest_sha256):
     if os.path.lexists(db):
         add('ledger-db', LEDGER_DB, 0o600, sqlite_snapshot(db), CONTROL_ACCOUNT)
         for name in sorted(os.listdir(ledger)):
-            # Everything else the helper keeps there (locks, census files, side files) except the live SQLite trio.
-            if name == LEDGER_DB or name.startswith(LEDGER_DB + '-'):
+            # Everything else the helper keeps there except the live SQLite trio (the snapshot replaces it)
+            # and kernel lock files (a lock does not survive a reset; its owner recreates it empty).
+            if name == LEDGER_DB or name.startswith(LEDGER_DB + '-') or name.endswith('.lock'):
                 continue
             path = ledger / name
             info = os.lstat(path)
             if not stat.S_ISREG(info.st_mode):
                 fail('STATE_UNSUPPORTED_FILE', f'ledger: {name}')
-            if name.endswith('.lock'):
-                continue  # kernel locks do not survive a reset; recreated empty by their owner
             add('ledger-file', name, stat.S_IMODE(info.st_mode), path.read_bytes(), CONTROL_ACCOUNT)
-    policy = prefix / HOST_POLICY.lstrip('/')
-    if os.path.lexists(policy):
-        add('host-policy', 'control-plane-host.json', 0o644, policy.read_bytes(), 'root')
-    for lane in LANES:
-        lane_config = prefix / LANE_CONFIG_DIR.lstrip('/') / f'{LANE_SPECS[lane]["wrapper"].replace("astra-builder-", "")}-lane.json'
-        if os.path.lexists(lane_config):
-            add('lane-config', lane_config.name, 0o644, lane_config.read_bytes(), 'root')
+    config_dir = prefix / LANE_CONFIG_DIR.lstrip('/')
+    if config_dir.is_dir():
+        for path in sorted(config_dir.glob('*-lane.json')):
+            if path.is_file() and not path.is_symlink():
+                add('lane-config', path.name, 0o644, path.read_bytes(), 'root')
     for lane in cfg.get('preserve_logins', []):
         account = LANE_SPECS[lane]['account']
-        home = prefix / 'var/lib/astra-lanes' / account
+        home = prefix / LANES_HOME.lstrip('/') / account
         for rel, mode, data in read_tree_files(home, LANE_SPECS[lane]['logins'], limit=MAX_LOGIN_BYTES, label='login ' + lane):
-            add('lane-login', f'{lane}/{rel}', mode & 0o700 | 0o600, data, account)
+            add('lane-login', f'{lane}/{rel}', (mode & 0o700) | 0o600, data, account)
     return {'format': STATE_FORMAT, 'created': int(time.time()), 'manifest_sha256': manifest_sha256,
             'source_commit': cfg['source_commit'], 'entries': entries}
 
 
-def validate_payload(payload, manifest_sha256, source_commit):
+def validate_payload(payload, source_commit):
     if (not isinstance(payload, dict) or payload.get('format') != STATE_FORMAT
             or payload.get('source_commit') != source_commit or not isinstance(payload.get('entries'), list)):
         fail('STATE_CORRUPT')
@@ -381,13 +454,15 @@ def validate_payload(payload, manifest_sha256, source_commit):
             kind, path, mode = entry['kind'], entry['path'], entry['mode']
         except (KeyError, ValueError, TypeError):
             fail('STATE_CORRUPT')
-        if (kind not in ('ledger-db', 'ledger-file', 'host-policy', 'lane-config', 'lane-login')
+        if (kind not in ('ledger-db', 'ledger-file', 'lane-config', 'lane-login')
                 or sha(data) != entry.get('sha256') or len(data) != entry.get('size') or (kind, path) in seen
-                or not isinstance(mode, int) or mode & ~0o777):
+                or type(mode) is not int or mode & ~0o777):
             fail('STATE_CORRUPT')
         seen.add((kind, path))
-        safe_member(path)
-        if kind == 'lane-login' and path.split('/', 1)[0] not in LANES:
+        member = safe_member(path)
+        if kind == 'lane-login' and (len(member.parts) < 2 or member.parts[0] not in LANES):
+            fail('STATE_CORRUPT')
+        if kind == 'lane-config' and (len(member.parts) != 1 or not path.endswith('-lane.json')):
             fail('STATE_CORRUPT')
     return payload
 
@@ -397,13 +472,12 @@ def destination_for(entry, prefix):
     kind, path = entry['kind'], safe_member(entry['path'])
     if kind in ('ledger-db', 'ledger-file'):
         return prefix / LEDGER_DIR.lstrip('/') / path
-    if kind == 'host-policy':
-        return prefix / HOST_POLICY.lstrip('/')
     if kind == 'lane-config':
         return prefix / LANE_CONFIG_DIR.lstrip('/') / path
-    lane, rest = path.parts[0], Path(*path.parts[1:])
-    return prefix / 'var/lib/astra-lanes' / LANE_SPECS[lane]['account'] / rest
+    return prefix / LANES_HOME.lstrip('/') / LANE_SPECS[path.parts[0]]['account'] / Path(*path.parts[1:])
 
+
+# --------------------------------------------------------------------------- the pack
 
 class Hostpack:
     """Everything under one injectable root so the offline tests never touch the real host."""
@@ -419,6 +493,9 @@ class Hostpack:
     def path(self, absolute):
         return self.prefix / absolute.lstrip('/')
 
+    def item(self, destination):
+        return next(i for i in self.manifest['files'] if i['destination'] == destination)
+
     # ---- read-only inspection -------------------------------------------------
 
     def check_file(self, item):
@@ -430,15 +507,26 @@ class Hostpack:
             return 'DRIFT'
         if self.ops.enforce_ownership and (info.st_uid != self.owner or info.st_mode & 0o022):
             return 'DRIFT'
-        if sha(path.read_bytes()) != item['sha256']:
-            return 'DRIFT'
-        return 'OK'
+        return 'OK' if sha(path.read_bytes()) == item['sha256'] else 'DRIFT'
 
     def accounts(self):
-        out = {}
-        for item in account_specs(self.runner):
-            out[item['name']] = self.ops.lookup_user(item['name'])
-        return out
+        return {item['name']: self.ops.lookup_user(item['name']) for item in account_specs(self.runner)}
+
+    def sudoers_pair(self):
+        program = self.manifest['program_sudoers']
+        source = self.ops.read_cached(self, program['cache_path'], program['source_sha256'])
+        return {PROGRAM_SUDOERS_DESTINATION: render_program_sudoers(source, self.runner),
+                BASE_SUDOERS_DESTINATION: render_base_sudoers(self.runner)}
+
+    def sudoers_state(self):
+        state = {}
+        for destination, rendered in self.sudoers_pair().items():
+            path = self.path(destination)
+            if not os.path.lexists(path):
+                state[destination] = 'MISSING'
+            else:
+                state[destination] = 'OK' if path.read_bytes() == rendered else 'DRIFT'
+        return state
 
     def verify(self):
         """Read-only. Returns per-component status and the exact next operator steps."""
@@ -447,64 +535,81 @@ class Hostpack:
         components['files'] = {'status': 'OK' if all(v == 'OK' for v in files.values()) else 'HOLD',
                                'missing': sorted(k for k, v in files.items() if v == 'MISSING'),
                                'drift': sorted(k for k, v in files.items() if v == 'DRIFT')}
-        if components['files']['drift']:
-            steps.append('Differing installed files are drift: stop and report them; nothing is overwritten.')
-        elif components['files']['missing']:
-            steps.append('aiops-hostpack install')
         users = self.accounts()
         components['accounts'] = {'status': 'OK' if all(users.values()) else 'HOLD',
                                   'missing': sorted(k for k, v in users.items() if not v)}
-        policy_path = self.path(HOST_POLICY)
-        if not os.path.lexists(policy_path):
+        policy = self.path(HOST_POLICY)
+        if not os.path.lexists(policy):
             components['host_policy'] = {'status': 'HOLD', 'reason': 'MISSING'}
         else:
-            components['host_policy'] = {'status': 'OK' if self.policy_matches(users) else 'HOLD',
-                                         'reason': None if self.policy_matches(users) else 'DRIFT'}
-        sudoers = self.path(SUDOERS_DESTINATION)
-        components['sudoers'] = {'status': 'OK' if os.path.lexists(sudoers) and self.sudoers_bytes() == sudoers.read_bytes() else 'HOLD'}
+            ok = self.policy_matches(users)
+            components['host_policy'] = {'status': 'OK' if ok else 'HOLD', 'reason': None if ok else 'DRIFT_OR_ACCOUNTS_MISSING'}
+        sudoers = self.sudoers_state()
+        components['sudoers'] = {'status': 'OK' if all(v == 'OK' for v in sudoers.values()) else 'HOLD',
+                                 'missing': sorted(k for k, v in sudoers.items() if v == 'MISSING'),
+                                 'drift': sorted(k for k, v in sudoers.items() if v == 'DRIFT')}
         ledger = self.path(LEDGER_DIR) / LEDGER_DB
         if os.path.lexists(ledger):
             components['ledger'] = {'status': 'OK' if self.ledger_ok(ledger) else 'HOLD'}
         else:
             components['ledger'] = {'status': 'HOLD', 'reason': 'LEDGER_ABSENT'}
-            steps.append('Ledger absent: if a checkpoint exists run aiops-hostpack restore; otherwise the administrator '
-                         'initialises it once (never an automatic empty reset).')
+        components['boundary'] = self.boundary_state()
         components['lanes'] = {lane: self.lane_state(lane, users) for lane in LANES}
-        pending = [lane for lane, v in components['lanes'].items() if v['status'] != 'OK' and lane in self.cfg['enabled_builders']]
-        if pending:
-            steps.append('Provider login / CLI qualification pending for: ' + ', '.join(pending))
-        overall = 'READY_FOR_ACTIVATION_CHECK' if all(
-            c['status'] == 'OK' for key, c in components.items() if key != 'lanes') and not pending else 'HOLD'
+        if components['files']['drift'] or components['sudoers']['drift']:
+            steps.append('Differing installed files are drift: stop and report them; nothing is overwritten.')
+        elif components['files']['missing'] or components['sudoers']['missing'] or components['accounts']['missing']:
+            steps.append('aiops-hostpack install')
+        if components['ledger']['status'] != 'OK':
+            steps.append('Ledger absent: if a checkpoint exists run aiops-hostpack restore; an empty ledger is initialised '
+                         'once by the administrator only after the User approves it (never automatically).')
+        if components['boundary']['status'] != 'OK':
+            steps.append('aiops-hostpack boundary-render --commit <40-hex main commit>, then start the runner with astra-runner-launch.')
+        waiting = [lane for lane, v in components['lanes'].items() if v['status'] != 'OK' and lane in self.cfg['enabled_builders']]
+        if waiting:
+            steps.append('Lane login / CLI / preflight not proven for: ' + ', '.join(waiting)
+                         + ' (run the workflow operation=preflight after logging in as each lane account).')
+        if not evidence_url(self.cfg.get('boundary_evidence_pointer')):
+            steps.append('Set boundary_evidence_pointer in hostpack.json to the real evidence URL before install.')
+        overall = 'READY_FOR_ACTIVATION_CHECK' if (
+            all(c['status'] == 'OK' for key, c in components.items() if key != 'lanes') and not waiting
+            and evidence_url(self.cfg.get('boundary_evidence_pointer'))) else 'HOLD'
         return result(overall, components=components, next_steps=steps)
+
+    def boundary_state(self):
+        policy, expected = self.path(BOUNDARY_POLICY), self.path(BOUNDARY_EXPECTED)
+        if not os.path.lexists(policy) or not os.path.lexists(expected):
+            return {'status': 'HOLD', 'reason': 'NOT_RENDERED'}
+        try:
+            value = strict_json(expected.read_bytes(), 'BOUNDARY_REJECTED')
+        except PackError:
+            return {'status': 'HOLD', 'reason': 'EXPECTED_UNREADABLE'}
+        ok = (value.get('policy_sha256') == sha(policy.read_bytes())
+              and value.get('hook_sha256') == self.item('/opt/astra/boundary/control_plane_boundary_hook.sh')['sha256']
+              and value.get('evaluator_sha256') == self.item('/opt/astra/boundary/control_plane_boundary.py')['sha256'])
+        return {'status': 'OK' if ok else 'HOLD', 'reason': None if ok else 'DIGEST_MISMATCH'}
 
     def lane_state(self, lane, users):
         spec = LANE_SPECS[lane]
         reasons = []
         if not users.get(spec['account']):
             reasons.append('ACCOUNT_MISSING')
-        for key in ('wrapper', 'adapter', 'supervisor'):
-            where = '/opt/astra/bin/' if key == 'wrapper' else '/opt/astra/libexec/'
-            if self.check_file(next(i for i in self.manifest['files'] if i['destination'] == where + spec[key])) != 'OK':
+        for key, where in (('wrapper', '/opt/astra/bin/'), ('adapter', '/opt/astra/libexec/'), ('supervisor', '/opt/astra/libexec/')):
+            if self.check_file(self.item(where + spec[key])) != 'OK':
                 reasons.append(key.upper() + '_NOT_INSTALLED')
         if lane == 'CURSOR' and not os.path.lexists(self.path(LANE_CONFIG_DIR) / 'cursor-lane.json'):
             reasons.append('CURSOR_LANE_CONFIG_MISSING')
-        if lane in self.cfg['enabled_builders'] and not self.ops.lane_logged_in(self, lane):
-            reasons.append('LOGIN_REQUIRED')
+        if lane in self.cfg['enabled_builders'] and not self.ops.lane_proven(self, lane):
+            reasons.append('PREFLIGHT_NOT_PROVEN')
         return {'status': 'OK' if not reasons else 'HOLD', 'reasons': reasons}
 
     def policy_matches(self, users):
+        if not all(users.values()):
+            return False
         try:
             value = strict_json(self.path(HOST_POLICY).read_bytes(), 'CONFIG_REJECTED')
         except (OSError, PackError):
             return False
-        if not all(users.values()):
-            return False
-        expected = render_host_policy(self.cfg, {k: v['uid'] for k, v in users.items()})
-        return value == expected
-
-    def sudoers_bytes(self):
-        return render_sudoers(self.ops.read_cached(self, self.manifest['sudoers']['cache_path'],
-                                                   self.manifest['sudoers']['source_sha256']), self.runner)
+        return value == render_host_policy(self.cfg, {k: v['uid'] for k, v in users.items()})
 
     def ledger_ok(self, db):
         try:
@@ -520,44 +625,48 @@ class Hostpack:
 
     def install(self):
         """Missing components only. Differing bytes stop the whole install before anything is written."""
+        if not evidence_url(self.cfg.get('boundary_evidence_pointer')):
+            fail('BOUNDARY_EVIDENCE_REQUIRED', 'set boundary_evidence_pointer to a real evidence URL first')
         for item in self.manifest['files']:
             if self.check_file(item) == 'DRIFT':
                 fail('INSTALLATION_DRIFT', item['destination'])
-        data = {}
+        blobs = {}
         for item in self.manifest['files']:
             if self.check_file(item) == 'MISSING':
                 blob = self.ops.read_cached(self, item['cache_path'], item['sha256'])
                 if sha(blob) != item['sha256']:
                     fail('ARTIFACT_HASH_MISMATCH', item['destination'])
-                data[item['destination']] = blob
-        sudoers_rendered = self.sudoers_bytes()
-        sudoers_path = self.path(SUDOERS_DESTINATION)
-        if os.path.lexists(sudoers_path) and sudoers_path.read_bytes() != sudoers_rendered:
-            fail('INSTALLATION_DRIFT', SUDOERS_DESTINATION)
+                blobs[item['destination']] = blob
+        sudoers = self.sudoers_pair()
+        for destination, rendered in sudoers.items():
+            path = self.path(destination)
+            if os.path.lexists(path) and path.read_bytes() != rendered:
+                fail('INSTALLATION_DRIFT', destination)
         atomic = self.ops.atomic
-        atomic(self.path('/etc/aiops/hostpack-install.json'), canonical({'complete': False, 'manifest_sha256': self.manifest_sha256}), 0o600, 0, 0)
-        users = {}
-        for item in account_specs(self.runner):
-            users[item['name']] = self.ops.ensure_account(self, item)
+        receipt = self.path('/etc/aiops/hostpack-install.json')
+        atomic(receipt, canonical({'complete': False, 'manifest_sha256': self.manifest_sha256}), 0o600, 0, 0)
+        users = {item['name']: self.ops.ensure_account(self, item) for item in account_specs(self.runner)}
         self.make_directories(users)
         for item in self.manifest['files']:
-            if item['destination'] in data:
+            if item['destination'] in blobs:
                 gid = users[CONTROL_ACCOUNT]['gid'] if item['group'] == CONTROL_ACCOUNT else self.owner
-                atomic(self.path(item['destination']), data[item['destination']], item['mode'], self.owner, gid, replace=False)
-        policy_path = self.path(HOST_POLICY)
+                atomic(self.path(item['destination']), blobs[item['destination']], item['mode'], self.owner, gid, replace=False)
         expected = render_host_policy(self.cfg, {k: v['uid'] for k, v in users.items()})
-        if os.path.lexists(policy_path):
-            if strict_json(policy_path.read_bytes(), 'CONFIG_REJECTED') != expected:
+        policy = self.path(HOST_POLICY)
+        if os.path.lexists(policy):
+            if strict_json(policy.read_bytes(), 'CONFIG_REJECTED') != expected:
                 fail('INSTALLATION_DRIFT', HOST_POLICY)
         else:
-            atomic(policy_path, json.dumps(expected, indent=2, sort_keys=True).encode() + b'\n', 0o644, self.owner, self.owner, replace=False)
-        if not os.path.lexists(sudoers_path):
-            self.ops.validate_sudoers(self, sudoers_rendered)
-            atomic(sudoers_path, sudoers_rendered, 0o440, self.owner, self.owner, replace=False)
+            atomic(policy, json.dumps(expected, indent=2, sort_keys=True).encode() + b'\n', 0o644, self.owner, self.owner, replace=False)
+        for destination, rendered in sudoers.items():
+            path = self.path(destination)
+            if not os.path.lexists(path):
+                self.ops.validate_sudoers(self, rendered)
+                atomic(path, rendered, 0o440, self.owner, self.owner, replace=False)
         for item in self.manifest['files']:
             if self.check_file(item) != 'OK':
                 fail('INSTALLATION_DRIFT', item['destination'])
-        atomic(self.path('/etc/aiops/hostpack-install.json'), canonical({'complete': True, 'manifest_sha256': self.manifest_sha256}), 0o600, 0, 0)
+        atomic(receipt, canonical({'complete': True, 'manifest_sha256': self.manifest_sha256}), 0o600, 0, 0)
         return result('INSTALLED', manifest_sha256=self.manifest_sha256, users=sorted(users))
 
     def make_directories(self, users):
@@ -565,8 +674,7 @@ class Hostpack:
         plan = [('/opt/astra', 'root', 0o755), ('/opt/astra/bin', 'root', 0o755), ('/opt/astra/libexec', 'root', 0o755),
                 ('/opt/astra/boundary', 'root', 0o755), ('/etc/astra', 'root', 0o755), ('/var/lib/astra', 'root', 0o755),
                 (LEDGER_DIR, control, 0o700), ('/var/lib/astra/boundary-evidence', runner, 0o700),
-                ('/var/lib/astra-lanes', 'root', 0o755), ('/var/cache/aiops-hostpack', 'root', 0o700),
-                ('/etc/sudoers.d', 'root', 0o755)]
+                (LANES_HOME, 'root', 0o755), ('/var/cache/aiops-hostpack', 'root', 0o700), ('/etc/sudoers.d', 'root', 0o750)]
         for item in account_specs(self.runner):
             plan.append((item['home'], users[item['name']], 0o700))
         for path, owner, mode in plan:
@@ -577,14 +685,34 @@ class Hostpack:
             info = os.lstat(target)
             if not stat.S_ISDIR(info.st_mode):
                 fail('INSTALLATION_DRIFT', path)
+            if path == '/etc/sudoers.d':
+                continue  # an existing sudoers.d keeps the distribution's owner and mode
             if self.ops.enforce_ownership:
                 if (info.st_uid, info.st_gid) != (uid, gid) or stat.S_IMODE(info.st_mode) != mode:
-                    if os.listdir(target) and path in (LEDGER_DIR,):
+                    if path == LEDGER_DIR and os.listdir(target):
                         fail('INSTALLATION_DRIFT', path)  # never re-own an existing ledger
                     os.chown(target, uid, gid)
                     os.chmod(target, mode)
             else:
                 os.chmod(target, mode)
+
+    # ---- boundary ----------------------------------------------------------------
+
+    def boundary_render(self, workflow_sha, ids):
+        """Policy for one main commit. The hook and evaluator digests come from the pinned manifest, never from disk."""
+        example = strict_json(self.ops.read_cached(self, self.manifest['boundary']['example_cache_path'],
+                                                   self.manifest['boundary']['example_sha256']), 'BOUNDARY_REJECTED')
+        policy = render_boundary_policy(example, repository_id=ids[0], owner_id=ids[1], actor_id=ids[2], workflow_sha=workflow_sha)
+        data = json.dumps(policy, indent=2, sort_keys=True).encode() + b'\n'
+        expected = {'schema': 'AIOPS_BOUNDARY_EXPECTED_V1', 'policy_sha256': sha(data), 'workflow_sha': workflow_sha,
+                    'hook_sha256': self.item('/opt/astra/boundary/control_plane_boundary_hook.sh')['sha256'],
+                    'evaluator_sha256': self.item('/opt/astra/boundary/control_plane_boundary.py')['sha256']}
+        users = self.accounts()
+        if not users.get(CONTROL_ACCOUNT):
+            fail('INSTALLATION_DRIFT', 'account ' + CONTROL_ACCOUNT)
+        self.ops.atomic(self.path(BOUNDARY_POLICY), data, 0o644, self.owner, users[CONTROL_ACCOUNT]['gid'])
+        self.ops.atomic(self.path(BOUNDARY_EXPECTED), canonical(expected), 0o644, self.owner, self.owner)
+        return result('RENDERED', policy_id=policy['policy_id'], policy_sha256=expected['policy_sha256'])
 
 
 # --------------------------------------------------------------------------- operations on the real host
@@ -621,20 +749,18 @@ class SystemOps:
         return existing
 
     def atomic(self, path, data, mode, uid, gid, replace=True):
-        rec = load_recover()
-        rec.atomic(path, data, mode, uid, gid, replace=replace)
+        load_recover().atomic(path, data, mode, uid, gid, replace=replace)
 
     def read_cached(self, pack, cache_path, expected_sha):
-        """Artifacts come from the pinned source commit; bytes are copied from one descriptor and hashed."""
+        """Artifacts come from the pinned source commit; bytes are hashed before anything uses them."""
         cache = pack.path('/var/cache/aiops-hostpack') / cache_path
-        rec = load_recover()
         if os.path.lexists(cache):
-            data = rec.read_regular(cache, boundary=pack.prefix, mode=0o600)
+            data = load_recover().read_regular(cache, boundary=pack.prefix, mode=0o600)
         else:
             token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
             if not token:
                 fail('GITHUB_AUTH_REQUIRED')
-            data = fetch_github_file(token, 'BeautifulMind-JT/ai-ops-control-plane', pack.cfg['source_commit'], cache_path)
+            data = fetch_github_file(token, CONTROL_REPOSITORY, pack.cfg['source_commit'], cache_path)
         if sha(data) != expected_sha:
             fail('ARTIFACT_HASH_MISMATCH', cache_path)
         return data
@@ -651,8 +777,10 @@ class SystemOps:
         finally:
             os.unlink(name)
 
-    def lane_logged_in(self, pack, lane):
-        """A login is proven only by the lane's own preflight through the host helper; never inferred from files."""
+    def lane_proven(self, pack, lane):
+        """A login is proven only by the lane's own preflight through the host helper, run by the workflow.
+
+        This command never starts a lane CLI, so it can only report what it can prove: nothing."""
         return False
 
 
@@ -698,7 +826,8 @@ class Checkpoints:
     """Encrypted host state on the private aiops-state repository. A stale or damaged head always stops."""
 
     def __init__(self, backend, pack, binding_path=BINDING):
-        self.backend, self.pack, self.binding_path = backend, pack, Path(binding_path)
+        self.backend, self.pack = backend, pack
+        self.binding_path = pack.path(str(binding_path)) if str(binding_path).startswith('/') else Path(binding_path)
 
     def bound(self):
         if not os.path.lexists(self.binding_path):
@@ -708,14 +837,16 @@ class Checkpoints:
             fail('STATE_CORRUPT')
         return value['commit']
 
-    def remote(self, key=None, password=None):
+    def open_head(self, password):
         head = self.backend.head(missing=True)
         if head is None:
             return None, None, None
         envelope, cipher = self.backend.load(head)
-        if key is None:
-            key = derive(password, base64.b64decode(envelope['salt']))
-        payload = validate_payload(decrypt(envelope, cipher, key), self.pack.manifest_sha256, self.pack.cfg['source_commit'])
+        try:
+            key = derive(password, base64.b64decode(envelope['salt'], validate=True))
+        except (KeyError, ValueError):
+            fail('STATE_CORRUPT')
+        payload = validate_payload(decrypt(envelope, cipher, key), self.pack.cfg['source_commit'])
         return head, envelope, payload
 
     def save(self, password):
@@ -727,11 +858,10 @@ class Checkpoints:
             fail('STATE_ROLLBACK_DETECTED')
         version, salt = 1, secrets.token_bytes(16)
         if head is not None:
+            self.open_head(password)  # the password must open the head being extended
             envelope, _ = self.backend.load(head)
             version, salt = envelope['version'] + 1, base64.b64decode(envelope['salt'])
         key = derive(password, salt)
-        if head is not None:
-            self.remote(key=key)  # the password must open the head we are about to extend
         payload = collect_payload(self.pack.prefix, self.pack.cfg, self.pack.manifest_sha256)
         envelope, cipher = encrypt(payload, key, salt, version, head, self.pack.cfg['source_commit'])
         new_head = self.backend.publish(head, envelope, cipher)
@@ -739,49 +869,45 @@ class Checkpoints:
         return result('SAVED', commit=new_head, version=version, entries=len(payload['entries']))
 
     def restore(self, password):
-        head, _, payload = self.remote(password=password)
+        head, _, payload = self.open_head(password)
         if head is None:
             fail('STATE_NOT_FOUND')
         bound = self.bound()
         if bound is not None and bound != head:
-            # A different head than the one this host last wrote: only newer-by-ancestry is acceptable,
-            # which this client cannot prove, so it stops instead of guessing.
-            fail('STATE_FRESHNESS_UNVERIFIED')
-        written = []
-        ledger_entries = [e for e in payload['entries'] if e['kind'] in ('ledger-db', 'ledger-file')]
+            fail('STATE_FRESHNESS_UNVERIFIED')  # this client cannot prove a different head is newer, so it stops
         ledger_dir = self.pack.path(LEDGER_DIR)
-        if ledger_entries and os.path.lexists(ledger_dir / LEDGER_DB):
+        has_ledger = any(e['kind'] in ('ledger-db', 'ledger-file') for e in payload['entries'])
+        if has_ledger and os.path.lexists(ledger_dir / LEDGER_DB):
             fail('LEDGER_EXISTS', 'restore never replaces a live ledger')
         users = self.pack.accounts()
+        plan = []
         for entry in payload['entries']:
             target = destination_for(entry, self.pack.prefix)
             if os.path.lexists(target):
                 if sha(target.read_bytes()) == entry['sha256']:
                     continue
                 fail('RESTORE_CONFLICT', str(target.relative_to(self.pack.prefix)))
-            owner = self.owner_ids(entry, users)
+            plan.append((entry, target, self.owner_ids(entry, users)))
+        written = 0
+        for entry, target, owner in plan:
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             if self.pack.ops.enforce_ownership and entry['kind'] == 'lane-login':
-                self.chown_parents(target.parent, self.pack.path('/var/lib/astra-lanes'), owner)
+                self.chown_parents(target.parent, self.pack.path(LANES_HOME), owner)
             self.pack.ops.atomic(target, base64.b64decode(entry['bytes']), entry['mode'], owner[0], owner[1], replace=False)
-            written.append(entry['path'])
+            written += 1
         db = ledger_dir / LEDGER_DB
-        if os.path.lexists(db):
-            con = sqlite3.connect(db.as_uri() + '?mode=ro', uri=True, timeout=10)
-            try:
-                if con.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
-                    fail('STATE_CORRUPT', 'restored ledger quick_check')
-            finally:
-                con.close()
+        if os.path.lexists(db) and not self.pack.ledger_ok(db):
+            fail('STATE_CORRUPT', 'restored ledger quick_check')
         self.pack.ops.atomic(self.binding_path, canonical({'commit': head}), 0o600, 0, 0)
-        return result('RESTORED', commit=head, written=len(written))
+        return result('RESTORED', commit=head, written=written)
 
     def owner_ids(self, entry, users):
         if entry['owner'] == 'root' or not self.pack.ops.enforce_ownership:
             return (self.pack.owner, self.pack.owner)
-        user = users.get(entry['owner'])
+        account = CONTROL_ACCOUNT if entry['owner'] == CONTROL_ACCOUNT else entry['owner']
+        user = users.get(account)
         if not user:
-            fail('INSTALLATION_DRIFT', 'account ' + entry['owner'])
+            fail('INSTALLATION_DRIFT', 'account ' + str(account))
         return (user['uid'], user['gid'])
 
     def chown_parents(self, directory, stop, owner):
@@ -792,32 +918,15 @@ class Checkpoints:
             directory = directory.parent
 
 
-# --------------------------------------------------------------------------- boundary policy
+# --------------------------------------------------------------------------- CLI
 
-def render_boundary_policy(example, *, repository, repository_id, owner_id, actor_id, workflow_sha, main_ref='refs/heads/main'):
-    """Boundary policy for exactly one main commit (GITHUB_WORKFLOW_SHA moves with every main commit)."""
-    if not COMMIT.fullmatch(workflow_sha) or repository != 'BeautifulMind-JT/ai-ops-control-plane':
-        fail('BOUNDARY_REJECTED')
-    for value in (repository_id, owner_id, actor_id):
-        if type(value) is not int or value < 1:
-            fail('BOUNDARY_REJECTED')
-    rule = {
-        'name': 'control-plane-runtime-main',
-        'claims': {
-            'env:GITHUB_REPOSITORY': repository, 'env:GITHUB_REPOSITORY_ID': str(repository_id),
-            'env:GITHUB_REPOSITORY_OWNER_ID': str(owner_id), 'env:GITHUB_REF': main_ref,
-            'env:GITHUB_WORKFLOW_REF': f'{repository}/.github/workflows/control-plane-runtime.yml@{main_ref}',
-            'env:GITHUB_WORKFLOW_SHA': workflow_sha, 'env:GITHUB_EVENT_NAME': 'workflow_dispatch',
-            'env:GITHUB_JOB': 'control', 'env:GITHUB_ACTOR_ID': str(actor_id),
-            'event:repository.id': repository_id, 'event:repository.owner.id': owner_id, 'event:sender.id': actor_id}}
-    policy = dict(example)
-    policy['policy_id'] = 'prod-boundary-' + workflow_sha[:12]
-    policy['description'] = 'Rendered by aiops-hostpack for one main commit; re-render after every main commit.'
-    policy['allow'] = [rule]
-    return policy
+@contextmanager
+def barrier(path):
+    with load_recover().barrier(path):
+        yield
 
 
-def github_ids(token, repository, actor, request=None):
+def github_ids(token, actor, request=None):
     import urllib.request
     def get(suffix):
         if request is not None:
@@ -826,42 +935,39 @@ def github_ids(token, repository, actor, request=None):
                                      headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json'})
         with urllib.request.urlopen(req, timeout=30) as response:
             return strict_json(response.read(1 << 20), 'BOUNDARY_REJECTED')
-    repo = get('/repos/' + repository)
+    repo = get('/repos/' + CONTROL_REPOSITORY)
     user = get('/users/' + actor)
-    return repo['id'], repo['owner']['id'], user['id']
-
-
-# --------------------------------------------------------------------------- CLI
-
-@contextmanager
-def barrier(path):
-    rec = load_recover()
-    with rec.barrier(path):
-        yield
+    try:
+        return repo['id'], repo['owner']['id'], user['id']
+    except (KeyError, TypeError):
+        fail('BOUNDARY_REJECTED', 'github ids')
 
 
 def load_pack(prefix=Path('/')):
     rec = load_recover()
-    manifest_bytes = rec.read_regular(MANIFEST_INSTALLED)
+    manifest = strict_json(rec.read_regular(MANIFEST_INSTALLED))
     cfg = strict_json(rec.read_regular(CONFIG), 'CONFIG_REJECTED')
-    if sha(manifest_bytes) != cfg.get('manifest_sha256_file', sha(manifest_bytes)):
-        fail('MANIFEST_REJECTED')
-    return Hostpack(strict_json(manifest_bytes), cfg, prefix)
+    return Hostpack(manifest, cfg, prefix)
 
 
 def hold(error):
-    value = {'status': 'HOLD', 'reason': error.code if isinstance(error, PackError) else 'HOSTPACK_ERROR'}
-    if isinstance(error, PackError) and error.detail:
-        value['detail'] = error.detail
+    # PackError and the recovery module's RecoveryError both carry a bounded code; anything else is opaque.
+    code = getattr(error, 'code', None)
+    value = {'status': 'HOLD', 'reason': code if isinstance(code, str) and re.fullmatch(r'[A-Z0-9_]{3,60}', code) else 'HOSTPACK_ERROR'}
+    detail = getattr(error, 'detail', None)
+    if isinstance(code, str) and isinstance(detail, str) and detail:
+        value['detail'] = detail[:200]
     return value
 
 
 def github_backend(pack):
-    rec = load_recover()
     token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
     if not token:
         fail('GITHUB_AUTH_REQUIRED')
-    return rec.GithubState(pack.cfg['state_repository'], pack.cfg['state_branch'], token)
+    return load_recover().GithubState(pack.cfg['state_repository'], pack.cfg['state_branch'], token)
+
+
+GOOD = ('INSTALLED', 'SAVED', 'RESTORED', 'RENDERED', 'READY_FOR_ACTIVATION_CHECK')
 
 
 def main(argv=None):
@@ -888,21 +994,15 @@ def main(argv=None):
                 out = pack.install()
             elif args.command == 'boundary-render':
                 token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN') or fail('GITHUB_AUTH_REQUIRED')
-                ids = github_ids(token, 'BeautifulMind-JT/ai-ops-control-plane', args.actor)
-                example = strict_json(pack.ops.read_cached(pack, 'engineering/.github/control-plane/boundary-policy.example.json',
-                                                           pack.manifest.get('boundary_example_sha256', '')) if False else b'{}')
-                out = result('RENDERED', policy=render_boundary_policy(
-                    example, repository='BeautifulMind-JT/ai-ops-control-plane', repository_id=ids[0], owner_id=ids[1],
-                    actor_id=ids[2], workflow_sha=args.commit))
+                out = pack.boundary_render(args.commit, github_ids(token, args.actor))
             else:
-                cp = Checkpoints(github_backend(pack), pack)
+                checkpoints = Checkpoints(github_backend(pack), pack)
                 password = getpass.getpass('상태 암호: ')
-                out = cp.save(password) if args.command == 'save' else cp.restore(password)
+                out = checkpoints.save(password) if args.command == 'save' else checkpoints.restore(password)
         print(json.dumps(out, sort_keys=True))
-        return 0 if out.get('status') in ('INSTALLED', 'SAVED', 'RESTORED', 'RENDERED', 'READY_FOR_ACTIVATION_CHECK') else 1
-    except (PackError, Exception) as error:  # bounded output only: never a traceback with state in it
-        code = error if isinstance(error, PackError) else PackError('HOSTPACK_ERROR')
-        print(json.dumps(hold(code), sort_keys=True))
+        return 0 if out.get('status') in GOOD else 1
+    except Exception as error:  # bounded output only: never a traceback that could carry state
+        print(json.dumps(hold(error), sort_keys=True))
         return 1
 
 

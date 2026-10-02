@@ -1,0 +1,176 @@
+{
+  "accounts": [
+    {
+      "home": "/var/lib/astra-control-home",
+      "name": "astra-control",
+      "role": "control"
+    },
+    {
+      "home": "/var/lib/astra-runner",
+      "name": "astra-runner",
+      "role": "runner"
+    },
+    {
+      "home": "/var/lib/astra-lanes/astra-builder-devin",
+      "name": "astra-builder-devin",
+      "role": "lane:DEVIN"
+    },
+    {
+      "home": "/var/lib/astra-lanes/astra-builder-grokbuild",
+      "name": "astra-builder-grokbuild",
+      "role": "lane:GROK_BUILD"
+    },
+    {
+      "home": "/var/lib/astra-lanes/astra-builder-glm",
+      "name": "astra-builder-glm",
+      "role": "lane:GLM"
+    },
+    {
+      "home": "/var/lib/astra-lanes/astra-builder-cursor",
+      "name": "astra-builder-cursor",
+      "role": "lane:CURSOR"
+    }
+  ],
+  "boundary": {
+    "example_cache_path": "engineering/.github/control-plane/boundary-policy.example.json",
+    "example_sha256": "17457f52454a3e9a23f8493df411e8d02ae4cf16ddcc67ee989f1b43102fe996"
+  },
+  "files": [
+    {
+      "cache_path": "engineering/scripts/control_plane_host.py",
+      "category": "host",
+      "destination": "/opt/astra/bin/astra-host-control",
+      "group": "root",
+      "mode": 493,
+      "sha256": "155cfa70157b98d5dae569aabeb1e4c93cd91c328b01f98d1b105c007ae72927"
+    },
+    {
+      "cache_path": "engineering/scripts/control_plane_boundary.py",
+      "category": "boundary",
+      "destination": "/opt/astra/boundary/control_plane_boundary.py",
+      "group": "astra-control",
+      "mode": 420,
+      "sha256": "c16fb995b52221291bd3f965c9296b5fce174fa49094d467a0032ca6c473ce0d"
+    },
+    {
+      "cache_path": "engineering/scripts/control_plane_boundary_hook.sh",
+      "category": "boundary",
+      "destination": "/opt/astra/boundary/control_plane_boundary_hook.sh",
+      "group": "astra-control",
+      "mode": 493,
+      "sha256": "878a40ceb93b445f7aecf13d2fa7d725b0e20d4871652301df166f8a5d3f0363"
+    },
+    {
+      "cache_path": "engineering/hostpack/astra-runner-launch",
+      "category": "runner",
+      "destination": "/opt/astra/bin/astra-runner-launch",
+      "group": "root",
+      "mode": 493,
+      "sha256": "398ae48435263b46a70557f9b28d9ab026aba50d214a12e8fc235b9076d4fe8a"
+    },
+    {
+      "cache_path": "engineering/adapters/imported/astra-builder-devin",
+      "category": "lane:DEVIN",
+      "destination": "/opt/astra/bin/astra-builder-devin",
+      "group": "root",
+      "mode": 493,
+      "sha256": "c5ca742446d9cdb2879d2c748ff5ab786023aac1925592d822710fb6fbc7edef"
+    },
+    {
+      "cache_path": "engineering/adapters/imported/astra-devin-adapter",
+      "category": "lane:DEVIN",
+      "destination": "/opt/astra/libexec/astra-devin-adapter",
+      "group": "root",
+      "mode": 493,
+      "sha256": "cf7eb9b1a0485dd98d0f516dd79dd813821057ff7f3f6c89ba4685f77cb0ce05"
+    },
+    {
+      "cache_path": "engineering/adapters/imported/astra-devin-supervisor",
+      "category": "lane:DEVIN",
+      "destination": "/opt/astra/libexec/astra-devin-supervisor",
+      "group": "root",
+      "mode": 493,
+      "sha256": "0baf2882daad07f021b809972cf5678e27b9684ec031b811f76c4b57f3711081"
+    },
+    {
+      "cache_path": "engineering/adapters/imported/astra-builder-grok-build",
+      "category": "lane:GROK_BUILD",
+      "destination": "/opt/astra/bin/astra-builder-grok-build",
+      "group": "root",
+      "mode": 493,
+      "sha256": "ae9e2627d94fc19ee810bc2ed25339f5f1f1ec6b824800baddaebe929a6c60ab"
+    },
+    {
+      "cache_path": "engineering/adapters/imported/astra-grok-adapter",
+      "category": "lane:GROK_BUILD",
+      "destination": "/opt/astra/libexec/astra-grok-adapter",
+      "group": "root",
+      "mode": 493,
+      "sha256": "ef76dadca8dc229919f5fbe81fc32f29e687d576230de5a2d834075da9fd9314"
+    },
+    {
+      "cache_path": "engineering/adapters/imported/astra-grok-supervisor",
+      "category": "lane:GROK_BUILD",
+      "destination": "/opt/astra/libexec/astra-grok-supervisor",
+      "group": "root",
+      "mode": 493,
+      "sha256": "f7d31c27d5d1460c09b8f2241adfc2d634c6d06f01963866958a003edca3a3e7"
+    },
+    {
+      "cache_path": "engineering/adapters/imported/astra-builder-glm",
+      "category": "lane:GLM",
+      "destination": "/opt/astra/bin/astra-builder-glm",
+      "group": "root",
+      "mode": 493,
+      "sha256": "7ef4af1c089af5d24932f3c151bbd16b7fc5827f3a691b5f6112bcb4bba252f9"
+    },
+    {
+      "cache_path": "engineering/adapters/imported/astra-glm-adapter",
+      "category": "lane:GLM",
+      "destination": "/opt/astra/libexec/astra-glm-adapter",
+      "group": "root",
+      "mode": 493,
+      "sha256": "21e4046af2db07f5258f0a9c0d64c52ebe6fa2f2af0c992f820255835518ba79"
+    },
+    {
+      "cache_path": "engineering/adapters/imported/astra-glm-supervisor",
+      "category": "lane:GLM",
+      "destination": "/opt/astra/libexec/astra-glm-supervisor",
+      "group": "root",
+      "mode": 493,
+      "sha256": "401d18cd63e8203433f4eb1371ad022c6b8e14c6afc97798689f6d21badf5c04"
+    },
+    {
+      "cache_path": "engineering/adapters/cursor/astra-builder-cursor",
+      "category": "lane:CURSOR",
+      "destination": "/opt/astra/bin/astra-builder-cursor",
+      "group": "root",
+      "mode": 493,
+      "sha256": "7612cd1d1a3a4dc6b1c4f47899f09947ab7a3121d59dce448b26791b641b4c5f"
+    },
+    {
+      "cache_path": "engineering/adapters/cursor/astra-cursor-adapter",
+      "category": "lane:CURSOR",
+      "destination": "/opt/astra/libexec/astra-cursor-adapter",
+      "group": "root",
+      "mode": 493,
+      "sha256": "04ae0c71e7a548b9d6670e961f507e8e9120f6ed999b27a8a6ffb1f1ca94a3be"
+    },
+    {
+      "cache_path": "engineering/adapters/cursor/astra-cursor-supervisor",
+      "category": "lane:CURSOR",
+      "destination": "/opt/astra/libexec/astra-cursor-supervisor",
+      "group": "root",
+      "mode": 493,
+      "sha256": "00812c313b00cb93741e0d4eef0af670295949b02a0e1bf6f8f550675aaf6e36"
+    }
+  ],
+  "program_sudoers": {
+    "cache_path": "engineering/.github/control-plane/sudoers-aiops-program.example",
+    "destination": "/etc/sudoers.d/aiops-program",
+    "mode": 288,
+    "placeholder": "RUNNER_USER",
+    "source_sha256": "fbc8256c7d768468ddb03fbc087dc743ea7b7fe08412fa2d7db3aa2c3bf16538"
+  },
+  "schema": "AIOPS_HOSTPACK_MANIFEST_V1"
+}

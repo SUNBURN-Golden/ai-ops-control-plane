@@ -1,0 +1,65 @@
+#!/bin/bash
+# ASTRA runner launch wrapper (root-owned, started by an operator; no boot hook, no service).
+#
+# Starts the GitHub Actions listener for the astra-control-plane runner ONLY when the
+# trusted-workflow boundary verifies (RUNBOOKS/BOUNDARY.md). The expected digests come from
+# /etc/astra/boundary-expected.json, which `aiops-hostpack boundary-render` writes from the
+# pinned manifest -- never recomputed from the installed hook or policy.
+# The boundary keys exist only in the listener's launch environment, never in a runner .env.
+set -euo pipefail
+export PATH=/usr/bin:/bin
+
+RUNNER_USER="${1:-astra-runner}"
+RUNNER_DIR=/opt/astra/runner
+BOUNDARY=/opt/astra/boundary
+EXPECTED=/etc/astra/boundary-expected.json
+EVIDENCE=/var/lib/astra/boundary-evidence
+
+[ "$(id -u)" -eq 0 ] || { echo 'RUNNER_LAUNCH_REFUSED: root required' >&2; exit 2; }
+[[ "$RUNNER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { echo 'RUNNER_LAUNCH_REFUSED: runner user' >&2; exit 2; }
+[ -x "$RUNNER_DIR/run.sh" ] || { echo 'RUNNER_LAUNCH_REFUSED: runner not installed (config.sh must have been run by the operator)' >&2; exit 2; }
+[ -f "$EXPECTED" ] || { echo 'RUNNER_LAUNCH_REFUSED: boundary not rendered (aiops-hostpack boundary-render)' >&2; exit 2; }
+
+read -r HOOK_SHA POLICY_SHA EVAL_SHA < <(/usr/bin/python3 -I - "$EXPECTED" <<'PY'
+import json, re, sys
+value = json.load(open(sys.argv[1]))
+digests = [value.get(k, '') for k in ('hook_sha256', 'policy_sha256', 'evaluator_sha256')]
+if not all(re.fullmatch(r'[0-9a-f]{64}', d) for d in digests):
+    raise SystemExit(1)
+print(*digests)
+PY
+) || { echo 'RUNNER_LAUNCH_REFUSED: expected digests unreadable' >&2; exit 2; }
+
+ENV_FILE_ARGS=()
+if [ -e "$RUNNER_DIR/.env" ]; then ENV_FILE_ARGS=(--env-file "$RUNNER_DIR/.env"); fi
+
+# Both checks run as the runner account with exactly the environment the listener will get.
+as_runner() {
+  /usr/bin/setpriv --reuid="$RUNNER_USER" --regid="$RUNNER_USER" --clear-groups \
+    /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME="/var/lib/astra-runner" \
+      ACTIONS_RUNNER_HOOK_JOB_STARTED="$BOUNDARY/control_plane_boundary_hook.sh" \
+      ASTRA_BOUNDARY_POLICY="$BOUNDARY/policy.json" \
+      ASTRA_BOUNDARY_POLICY_SHA256="$POLICY_SHA" \
+      ASTRA_BOUNDARY_EVIDENCE_DIR="$EVIDENCE" \
+      "$@"
+}
+
+/usr/bin/python3 -I "$BOUNDARY/control_plane_boundary.py" verify-install \
+  --hook "$BOUNDARY/control_plane_boundary_hook.sh" --policy "$BOUNDARY/policy.json" \
+  --hook-sha256 "$HOOK_SHA" --policy-sha256 "$POLICY_SHA" --evaluator-sha256 "$EVAL_SHA" \
+  --owner-uid 0 --forbid-prefix "$RUNNER_DIR" --writable-check "${ENV_FILE_ARGS[@]}" \
+  || { echo 'RUNNER_LAUNCH_REFUSED: verify-install failed' >&2; exit 3; }
+
+as_runner /usr/bin/python3 -I "$BOUNDARY/control_plane_boundary.py" check-env \
+  --hook "$BOUNDARY/control_plane_boundary_hook.sh" --policy "$BOUNDARY/policy.json" \
+  --policy-sha256 "$POLICY_SHA" \
+  || { echo 'RUNNER_LAUNCH_REFUSED: check-env failed' >&2; exit 3; }
+
+cd "$RUNNER_DIR"
+exec /usr/bin/setpriv --reuid="$RUNNER_USER" --regid="$RUNNER_USER" --clear-groups \
+  /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME="/var/lib/astra-runner" \
+    ACTIONS_RUNNER_HOOK_JOB_STARTED="$BOUNDARY/control_plane_boundary_hook.sh" \
+    ASTRA_BOUNDARY_POLICY="$BOUNDARY/policy.json" \
+    ASTRA_BOUNDARY_POLICY_SHA256="$POLICY_SHA" \
+    ASTRA_BOUNDARY_EVIDENCE_DIR="$EVIDENCE" \
+    "$RUNNER_DIR/run.sh"
