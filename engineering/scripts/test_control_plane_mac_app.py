@@ -98,6 +98,19 @@ class AppTests(unittest.TestCase):
             self.store.create({'repository':'example/product','goal':'different','request_id':'request-001'})
         self.assertEqual(len(self.store.jobs()),1)
 
+    def test_exited_wrapper_without_receipt_fences_immediately_and_keeps_owner(self):
+        self.new(); self.engine.step(self.job()); job = self.launch()
+        child = mock.Mock(); child.poll.return_value = 0
+        self.engine.children[job['attempt']['id']] = child
+        self.engine.tick()
+        current = self.job()
+        self.assertEqual(current['state'], 'unknown')
+        self.assertEqual(current['attempt'], job['attempt'])
+        self.assertEqual(current['calls'], 1)
+        with self.assertRaisesRegex(common.AppError, 'CANNOT_CANCEL_ACTIVE_ATTEMPT'):
+            self.store.action(job['id'], 'cancel')
+        self.assertEqual((self.engine.receipt_path(job).parent / 'worker-errors.log').stat().st_mode & 0o777, 0o600)
+
     def test_one_repository_owner_including_paused_and_ready(self):
         job = self.new(); self.store.update(job['id'], state='paused')
         with self.assertRaises(common.AppError): self.new('Example/Product', 'request-002')
