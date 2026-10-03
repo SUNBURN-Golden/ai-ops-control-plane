@@ -4,13 +4,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
 import time
 import uuid
 
-from common import AppError, ROLES, atomic_json, encoded, parse_json, validate_profile
+from common import AppError, ROLES, REPORT_LIMIT, atomic_json, encoded, parse_json, validate_profile
 from provider_catalog import CATALOG
 
 
@@ -31,7 +32,6 @@ SCHEMA = object_schema({
     'findings': STRINGS, 'checks': STRINGS, 'reviewed_head': STRING,
     'covered_tasks': STRINGS,
 })
-REPORT_LIMIT = 2 * 1024 * 1024
 
 RULES = """You are one role in AIOPS Mac, operating on a user-owned GitHub repository.
 Read AGENTS.md and the repository's authoritative requirements, approved architecture,
@@ -212,11 +212,20 @@ def validate_report(report):
         raise AppError('INVALID_AGENT_RESULT')
     if report['status'] not in ('complete', 'fail', 'needs_user'):
         raise AppError('INVALID_AGENT_STATUS')
+    if len(encoded(report).encode()) > REPORT_LIMIT:
+        raise AppError('AGENT_REPORT_TOO_LARGE')
     for key in ('summary', 'question', 'reviewed_head'):
         if not isinstance(report[key], str): raise AppError('INVALID_AGENT_FIELD')
-    for key in ('findings', 'checks', 'covered_tasks'):
-        if not isinstance(report[key], list) or any(not isinstance(x, str) for x in report[key]):
+        if len(report[key]) > (40 if key == 'reviewed_head' else 16000) or '\x00' in report[key]:
             raise AppError('INVALID_AGENT_FIELD')
+    for key in ('findings', 'checks', 'covered_tasks'):
+        if not isinstance(report[key], list) or len(report[key]) > 256 or any(
+                not isinstance(x, str) or len(x) > (80 if key == 'covered_tasks' else 4000) or '\x00' in x
+                for x in report[key]):
+            raise AppError('INVALID_AGENT_FIELD')
+    if len(report['covered_tasks']) != len(set(report['covered_tasks'])) or any(
+            not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}', key) for key in report['covered_tasks']):
+        raise AppError('INVALID_AGENT_FIELD')
     if not report['summary'].strip(): raise AppError('EMPTY_AGENT_SUMMARY')
     if report['status'] == 'needs_user' and not report['question'].strip():
         raise AppError('EMPTY_QUESTION')
@@ -341,7 +350,7 @@ def result(profile, folder):
     return completion(profile, folder)['report']
 
 
-def availability(providers=None, versions=True):
+def availability(providers=None, versions=True, authenticate=True):
     data = {}
     for tool in ('git', 'gh', *(CATALOG if providers is None else sorted(providers))):
         path = executable(tool) if tool in CATALOG else shutil.which(tool)
@@ -353,11 +362,13 @@ def availability(providers=None, versions=True):
             except (OSError, subprocess.TimeoutExpired): pass
         data[tool] = item
     data['github_authenticated'] = False
-    if data['gh']['installed']:
+    data['github_authentication'] = 'not_checked'
+    if authenticate and data['gh']['installed']:
         try:
             run = subprocess.run(['gh', 'auth', 'status', '--hostname', 'github.com'],
                                  capture_output=True, timeout=8, env=environment())
             data['github_authenticated'] = run.returncode == 0
+            data['github_authentication'] = 'authenticated' if run.returncode == 0 else 'required'
         except (OSError, subprocess.TimeoutExpired): pass
     data['checked_at'] = time.time()
     return data

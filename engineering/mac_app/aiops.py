@@ -49,14 +49,20 @@ def token(path):
 class Application:
     def __init__(self, directory, engine=None):
         self.store = Store(directory)
-        self.engine = engine or Engine(self.store)
-        self.owner_token = token(self.store.directory / 'desktop-token')
-        self.relay_token = token(self.store.directory / 'relay-token')
-        self.session = secrets.token_urlsafe(32)
-        self.doctor = agents.availability()
+        try:
+            self.engine = engine or Engine(self.store)
+            self.owner_token = token(self.store.directory / 'desktop-token')
+            self.relay_token = token(self.store.directory / 'relay-token')
+            self.session = secrets.token_urlsafe(32)
+            # Publish the local service without waiting for unused CLI versions
+            # or network authentication. Admission checks credentials afresh.
+            self.doctor = agents.availability(versions=False, authenticate=False)
+        except BaseException:
+            self.store.close()
+            raise
 
     def state(self):
-        return {'version': VERSION, 'settings': self.store.settings(), 'jobs': [self.engine.describe(j) for j in self.store.jobs()],
+        return {'version': VERSION, 'settings': self.store.settings(), 'jobs': [self.engine.describe(j, compact=True) for j in self.store.jobs()],
                 'providers': public_catalog(),
                 'connections': self.doctor, 'data_directory': str(self.store.directory),
                 'cli_path': str(Path(__file__).resolve()), 'python_path': sys.executable}
@@ -126,10 +132,10 @@ def handler(app, origin):
                     return self.send(200, (ASSETS / path).read_bytes(), mime)
                 self.principal()
                 if self.path == '/api/state': return self.send(200, app.state())
-                if self.path == '/api/jobs': return self.send(200, [app.engine.describe(j) for j in app.store.jobs()])
+                if self.path == '/api/jobs': return self.send(200, [app.engine.describe(j, compact=True) for j in app.store.jobs()])
                 if self.path.startswith('/api/jobs/'):
                     parts = self.path.split('/')
-                    if len(parts) == 4: return self.send(200, app.engine.describe(app.store.get(parts[3])))
+                    if len(parts) == 4: return self.send(200, app.engine.describe(app.store.get(parts[3]), compact=True))
                     if len(parts) == 5 and parts[4] == 'events': return self.send(200, app.store.events(parts[3]))
                 self.send(404, {'error': 'NOT_FOUND'})
             except AppError as exc: self.send(401 if exc.code == 'UNAUTHENTICATED' else 400, {'error': exc.code, 'message': str(exc)})
@@ -146,7 +152,7 @@ def handler(app, origin):
                 if self.path == '/api/session':
                     if principal != 'owner': raise AppError('OWNER_REQUIRED')
                     return self.send(200, {'ok': True}, cookie='aiops_session=' + app.session + '; HttpOnly; SameSite=Strict; Path=/')
-                if self.path == '/api/jobs': return self.send(201, app.start(value))
+                if self.path == '/api/jobs': return self.send(201, app.engine.describe(app.start(value), compact=True))
                 if self.path == '/api/settings':
                     if principal != 'owner': raise AppError('OWNER_REQUIRED')
                     return self.send(200, app.store.set_settings(value))
@@ -158,7 +164,7 @@ def handler(app, origin):
                     if len(parts) == 5:
                         action = parts[4]
                         if principal != 'owner' and action != 'pause': raise AppError('OWNER_REQUIRED')
-                        return self.send(200, app.action(parts[3], action, value))
+                        return self.send(200, app.engine.describe(app.action(parts[3], action, value), compact=True))
                 self.send(404, {'error': 'NOT_FOUND'})
             except (AppError, UnicodeError, ValueError) as exc:
                 code = exc.code if isinstance(exc, AppError) else 'INVALID_REQUEST'
@@ -169,35 +175,61 @@ def handler(app, origin):
 def serve(directory, port):
     directory = private_directory(directory)
     lock = service_lock(directory)
-    app = Application(directory)
-    origin = 'http://127.0.0.1:' + str(port)
-    server = ThreadingHTTPServer(('127.0.0.1', port), handler(app, origin))
-    server.daemon_threads = True
-    atomic_json(directory / 'endpoint.json', {'origin': origin, 'pid': os.getpid(), 'version': VERSION})
-    thread = threading.Thread(target=app.engine.run, daemon=True); thread.start()
-    def stop(*_):
-        app.engine.stopping.set(); app.engine.wake.set()
-        threading.Thread(target=server.shutdown, daemon=True).start()
-    signal.signal(signal.SIGTERM, stop); signal.signal(signal.SIGINT, stop)
-    try: server.serve_forever(poll_interval=0.5)
+    app = server = thread = None
+    previous_signals = {}
+    try:
+        app = Application(directory)
+        origin = 'http://127.0.0.1:' + str(port)
+        server = ThreadingHTTPServer(('127.0.0.1', port), handler(app, origin))
+        server.daemon_threads = True
+        atomic_json(directory / 'endpoint.json', {'origin': origin, 'pid': os.getpid(), 'version': VERSION})
+        thread = threading.Thread(target=app.engine.run, daemon=True); thread.start()
+        def stop(*_):
+            app.engine.stopping.set(); app.engine.wake.set()
+            threading.Thread(target=server.shutdown, daemon=True).start()
+        for number in (signal.SIGTERM, signal.SIGINT):
+            previous_signals[number] = signal.signal(number, stop)
+        server.serve_forever(poll_interval=0.5)
     finally:
-        stop(); thread.join(timeout=5); server.server_close(); os.close(lock)
+        for number, previous in previous_signals.items(): signal.signal(number, previous)
+        if server is not None: server.server_close()
+        if app is not None:
+            app.engine.stopping.set(); app.engine.wake.set()
+        def release():
+            try:
+                if thread is not None and thread.ident is not None: thread.join()
+                if app is not None: app.store.close()
+            finally: os.close(lock)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+        if thread is not None and thread.is_alive():
+            # Never admit a new service while an old in-process step still runs.
+            threading.Thread(target=release, daemon=False).start()
+        else: release()
+
+
+def local_origin(directory):
+    value = read_json(Path(directory) / 'endpoint.json')
+    endpoint = value.get('origin') if isinstance(value, dict) else None
+    # A forged state file cannot turn the bot bridge into an arbitrary network client.
+    import re
+    if not isinstance(endpoint, str) or not re.fullmatch(r'http://127\.0\.0\.1:[0-9]{4,5}', endpoint) \
+            or not 1024 <= int(endpoint.rsplit(':', 1)[1]) <= 65535:
+        raise AppError('INVALID_LOCAL_ENDPOINT')
+    return endpoint
 
 
 def client(directory, path, value=None, owner=False):
     directory = Path(directory)
-    endpoint = read_json(directory / 'endpoint.json')['origin']
-    # A forged state file cannot turn the bot bridge into an arbitrary network client.
-    import re
-    if not re.fullmatch(r'http://127\.0\.0\.1:[0-9]{4,5}', endpoint): raise AppError('INVALID_LOCAL_ENDPOINT')
+    endpoint = local_origin(directory)
     secret = token(directory / ('desktop-token' if owner else 'relay-token'))
     req = urllib.request.Request(endpoint + path, data=encoded(value).encode() if value is not None else None,
                                  headers={'Authorization': 'Bearer ' + secret, 'Content-Type': 'application/json'})
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *args): raise AppError('REDIRECT_REFUSED')
     try:
-        with urllib.request.build_opener(NoRedirect()).open(req, timeout=20) as response:
-            return parse_json(response.read(4194305).decode())
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(req, timeout=20) as response:
+            return parse_json(response.read(16777217).decode(), 16777216)
     except urllib.error.HTTPError as exc:
         data = parse_json(exc.read(65537).decode(), 65536)
         raise AppError(data.get('error', 'HTTP_ERROR'), data.get('message')) from exc
@@ -265,7 +297,7 @@ def main(argv=None):
         if args.command == 'doctor': result = agents.availability()
         elif args.command == 'open':
             client(args.data_dir, '/api/state', owner=True)
-            url = read_json(args.data_dir / 'endpoint.json')['origin'] + '/#' + token(args.data_dir / 'desktop-token')
+            url = local_origin(args.data_dir) + '/#' + token(args.data_dir / 'desktop-token')
             webbrowser.open(url); return 0
         elif args.command == 'start':
             result = client(args.data_dir, '/api/jobs', {'repository': args.repo, 'goal': args.goal, 'request_id': args.request_id or uuid.uuid4().hex})

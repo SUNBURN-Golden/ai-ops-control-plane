@@ -10,7 +10,12 @@ import stat
 import tempfile
 from provider_catalog import CATALOG
 
-VERSION = '0.3.0'
+VERSION = '0.3.1'
+REPORT_LIMIT = 2 * 1024 * 1024
+JOB_RECORD_LIMIT = 16 * 1024 * 1024
+JOB_CONTROL_RESERVE = 1024 * 1024
+WORKER_REQUEST_LIMIT = 32 * 1024 * 1024
+EVENT_RECORD_LIMIT = 64 * 1024
 ROLES = ('planner', 'builder', 'reviewer', 'supervisor')
 PROVIDERS = tuple(CATALOG)
 TERMINAL = ('accepted', 'cancelled')
@@ -79,9 +84,9 @@ def atomic_json(path, value):
         if os.path.exists(name): os.unlink(name)
 
 
-def read_json(path):
+def read_json(path, limit=4194304):
     with open(path, encoding='utf-8') as stream:
-        return parse_json(stream.read(4194305))
+        return parse_json(stream.read(limit + 1), limit)
 
 
 def repository(value):

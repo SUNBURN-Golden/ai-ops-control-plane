@@ -135,7 +135,7 @@ function renderConnections(){
   $('#setup-banner').hidden=configured;
   const list=$('#connection-list');list.replaceChildren();
   for(const [key,name] of [['git','Git'],['gh','GitHub CLI'],...state.providers.map(p=>[p.id,p.name])]){
-    const item=c[key]||{},row=el('div','connection-row'),body=el('div');body.append(el('strong','',name),el('p','',item.version||(item.installed?'설치 확인됨':'설치 후 다시 확인해 주세요.')));const ready=item.installed&&(key!=='gh'||c.github_authenticated);row.append(body,el('span','status-pill '+(ready?'ready':'muted'),ready?(key==='gh'?'로그인됨':key==='git'?'설치됨':'설치됨 · 로그인 미확인'):item.installed?'로그인 필요':'미설치'));
+    const item=c[key]||{},row=el('div','connection-row'),body=el('div');body.append(el('strong','',name),el('p','',item.version||(item.installed?'설치 확인됨':'설치 후 다시 확인해 주세요.')));const ready=item.installed&&(key!=='gh'||c.github_authenticated);row.append(body,el('span','status-pill '+(ready?'ready':'muted'),ready?(key==='gh'?'로그인됨':key==='git'?'설치됨':'설치됨 · 로그인 미확인'):item.installed?(key==='gh'&&c.github_authentication==='not_checked'?'로그인 확인 전':'로그인 필요'):'미설치'));
     const info=providerInfo(key);if(info){const help=el('p','connection-help');help.append(el('code','',info.login_command),document.createTextNode(' · '));const link=el('a','','설치 안내 ↗');link.href=info.docs_url;link.target='_blank';link.rel='noopener noreferrer';help.append(link);body.append(help);}list.append(row);
   }
   const prefix=shellQuote(state.python_path)+' '+shellQuote(state.cli_path)+' --data-dir '+shellQuote(state.data_directory);

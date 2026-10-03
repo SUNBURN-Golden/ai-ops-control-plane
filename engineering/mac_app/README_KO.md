@@ -34,7 +34,17 @@ Mac에 Python 3.10 이상, Git, GitHub CLI(`gh`), 모델 설정에서 선택한 
 bash engineering/mac_app/Install.command
 ```
 
-설치 프로그램은 `~/Applications/AIOPS.app`과 현재 사용자용 LaunchAgent를 만듭니다. 관리자 권한, 인터넷 포트 개방, 별도 서버 계약은 필요하지 않습니다. Python과 선택한 CLI는 기존 설치를 사용하므로 설치 후 삭제하지 마세요. 앱 업데이트는 실행 작업이 없는 상태에서 진행해야 합니다.
+설치 프로그램은 `~/Applications/AIOPS.app`과 현재 사용자용 LaunchAgent를 만듭니다. 관리자 권한, 인터넷 포트 개방, 별도 서버 계약은 필요하지 않습니다. Python과 선택한 CLI는 기존 설치를 사용하므로 설치 후 삭제하지 마세요.
+
+이미 설치했다면 다음 명령을 사용합니다.
+
+```bash
+bash engineering/mac_app/Install.command --update
+```
+
+업데이트는 모든 기존 작업이 **검수 완료 또는 취소됨**이고 실행 예약이 없을 때만 가능합니다. 대기·일시정지·검수 준비·종료 미확정 작업도 소유권을 유지하므로 업데이트를 거절합니다. 알려진 실행 작업이 있으면 기존 서비스를 멈추지 않습니다. 설치 파일 교체는 별도 staging에서 준비하며 실패하면 이전 앱과 LaunchAgent를 되돌립니다. 새 서비스가 이미 작업을 시작한 경우에는 소유권을 보존하고 자동 롤백을 멈춥니다. 작업 DB와 계정 토큰을 초기화하지 않습니다.
+
+`launchctl print`의 서비스 인자·PID와 실제 프로세스를 비교해 기존 설치의 소유권을 확인합니다. 출력 형태를 확인할 수 없으면 안전하게 거절합니다. 이 출력 형태와 LaunchAgent 시작은 실제 Mac에서 확인해야 합니다. Mac의 Codex에 넘길 설치 지시는 [MAC_INSTALL_HANDOFF_KO.md](../docs/MAC_INSTALL_HANDOFF_KO.md)에 있습니다.
 
 `AIOPS.app`을 열고 **연결**에서 상태를 확인한 다음 **모델 설정**에서 사용할 도구와 모델을 정합니다. Codex·Claude·Grok Build·Devin은 모델 ID를 비우면 해당 CLI의 계정 기본 모델을 사용합니다. Cursor와 GLM은 정확한 모델 ID를 필수로 입력합니다. CLI 버전·모델 가용성·계정 권한은 실제 Mac에서 최종 확인해야 합니다. 연결 화면의 **설치됨**은 로그인·실제 모델 호출 성공을 의미하지 않습니다.
 

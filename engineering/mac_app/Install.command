@@ -9,4 +9,4 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "Python 3.10 이상을 설치한 뒤 다시 실행해 주세요." >&2
   exit 2
 fi
-python3 install.py
+python3 install.py "$@"

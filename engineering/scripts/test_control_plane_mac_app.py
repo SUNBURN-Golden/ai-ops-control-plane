@@ -604,14 +604,18 @@ class InstallerTests(unittest.TestCase):
         installer=importlib.util.module_from_spec(spec);spec.loader.exec_module(installer)
         with tempfile.TemporaryDirectory() as d:
             test_home=Path(d)/'Test User';test_home.mkdir();destination=test_home/'Applications/AIOPS.app';data=test_home/'Library/Application Support/AIOPS'
+            def launchctl(args, **kwargs):
+                if args[1]=='print':return subprocess.CompletedProcess(args,113,'','Could not find service local.aiops.mac')
+                self.assertEqual(args[1],'bootstrap')
+                return subprocess.CompletedProcess(args,0,'','')
             with mock.patch.object(installer.sys,'platform','darwin'),mock.patch.object(installer.Path,'home',return_value=test_home),\
-                 mock.patch.object(installer.shutil,'which',return_value='/usr/bin/tool'),mock.patch.object(installer.subprocess,'run') as run,\
+                 mock.patch.object(installer.shutil,'which',return_value='/usr/bin/tool'),mock.patch.object(installer.subprocess,'run',side_effect=launchctl) as run,\
                  mock.patch('sys.stdout',new_callable=io.StringIO):
                 installer.install(destination,data)
             config=plistlib.loads((test_home/'Library/LaunchAgents/local.aiops.mac.plist').read_bytes())
             self.assertEqual(config['ProgramArguments'][1],str(destination/'Contents/Resources/aiops.py'))
             self.assertIn(str(data),config['ProgramArguments']);self.assertTrue(config['RunAtLoad'])
-            self.assertNotIn('sudo',run.call_args.args[0]);self.assertEqual(run.call_count,1)
+            self.assertNotIn('sudo',run.call_args.args[0]);self.assertEqual([call.args[0][1] for call in run.call_args_list],['print','print','bootstrap'])
             launcher=destination/'Contents/MacOS/AIOPS'
             subprocess.run(['bash','-n',str(launcher)],check=True)
             self.assertTrue((destination/'Contents/Resources/ui/app.js').is_file())

@@ -10,7 +10,7 @@ import subprocess
 import time
 
 import agents
-from common import AppError, atomic_json, read_json
+from common import AppError, WORKER_REQUEST_LIMIT, atomic_json, read_json
 
 
 def failure_code(folder, returncode):
@@ -42,7 +42,7 @@ def failure_code(folder, returncode):
 
 def run(folder):
     folder = Path(folder).resolve()
-    request = read_json(folder / 'request.json')
+    request = read_json(folder / 'request.json', WORKER_REQUEST_LIMIT)
     # O_EXCL is the second admission fence, independent of the app's SQLite lock.
     claim = os.open(folder / 'claimed', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(claim, 'w') as stream:

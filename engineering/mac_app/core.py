@@ -20,7 +20,8 @@ import time
 import uuid
 
 import agents
-from common import (AppError, DEFAULTS, TERMINAL, atomic_json, digest, encoded,
+from common import (AppError, DEFAULTS, TERMINAL, EVENT_RECORD_LIMIT, JOB_RECORD_LIMIT,
+                    JOB_CONTROL_RESERVE, WORKER_REQUEST_LIMIT, atomic_json, digest, encoded,
                     parse_json, private_directory, read_json, repository, text,
                     validate_plan, validate_settings)
 from gitops import Repositories
@@ -79,25 +80,46 @@ class Store:
 
     def jobs(self):
         with self.lock:
-            return [parse_json(row[0]) for row in self.db.execute('SELECT document FROM jobs ORDER BY created DESC')]
+            return [parse_json(row[0], JOB_RECORD_LIMIT) for row in self.db.execute('SELECT document FROM jobs ORDER BY created DESC')]
 
     def get(self, key):
         with self.lock: row = self.db.execute('SELECT document FROM jobs WHERE id=?', (key,)).fetchone()
         if not row: raise AppError('JOB_NOT_FOUND')
-        return parse_json(row[0])
+        return parse_json(row[0], JOB_RECORD_LIMIT)
+
+    @staticmethod
+    def document(job):
+        # Reserve room for a terminal receipt, pause or execution fence. A large
+        # valid plan must not prevent the app from recording that it has stopped.
+        control = {'attempt', 'blocker', 'question', 'provider_error', 'last_terminal',
+                   'state', 'phase', 'updated', 'pause_requested', 'not_before', 'calls',
+                   'failures', 'failure_fingerprint'}
+        value = encoded(job)
+        payload = encoded({key: item for key, item in job.items() if key not in control})
+        if (len(value.encode()) > JOB_RECORD_LIMIT or
+                len(payload.encode()) > JOB_RECORD_LIMIT - JOB_CONTROL_RESERVE):
+            raise AppError('JOB_RECORD_TOO_LARGE',
+                           '작업 기록이 저장 한도를 넘었습니다. 원래 계획을 줄이지 않고 실행 기록의 크기를 확인해야 합니다.')
+        return value
 
     def events(self, key, after=0):
         with self.lock:
             return [dict(row) for row in self.db.execute('SELECT * FROM events WHERE job_id=? AND sequence>? ORDER BY sequence LIMIT 500', (key, after))]
 
     def event(self, key, kind, message):
+        if not isinstance(kind, str) or not 1 <= len(kind) <= 80 or not isinstance(message, str):
+            raise AppError('INVALID_EVENT_RECORD')
+        message = message[:6000]
+        if len(encoded({'job_id': key, 'kind': kind, 'message': message}).encode()) > EVENT_RECORD_LIMIT:
+            raise AppError('EVENT_RECORD_TOO_LARGE')
         with self.lock:
-            self.db.execute('INSERT INTO events(job_id,created,kind,message) VALUES (?,?,?,?)', (key, time.time(), kind, message[:6000]))
+            self.db.execute('INSERT INTO events(job_id,created,kind,message) VALUES (?,?,?,?)', (key, time.time(), kind, message))
 
     def update(self, key, **fields):
         with self.lock:
             job = self.get(key); job.update(fields); job['updated'] = time.time()
-            self.db.execute('UPDATE jobs SET state=?, document=? WHERE id=?', (job['state'], encoded(job), key))
+            document = self.document(job)
+            self.db.execute('UPDATE jobs SET state=?, document=? WHERE id=?', (job['state'], document, key))
             return job
 
     def create(self, value):
@@ -107,7 +129,7 @@ class Store:
             try:
                 prior = self.db.execute('SELECT document FROM jobs WHERE request_id=?', (rid,)).fetchone()
                 if prior:
-                    job = parse_json(prior[0])
+                    job = parse_json(prior[0], JOB_RECORD_LIMIT)
                     if (job['repository'].lower(), job['goal']) != (repo.lower(), goal): raise AppError('REQUEST_ID_CONFLICT')
                     self.db.execute('COMMIT'); return job
                 busy = self.db.execute("SELECT id FROM jobs WHERE lower(repository)=lower(?) AND state NOT IN ('accepted','cancelled')", (repo,)).fetchone()
@@ -123,7 +145,8 @@ class Store:
                        'review': None, 'supervision': None, 'ci': None, 'provider_error': None,
                        'program_scope': None, 'blocker': None, 'failure_fingerprint': None,
                        'last_terminal': None}
-                self.db.execute('INSERT INTO jobs VALUES (?,?,?,?,?,?)', (key, rid, repo, job['state'], encoded(job), now))
+                document = self.document(job)
+                self.db.execute('INSERT INTO jobs VALUES (?,?,?,?,?,?)', (key, rid, repo, job['state'], document, now))
                 self.event(key, 'created', '작업을 맡았습니다. 레포를 읽고 계획부터 세웁니다.')
                 self.db.execute('COMMIT'); return job
             except Exception:
@@ -134,7 +157,7 @@ class Store:
         with self.lock:
             row = self.db.execute('SELECT document FROM jobs WHERE request_id=?', (rid,)).fetchone()
         if not row: return None
-        job = parse_json(row[0])
+        job = parse_json(row[0], JOB_RECORD_LIMIT)
         if (job['repository'].lower(), job['goal']) != (repo.lower(), goal): raise AppError('REQUEST_ID_CONFLICT')
         return job
 
@@ -242,7 +265,7 @@ class Engine:
     def receipt_path(self, job):
         return self.store.directory / 'jobs' / job['id'] / job['attempt']['id'] / 'receipt.json'
 
-    def describe(self, job):
+    def describe(self, job, compact=False):
         """One observation of local evidence, without reading provider transcripts.
 
         Log bytes mean output was observed, never that useful work was completed.
@@ -275,6 +298,30 @@ class Engine:
             elif job['state'] == 'waiting_provider': health.update(retry_at=job['not_before'], failure_count=job['failures'])
             elif job['not_before'] > now: health.update(status='feedback_wait', retry_at=job['not_before'])
         result['health'] = health
+        if compact:
+            # UI/relay projections retain scope IDs, acceptance and exact heads.
+            # The authoritative full job stays intact in SQLite; list views do
+            # not repeat every original spec and complete review report.
+            result['projection'] = 'summary'
+            if job.get('plan'):
+                result['plan'] = {key: job['plan'][key] for key in ('summary', 'sources')}
+                result['plan']['tasks'] = [{key: task[key] for key in ('id', 'title', 'acceptance', 'depends_on')}
+                                          for task in job['plan']['tasks']]
+            if job.get('program_scope'):
+                result['program_scope'] = {key: value for key, value in job['program_scope'].items() if key != 'nodes'}
+                result['program_scope']['nodes'] = [{key: value for key, value in node.items() if key != 'spec'}
+                                                    for node in job['program_scope']['nodes']]
+            for role in ('review', 'supervision'):
+                evidence = job.get(role)
+                if evidence:
+                    result[role] = {key: value for key, value in evidence.items() if key != 'report'}
+                    report = evidence.get('report') or {}
+                    result[role].update(result=report.get('status'), summary=report.get('summary', ''),
+                                        check_count=len(report.get('checks') or []))
+            result.pop('user_answers', None)
+            result['answer_count'] = len(job.get('user_answers') or [])
+            if attempt and attempt.get('task'):
+                result['attempt']['task'] = {key: attempt['task'][key] for key in ('id', 'title')}
         return result
 
     def fence(self, job, code):
@@ -429,6 +476,9 @@ class Engine:
         request = {'attempt_id': attempt_id, 'binding': binding, 'role': role,
                    'profile': profile, 'checkout': str(self.repos.path(job).resolve()),
                    'prompt': agents.prompt(context, role, head), 'timeout_seconds': job['settings']['session_minutes'] * 60}
+        if len((encoded(request) + '\n').encode()) > WORKER_REQUEST_LIMIT:
+            raise AppError('WORKER_REQUEST_TOO_LARGE',
+                           '실행 입력이 한도를 넘었습니다. 원래 계획을 줄이지 않고 전달할 실행 기록의 크기를 확인해야 합니다.')
         atomic_json(attempt_dir / 'request.json', request); atomic_json(attempt_dir / 'schema.json', agents.SCHEMA)
         attempt = {'id': attempt_id, 'binding': binding, 'head': head, 'role': role,
                    'started': time.time(), 'timeout_seconds': request['timeout_seconds'], 'task': task}
@@ -468,7 +518,8 @@ class Engine:
             raise AppError('READ_ONLY_ROLE_MODIFIED_CHECKOUT')
         if receipt.get('error') is not None:
             error = receipt['error']
-            if not isinstance(error, str) or not error or receipt.get('report') is not None:
+            if (not isinstance(error, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,127}', error) or
+                    receipt.get('report') is not None):
                 raise AppError('CONTRADICTORY_TERMINAL_RECEIPT')
             if error == 'CHILD_PROCESS_GROUP_NOT_QUIESCENT':
                 raise AppError('WORKER_OUTCOME_UNKNOWN', '작업 프로세스 종료 상태를 확인해야 합니다: ' + error)
