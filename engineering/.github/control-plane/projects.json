@@ -43,6 +43,9 @@
     "program_post_merge_required_checks": [
       "protocol"
     ],
+    "program_post_merge_workflows": {
+      ".github/workflows/protocol.yml": ["protocol"]
+    },
     "program_post_merge_locked_blobs": {
       "runtime/crates/kix-kernel/src/lib.rs": "69564b166f0c27f9af5d8422f0a466b18d74c20f",
       "runtime/crates/kix-kernel/tests/quarantine_capacity.rs": "b607996c83a119c349f1cc90469ac1ba82764e20"
@@ -88,7 +91,11 @@
     "program_merge_policy": "STANDARD",
     "program_required_checks": [
       "bridge"
-    ]
+    ],
+    "program_post_merge_required_checks": ["bridge"],
+    "program_post_merge_workflows": {
+      ".github/workflows/app-ci.yml": ["bridge"]
+    }
   },
   "BeautifulMind-JT/film-unit-mv-studio": {
     "schema_version": 1,
@@ -130,7 +137,11 @@
     "program_required_checks": [
       "Python 3.11 / FFmpeg",
       "Python 3.12 / FFmpeg"
-    ]
+    ],
+    "program_post_merge_required_checks": ["Python 3.11 / FFmpeg", "Python 3.12 / FFmpeg"],
+    "program_post_merge_workflows": {
+      ".github/workflows/ci.yml": ["Python 3.11 / FFmpeg", "Python 3.12 / FFmpeg"]
+    }
   },
   "BeautifulMind-JT/maeum-gyeol": {
     "schema_version": 1,
@@ -205,6 +216,18 @@
     "program_merge_policy": "STANDARD",
     "program_required_checks": [
       "Typecheck, build, and test (stub)"
-    ]
+    ],
+    "program_post_merge_required_checks": [
+      "Typecheck, build, and test (stub)",
+      "Check for the protocol read token",
+      "Adapter tests against the reviewed gate"
+    ],
+    "program_post_merge_workflows": {
+      ".github/workflows/ci.yml": [
+        "Typecheck, build, and test (stub)",
+        "Check for the protocol read token",
+        "Adapter tests against the reviewed gate"
+      ]
+    }
   }
 }

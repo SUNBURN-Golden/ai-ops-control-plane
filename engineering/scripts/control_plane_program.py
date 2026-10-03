@@ -72,6 +72,7 @@ ASTRA_GATES = ("NONE", "MILESTONE", "ARCHITECTURE", "RELEASE")
 DELIVERABLE_MODES = ("PR",)  # program mode completes a node only through a host-pinned, merged PR
 REQUIRED_REVIEWS = {"A0": 0, "A1": 1, "A2": 2, "A3": 2}
 BLOCKING_LABELS = {"needs-user", "blocked", "decision-required"}
+COMPLETION_FAILURES = {"failure", "timed_out", "cancelled", "action_required", "stale", "startup_failure"}
 FABLE_PROGRAM_COMMAND = ("/usr/bin/sudo", "-n", "/opt/aiops/bin/aiops-fable", "program")
 
 
@@ -658,7 +659,7 @@ def post_merge_workflow_runs(api: cp.GithubApi, branch: str, merge_sha: str) -> 
     """Actual main/push runs, not mutable evidence prose or PR checks at another SHA."""
     result, page = [], 1
     while True:
-        value = api._request("GET", f"/actions/runs?event=push&branch={branch}&head_sha={merge_sha}"
+        value = api._request("GET", f"/actions/runs?event=push&branch={quote(branch, safe='')}&head_sha={merge_sha}"
                              f"&per_page=100&page={page}")
         runs = value.get("workflow_runs") if isinstance(value, dict) else None
         if not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs):
@@ -670,12 +671,127 @@ def post_merge_workflow_runs(api: cp.GithubApi, branch: str, merge_sha: str) -> 
         page += 1
 
 
+def post_merge_profile(cfg: Dict[str, Any]) -> Optional[Dict[str, List[str]]]:
+    """Reviewed runtime configuration, never a caller's check names or workflow prose."""
+    required = cfg.get("program_post_merge_required_checks")
+    workflows = cfg.get("program_post_merge_workflows")
+    valid_names = lambda names: isinstance(names, list) and bool(names) and all(
+        isinstance(name, str) and name.strip() == name and bool(name) for name in names) \
+        and len(names) == len(set(names))
+    if not valid_names(required) or not isinstance(workflows, dict) or not workflows:
+        return None
+    names = []
+    for path, checks in workflows.items():
+        if not isinstance(path, str) or not re.fullmatch(r"\.github/workflows/[A-Za-z0-9_-]+\.ya?ml", path) \
+                or not valid_names(checks):
+            return None
+        names.extend(checks)
+    if len(names) != len(set(names)) or set(names) != set(required):
+        return None
+    return workflows
+
+
+def post_merge_attempt_jobs(api: cp.GithubApi, run: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """An attempt's immutable job/check identities prevent reuse of an older PASS."""
+    jobs, page = [], 1
+    while True:
+        value = api._request("GET", f"/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs"
+                             f"?per_page=100&page={page}")
+        chunk = value.get("jobs") if isinstance(value, dict) else None
+        if not isinstance(chunk, list) or not all(isinstance(job, dict) for job in chunk):
+            raise ProgramError("post-merge workflow attempt jobs are malformed")
+        jobs.extend(chunk)
+        if len(chunk) < 100:
+            return jobs
+        page += 1
+
+
+def post_merge_origin_reasons(api: cp.GithubApi, cfg: Dict[str, Any], branch: str, merge_sha: str,
+                              profile: Dict[str, List[str]], checks: List[Dict[str, Any]]):
+    """Bind every required check to the latest real default/push workflow attempt."""
+    reasons, evidence, failed = [], [], False
+    malformed_paths = set()
+    def newest_runs():
+        newest = {}
+        for run in post_merge_workflow_runs(api, branch, merge_sha):
+            path = run.get("path")
+            if not isinstance(path, str):
+                continue
+            if path in profile and any(type(run.get(key)) is not int or run[key] < 1
+                                       for key in ("id", "workflow_id", "run_number", "run_attempt", "check_suite_id")):
+                malformed_paths.add(path)
+            # Run ids increase across workflow recreation; run_number may reset.
+            order = tuple(run.get(key) if type(run.get(key)) is int else 0 for key in ("id", "run_attempt"))
+            if path not in newest or order > newest[path][0]:
+                newest[path] = (order, run)
+        return {path: dict(run) for path, (_, run) in newest.items()}
+    object_value = lambda value: value if isinstance(value, dict) else {}
+    newest = newest_runs()
+    check_by_id = {check.get("id"): check for check in checks if type(check.get("id")) is int}
+    for path, names in profile.items():
+        run = newest.get(path, {})
+        if not run or any(type(run.get(key)) is not int or run[key] < 1
+                          for key in ("id", "workflow_id", "run_number", "run_attempt", "check_suite_id")) \
+                or object_value(run.get("repository")).get("full_name") != cfg["repository"] \
+                or object_value(run.get("head_repository")).get("full_name") != cfg["repository"]:
+            reasons.append(f"post-merge {path} lacks a valid exact {branch}/push workflow origin")
+            continue
+        observed = {"workflow": path, "run": run["id"], "attempt": run["run_attempt"],
+                    "check_suite": run["check_suite_id"], "checks": []}
+        evidence.append(observed)
+        if run.get("status") != "completed" or run.get("conclusion") != "success":
+            if run.get("status") == "completed" and run.get("conclusion") in COMPLETION_FAILURES:
+                failed = True
+            reasons.append(f"post-merge {path} latest exact {branch}/push attempt is not successful")
+            continue
+        jobs = post_merge_attempt_jobs(api, run)
+        for name in names:
+            named = [job for job in jobs if job.get("name") == name]
+            if not named:
+                reasons.append(f"post-merge required check {name!r} is absent from the current workflow attempt")
+                continue
+            for job in named:
+                url = job.get("check_run_url")
+                check_id = re.fullmatch(r"https://api\.github\.com/repos/" + re.escape(cfg["repository"])
+                                        + r"/check-runs/([1-9][0-9]*)", url or "") if isinstance(url, str) else None
+                check = check_by_id.get(int(check_id.group(1))) if check_id else None
+                if job.get("run_id") != run["id"] or job.get("run_attempt") != run["run_attempt"] \
+                        or job.get("head_sha") != merge_sha or job.get("head_branch") != branch \
+                        or not check or check.get("name") != name or check.get("head_sha") != merge_sha \
+                        or object_value(check.get("check_suite")).get("id") != run["check_suite_id"] \
+                        or object_value(check.get("app")).get("slug") != "github-actions":
+                    reasons.append(f"post-merge required check {name!r} lacks current-attempt check-suite provenance")
+                    continue
+                observed["checks"].append(check["id"])
+                if any(item.get("status") != "completed" or item.get("conclusion") != "success"
+                       for item in (job, check)):
+                    if any(item.get("status") == "completed" and item.get("conclusion") in COMPLETION_FAILURES
+                           for item in (job, check)):
+                        failed = True
+                    reasons.append(f"post-merge required check {name!r} has not succeeded in the current attempt")
+    # Attempt jobs stay readable after a rerun begins. Recheck the mutable latest
+    # binding after reading them so that their old PASS cannot release successors.
+    current = newest_runs()
+    binding = lambda run: tuple(run.get(key) for key in ("id", "workflow_id", "path", "run_attempt",
+                                                        "check_suite_id", "event", "head_branch", "head_sha",
+                                                        "repository", "head_repository", "status", "conclusion"))
+    for path in profile:
+        if path in malformed_paths:
+            reasons.append(f"post-merge {path} workflow metadata is malformed; cannot reuse an older success")
+        if binding(current.get(path, {})) != binding(newest.get(path, {})):
+            reasons.append(f"post-merge {path} workflow changed during verification; fresh completion required")
+            run = current.get(path, {})
+            if run.get("status") == "completed" and run.get("conclusion") in COMPLETION_FAILURES:
+                failed = True
+    return reasons, evidence, failed
+
+
 def delivery_completion(api: cp.GithubApi, cfg: Dict[str, Any], pin: Optional[Dict[str, Any]],
                         task_id: str) -> Dict[str, Any]:
     """Project completion and readiness at an exact delivery/merge, DISPATCH §20.
 
     There is no adopted protected post-merge failure/follow-up issuer yet. A
-    failed KIX verification therefore holds the original and downstream here;
+    failed product verification therefore holds the original and downstream here;
     E04 can later expose the independently recorded failure+corrective task for
     original-task closure without granting downstream product readiness.
     """
@@ -704,38 +820,27 @@ def delivery_completion(api: cp.GithubApi, cfg: Dict[str, Any], pin: Optional[Di
               "merge_commit": merge_sha, "reasons": reasons}
     if reasons:
         return result  # an already merged task must not be redispatched either
-    if cfg["repository"] != "BeautifulMind-JT/kix-protocol":
-        return {**result, "status": "DONE"}  # no required post-merge phase for these products
-    checks = latest_check_runs(all_check_runs(api, merge_sha))
+    profile = post_merge_profile(cfg)
+    if profile is None:
+        return {**result, "reasons": ["protected program_post_merge_required_checks/program_post_merge_workflows "
+                                      "profile is missing or invalid"]}
+    all_checks = all_check_runs(api, merge_sha)
+    checks = latest_check_runs(all_checks)
     statuses = api._request("GET", f"/commits/{merge_sha}/status") or {}
-    if any(check.get("status") == "completed" and check.get("conclusion")
-           not in ("success", "neutral", "skipped") for check in checks) \
-            or statuses.get("statuses") and statuses.get("state") in ("failure", "error"):
-        return {**result, "status": "POST_MERGE_FAILED",
-                "reasons": ["KIX post-merge CI failed; durable failure and corrective task evidence required"]}
+    ci_failed = any(check.get("status") == "completed" and check.get("conclusion") in COMPLETION_FAILURES
+                    for check in checks) \
+            or bool(statuses.get("statuses") and statuses.get("state") in ("failure", "error"))
     reasons.extend(verification_reasons(api, cfg, merge_sha,
                                         required_checks_key="program_post_merge_required_checks"))
-    push_runs = post_merge_workflow_runs(api, branch, merge_sha)
-    newest = {}
-    for run in push_runs:
-        key = run.get("workflow_id", run.get("path"))
-        order = (run.get("run_number", 0), run.get("run_attempt", 1), run.get("id", 0))
-        if key not in newest or order > newest[key][0]:
-            newest[key] = (order, run)
-    push_runs = [run for _, run in newest.values()]
-    if any(run.get("status") == "completed" and run.get("conclusion")
-           not in ("success", "neutral", "skipped") for run in push_runs):
-        return {**result, "status": "POST_MERGE_FAILED",
-                "reasons": ["KIX exact main/push workflow failed; corrective task evidence required"]}
-    verified_suites = {run.get("check_suite_id") for run in push_runs
-                       if run.get("status") == "completed" and run.get("conclusion") == "success"
-                       and type(run.get("check_suite_id")) is int}
-    post_merge_checks = cfg.get("program_post_merge_required_checks")
-    for name in post_merge_checks if isinstance(post_merge_checks, list) else []:
-        required = [check for check in checks if check.get("name") == name]
-        if not required or any((check.get("check_suite") or {}).get("id") not in verified_suites
-                               for check in required):
-            reasons.append(f"KIX post-merge required check {name!r} lacks successful exact main/push origin")
+    origin_reasons, evidence, failed = post_merge_origin_reasons(api, cfg, branch, merge_sha, profile, all_checks)
+    result["verification_runs"] = evidence
+    reasons.extend(origin_reasons)
+    if ci_failed:
+        reasons.append("post-merge CI failed; durable failure and corrective task evidence required")
+    if failed or ci_failed:
+        return {**result, "status": "POST_MERGE_FAILED", "reasons": reasons}
+    if cfg["repository"] != "BeautifulMind-JT/kix-protocol":
+        return {**result, "status": "MERGED_POST_VERIFY" if reasons else "DONE", "reasons": reasons}
     # Expected blobs are reviewed profile bytes bound by the installed runtime;
     # never parse attacker-editable AGENTS or accept caller-selected baselines.
     locked = cfg.get("program_post_merge_locked_blobs")
@@ -754,7 +859,7 @@ def delivery_completion(api: cp.GithubApi, cfg: Dict[str, Any], pin: Optional[Di
                 actual = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
                 valid = value.get("type") == "file" and value.get("encoding") == "base64" \
                     and value.get("sha") == blob and actual == blob
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, AttributeError):
                 valid = False
             if not valid:
                 return {**result, "status": "POST_MERGE_FAILED",
@@ -1187,7 +1292,10 @@ def reap(issue_number: int, launch_request_id: str, evidence: str) -> Dict[str, 
 def all_check_runs(api: cp.GithubApi, head: str) -> List[Dict[str, Any]]:
     runs, page = [], 1
     while True:
-        chunk = (api._request("GET", f"/commits/{head}/check-runs?per_page=100&page={page}") or {}).get("check_runs", [])
+        value = api._request("GET", f"/commits/{head}/check-runs?per_page=100&page={page}")
+        chunk = value.get("check_runs") if isinstance(value, dict) else None
+        if not isinstance(chunk, list) or not all(isinstance(check, dict) for check in chunk):
+            raise ProgramError("GitHub check-run list is malformed")
         runs.extend(chunk)
         if len(chunk) < 100:
             return runs
@@ -1203,7 +1311,8 @@ def latest_check_runs(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     newest: Dict[tuple, tuple] = {}
     for index, run in enumerate(runs):
-        key = ((run.get("app") or {}).get("id"), run.get("name"))
+        app = run.get("app") if isinstance(run.get("app"), dict) else {}
+        key = (app.get("id"), run.get("name"))
         order = (run.get("id") if type(run.get("id")) is int else 0, index)
         if key not in newest or order > newest[key][0]:
             newest[key] = (order, run)
