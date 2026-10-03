@@ -8,6 +8,7 @@ import subprocess
 
 import agents
 from common import AppError, encoded, parse_json
+from program_scope import load_scope
 
 
 def execute(argv, cwd=None, timeout=120, allowed=(0,)):
@@ -98,13 +99,30 @@ class Repositories:
             result[path] = sha
         return result
 
+    def program_scope(self, job):
+        checkout = self.path(job)
+        tracked = git(checkout, 'ls-tree', '--name-only', job['base_sha'], '--', '.aiops/program.json')
+        if not tracked: return None
+        blob = git(checkout, 'rev-parse', job['base_sha'] + ':.aiops/program.json')
+        raw = git(checkout, 'show', job['base_sha'] + ':.aiops/program.json')
+        return load_scope(raw, job['repository'], blob)
+
+    def assert_scope(self, job):
+        scope = job.get('program_scope')
+        if not scope: return
+        changed = git(self.path(job), 'diff', '--name-only', job['base_sha'], 'HEAD', '--', scope['path'])
+        if changed or git(self.path(job), 'diff', 'HEAD', '--', scope['path']):
+            raise AppError('PROGRAM_SCOPE_CHANGED', '원래 프로그램 계획이 변경되었습니다. 기존 범위의 완료 조건을 바꿀 수 없습니다.')
+
     def checkpoint(self, job):
         self.assert_binding(job)
+        self.assert_scope(job)
         checkout = self.path(job)
         changed = git(checkout, 'status', '--porcelain=v1', '-z')
         # App data is outside the checkout. Common credential files cannot be added
         # as a side effect of a broad git add. Existing tracked examples are allowed.
         names = git(checkout, 'diff', 'HEAD', '--name-only', '-z') + git(checkout, 'ls-files', '--others', '--exclude-standard', '-z')
+        if job.get('base_sha'): names += git(checkout, 'diff', job.get('verified_base', job['base_sha']), 'HEAD', '--name-only', '-z')
         for name in names.split('\x00'):
             if name == 'AGENTS.md' or name.endswith('/AGENTS.md') or name.startswith(('.aiops/', 'RUNBOOKS/', 'docs/decisions/')):
                 raise AppError('AUTHORITY_EDIT_NEEDS_USER', '기준 계약 변경은 별도 결정을 남겨야 합니다: ' + name)

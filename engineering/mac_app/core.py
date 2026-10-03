@@ -24,11 +24,25 @@ from common import (AppError, DEFAULTS, TERMINAL, atomic_json, digest, encoded,
                     parse_json, private_directory, read_json, repository, text,
                     validate_plan, validate_settings)
 from gitops import Repositories
+from program_scope import bind_specs, validate_coverage
 
 DEFAULT_GOAL = '레포의 공식 문서에 명시된 산출물을 완성하고 테스트와 독립 검토를 거쳐 최종 검수할 수 있게 해 주세요. 일반적인 구현 판단은 직접 하고, 꼭 필요한 경우에만 질문해 주세요.'
 ACTIVE = ('queued', 'preparing', 'planning', 'building', 'reviewing', 'supervising', 'publishing', 'verifying', 'waiting_provider')
-PROVIDER_SETUP = ('MODEL_UNAVAILABLE', 'PROVIDER_LOGIN_REQUIRED', 'CLI_SETUP_REQUIRED', 'PROVIDER_PERMISSION_OR_RESULT_ERROR')
+PROVIDER_SETUP = ('MODEL_UNAVAILABLE', 'PROVIDER_LOGIN_REQUIRED', 'CLI_SETUP_REQUIRED', 'PROVIDER_PERMISSION_OR_RESULT_ERROR',
+                  'PROVIDER_PERMISSION_REQUIRED', 'PROVIDER_USAGE_LIMIT', 'MISSING_PROVIDER', 'WORKER_SPAWN_FAILED')
+TRANSIENT_FAILURES = ('PROVIDER_TEMPORARILY_UNAVAILABLE', 'COMMAND_TIMEOUT', 'SESSION_TIMEOUT')
 ROLE_STATE = {'planner': 'planning', 'builder': 'building', 'reviewer': 'reviewing', 'supervisor': 'supervising'}
+
+
+def job_request(value):
+    if not isinstance(value, dict) or set(value) - {'repository', 'goal', 'request_id'}:
+        raise AppError('INVALID_JOB_REQUEST')
+    repo = repository(value.get('repository'))
+    goal = text(value.get('goal') or DEFAULT_GOAL, 'goal')
+    rid = value.get('request_id')
+    if not isinstance(rid, str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', rid):
+        raise AppError('REQUEST_ID_REQUIRED')
+    return repo, goal, rid
 
 
 class Store:
@@ -87,13 +101,7 @@ class Store:
             return job
 
     def create(self, value):
-        if not isinstance(value, dict) or set(value) - {'repository', 'goal', 'request_id'}:
-            raise AppError('INVALID_JOB_REQUEST')
-        repo = repository(value.get('repository'))
-        goal = text(value.get('goal') or DEFAULT_GOAL, 'goal')
-        rid = value.get('request_id')
-        if not isinstance(rid, str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', rid):
-            raise AppError('REQUEST_ID_REQUIRED')
+        repo, goal, rid = job_request(value)
         with self.lock:
             self.db.execute('BEGIN IMMEDIATE')
             try:
@@ -112,12 +120,23 @@ class Store:
                        'task_index': 0, 'built_tasks': [], 'feedback': [], 'user_answers': [],
                        'attempt': None, 'calls': 0, 'pause_requested': False, 'correcting': False,
                        'not_before': 0, 'failures': 0, 'pr_url': None, 'summary': '', 'question': None,
-                       'review': None, 'supervision': None, 'ci': None, 'provider_error': None}
+                       'review': None, 'supervision': None, 'ci': None, 'provider_error': None,
+                       'program_scope': None, 'blocker': None, 'failure_fingerprint': None,
+                       'last_terminal': None}
                 self.db.execute('INSERT INTO jobs VALUES (?,?,?,?,?,?)', (key, rid, repo, job['state'], encoded(job), now))
                 self.event(key, 'created', '작업을 맡았습니다. 레포를 읽고 계획부터 세웁니다.')
                 self.db.execute('COMMIT'); return job
             except Exception:
                 self.db.execute('ROLLBACK'); raise
+
+    def existing_request(self, value):
+        repo, goal, rid = job_request(value)
+        with self.lock:
+            row = self.db.execute('SELECT document FROM jobs WHERE request_id=?', (rid,)).fetchone()
+        if not row: return None
+        job = parse_json(row[0])
+        if (job['repository'].lower(), job['goal']) != (repo.lower(), goal): raise AppError('REQUEST_ID_CONFLICT')
+        return job
 
     def action(self, key, action, value=None):
         with self.lock:
@@ -133,11 +152,12 @@ class Store:
                 if job['state'] not in ('paused', 'needs_user', 'waiting_provider') or job['attempt']:
                     raise AppError('CANNOT_RESUME', '실행 결과가 불명확한 작업은 재실행할 수 없습니다.')
                 answers = job['user_answers']
-                if job['state'] == 'needs_user':
+                if job['state'] == 'needs_user' and not job.get('provider_error'):
                     answer = text((value or {}).get('answer'), 'answer')
                     answers = [*answers, {'question': job['question'], 'answer': answer, 'at': time.time()}]
                 fields = {'state': job['phase'], 'pause_requested': False, 'question': None,
-                          'not_before': 0, 'user_answers': answers, 'provider_error': None}
+                          'not_before': 0, 'user_answers': answers, 'provider_error': None,
+                          'blocker': None, 'failures': 0, 'failure_fingerprint': None}
                 if job['settings']['max_agent_calls'] and job['calls'] >= job['settings']['max_agent_calls']:
                     new_limit = self.settings()['max_agent_calls']
                     if new_limit and new_limit <= job['calls']:
@@ -152,7 +172,8 @@ class Store:
                 phase = 'reviewing' if job['phase'] in ('reviewing', 'supervising', 'publishing', 'verifying') else job['phase']
                 fields = {'settings': settings, 'review': None, 'supervision': None, 'ci': None, 'phase': phase}
                 if job.get('provider_error') in PROVIDER_SETUP:
-                    fields.update(state=phase, question=None, provider_error=None, not_before=0, pause_requested=False)
+                    fields.update(state=phase, question=None, provider_error=None, not_before=0, pause_requested=False,
+                                  blocker=None, failures=0, failure_fingerprint=None)
                 # A model change cannot answer a consequential decision for the user.
                 self.event(key, 'model_profile_replaced', encoded({'old': job['settings']['roles'], 'new': settings['roles']}))
                 message = '사용자가 이 작업에 새 모델 설정을 적용했습니다. 필요한 검토는 다시 수행합니다.'
@@ -192,26 +213,109 @@ class Engine:
             job = self.store.get(candidates[0]['id'])
             if job['id'] in self.store.execution_busy or (not job['attempt'] and job['state'] not in ACTIVE):
                 return False
-            if job['state'] == 'unknown': return False
+            if job['state'] == 'unknown':
+                # A late receipt may prove termination. Observation cannot reserve
+                # or launch anything and must pass the same binding/exit fences.
+                if not job['attempt'] or not self.receipt_path(job).exists(): return False
             self.store.execution_busy.add(job['id'])
         self.keep_awake(job['settings']['keep_awake'])
         try: self.step(job)
         except AppError as exc:
-            self.store.event(job['id'], 'blocker', str(exc))
-            if self.store.get(job['id'])['attempt']:
-                self.store.update(job['id'], state='unknown', question='작업 실행 기록 확인이 필요합니다. ' + str(exc))
-            elif exc.code in ('COMMAND_FAILED', 'COMMAND_TIMEOUT'):
-                self.store.update(job['id'], state='waiting_provider', not_before=time.time() + 300)
+            current = self.store.get(job['id'])
+            if current['attempt']:
+                self.fence(current, exc.code)
+            elif exc.code in ('COMMAND_FAILED', 'COMMAND_TIMEOUT', *PROVIDER_SETUP):
+                self.operational_failure(current, exc.code)
             else:
-                self.store.update(job['id'], state='needs_user', question=str(exc))
+                self.store.event(job['id'], 'blocker', str(exc))
+                self.store.update(job['id'], state='needs_user', question=str(exc),
+                                  blocker={'code': exc.code, 'phase': current['phase'], 'at': time.time()})
                 self.notify(job)
         except (OSError, sqlite3.Error, ValueError) as exc:
-            self.store.event(job['id'], 'blocker', type(exc).__name__)
-            self.store.update(job['id'], state='unknown' if self.store.get(job['id'])['attempt'] else 'needs_user',
-                              question='실행 환경 확인이 필요합니다: ' + type(exc).__name__)
+            current = self.store.get(job['id'])
+            if current['attempt']: self.fence(current, type(exc).__name__)
+            else: self.operational_failure(current, type(exc).__name__)
         finally:
             with self.store.lock: self.store.execution_busy.discard(job['id'])
         return True
+
+    def receipt_path(self, job):
+        return self.store.directory / 'jobs' / job['id'] / job['attempt']['id'] / 'receipt.json'
+
+    def describe(self, job):
+        """One observation of local evidence, without reading provider transcripts.
+
+        Log bytes mean output was observed, never that useful work was completed.
+        The worker's bound terminal receipt is the only way to free its reservation.
+        """
+        result = copy.deepcopy(job); now = time.time(); attempt = job.get('attempt')
+        health = {'observed_at': now, 'status': job['state'], 'retry_at': None,
+                  'implementation_count': len(job['built_tasks']),
+                  'planned_count': len((job.get('plan') or {}).get('tasks', [])),
+                  'program_count': (job.get('program_scope') or {}).get('count'),
+                  'completion_kind': 'draft_delivery', 'last_terminal': job.get('last_terminal')}
+        if attempt:
+            deadline = attempt['started'] + attempt['timeout_seconds']
+            folder = self.receipt_path(job).parent
+            total = 0; last = None
+            for name in ('stdout.log', 'stderr.log'):
+                try: info = (folder / name).lstat()
+                except OSError: continue
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid(): continue
+                total += info.st_size
+                if info.st_size: last = max(last or attempt['started'], min(now, info.st_mtime))
+            health.update(status='outcome_unknown' if job['state'] == 'unknown' else 'finishing' if now > deadline
+                          else 'quiet' if last is None or now-last > 300 else 'running',
+                          role=attempt['role'], profile=job['settings']['roles'][attempt['role']],
+                          elapsed_seconds=max(0, int(now-attempt['started'])), deadline_at=deadline,
+                          output_bytes=total, last_output_at=last, attempt_id=attempt['id'])
+        elif job['state'] in ACTIVE:
+            blocking = next((j for j in self.store.jobs() if j['attempt'] and j['state'] == 'unknown'), None)
+            if blocking: health.update(status='waiting_for_owner', blocking_job_id=blocking['id'], blocking_repository=blocking['repository'])
+            elif job['state'] == 'waiting_provider': health.update(retry_at=job['not_before'], failure_count=job['failures'])
+            elif job['not_before'] > now: health.update(status='feedback_wait', retry_at=job['not_before'])
+        result['health'] = health
+        return result
+
+    def fence(self, job, code):
+        previous = job.get('blocker') or {}
+        if job['state'] == 'unknown' and previous.get('code') == code: return
+        self.store.update(job['id'], state='unknown', question='종료 근거가 확인될 때까지 중복 실행을 막습니다. 확인 코드: ' + code,
+                          blocker={'code': code, 'phase': job['phase'], 'attempt': job['attempt']['id'], 'at': time.time()})
+        self.store.event(job['id'], 'execution_unknown', '실행 종료 확인이 필요합니다: ' + code)
+        if job['state'] != 'unknown': self.notify(job)
+
+    def operational_failure(self, job, code):
+        fingerprint = digest({'code': code, 'phase': job['phase'], 'task': job['task_index'], 'roles': job['settings']['roles']})
+        failures = job['failures'] + 1 if job.get('failure_fingerprint') == fingerprint else 1
+        messages = {
+            'MODEL_UNAVAILABLE': '선택한 모델을 사용할 수 없습니다. 모델 설정을 확인해 주세요.',
+            'PROVIDER_LOGIN_REQUIRED': '선택한 실행 도구에 Mac에서 로그인한 뒤 계속 진행해 주세요.',
+            'CLI_SETUP_REQUIRED': '실행 도구의 버전과 sandbox 설정을 확인해 주세요.',
+            'PROVIDER_PERMISSION_OR_RESULT_ERROR': '실행 도구의 필수 권한과 구조화된 결과 설정을 확인해 주세요.',
+            'PROVIDER_PERMISSION_REQUIRED': '비대화형 실행 권한이 부족합니다. 권한을 확인한 뒤 계속 진행해 주세요.',
+            'PROVIDER_USAGE_LIMIT': '선택한 계정의 사용 한도에 도달했습니다. 한도가 갱신된 뒤 계속 진행해 주세요.',
+            'MISSING_PROVIDER': '선택한 실행 도구가 설치되어 있지 않습니다. 연결 화면을 확인해 주세요.',
+            'WORKER_SPAWN_FAILED': '로컬 작업 프로세스를 시작하지 못했습니다. 실행 환경을 확인해 주세요.',
+        }
+        # This holds infrastructure failures, never ordinary engineering FAILs.
+        # Explicit transient outages remain automatic; unknown repeated faults
+        # need a concrete environment check instead of spending calls forever.
+        blocked = code in PROVIDER_SETUP or (code not in TRANSIENT_FAILURES and failures >= 3)
+        delay = min(3600, 300 * 2 ** min(failures - 1, 4))
+        now = time.time()
+        message = messages.get(code, '같은 실행 오류가 반복되었습니다. 실행 도구를 확인한 뒤 같은 작업을 계속 진행해 주세요.')
+        blocker = {'code': code, 'phase': job['phase'], 'at': now, 'count': failures,
+                   'retry_at': None if blocked else now + delay}
+        self.store.update(job['id'], attempt=None, failures=failures, failure_fingerprint=fingerprint,
+                          state='needs_user' if blocked else 'waiting_provider', provider_error=code,
+                          question=message if blocked else None, blocker=blocker, not_before=0 if blocked else now + delay,
+                          last_terminal={'attempt': job['attempt']['id'], 'role': job['attempt']['role'],
+                          'head': job['attempt']['head'], 'at': now, 'error': code, 'status': 'error'}
+                          if job['attempt'] else job.get('last_terminal'))
+        self.store.event(job['id'], 'setup_required' if blocked else 'provider_wait',
+                         message if blocked else '같은 도구와 작업으로 연결을 다시 시도합니다. 확인 코드: ' + code)
+        if blocked: self.notify(job)
 
     def keep_awake(self, enabled):
         if sys.platform != 'darwin': return
@@ -247,7 +351,9 @@ class Engine:
         if phase == 'preparing':
             self.store.update(job['id'], state='preparing')
             pins = self.repos.prepare(job)
-            self.store.update(job['id'], **pins, state='planning', phase='planning')
+            prepared = dict(job, **pins)
+            scope = self.repos.program_scope(prepared)
+            self.store.update(job['id'], **pins, program_scope=scope, state='planning', phase='planning', blocker=None)
             self.store.event(job['id'], 'prepared', '레포를 별도 작업 공간에 준비했습니다.')
         elif phase in ('planning', 'building', 'reviewing', 'supervising'):
             role = next(key for key, value in ROLE_STATE.items() if value == phase)
@@ -271,6 +377,8 @@ class Engine:
             self.store.update(job['id'], pr_url=url, state='verifying', phase='verifying', not_before=time.time() + 60)
             self.store.event(job['id'], 'published', '검수용 PR을 만들었습니다. GitHub 검증 결과를 확인합니다.')
         elif phase == 'verifying':
+            if not self.inspected_head(job):
+                return self.rework(job, ['CI 확인 중 코드나 검토 근거가 달라졌습니다. 현재 코드 전체를 다시 검증하세요.'])
             data = self.repos.checks(job)
             self.store.update(job['id'], ci=data)
             if data['state'] == 'failed':
@@ -278,6 +386,10 @@ class Engine:
             elif data['state'] == 'pending':
                 self.store.update(job['id'], not_before=time.time() + 60)
             else:
+                sync = self.repos.synchronize_base(job)
+                if sync['changed']:
+                    self.store.update(job['id'], verified_base=sync['base'], head=self.repos.head(job))
+                    return self.rework(job, ['CI 확인 중 기준 브랜치가 변경되었습니다. 최신 기준에서 전체 검증을 다시 실행하세요.'])
                 self.store.update(job['id'], state='ready', not_before=0)
                 self.store.event(job['id'], 'ready', '개발·감사·감리를 마쳤습니다. 최종 결과를 검수해 주세요.')
                 self.notify(job, ready=True)
@@ -303,6 +415,7 @@ class Engine:
         profile = job['settings']['roles'][role]
         agents.command(profile, role, attempt_dir, checkout=self.repos.path(job))
         self.repos.assert_binding(job)
+        self.repos.assert_scope(job)
         if role != 'builder' and not self.repos.clean(job): raise AppError('READ_ONLY_INPUT_IS_DIRTY')
         head = self.repos.head(job)
         task = None
@@ -336,12 +449,15 @@ class Engine:
 
     def observe(self, job):
         attempt = job['attempt']; folder = self.store.directory / 'jobs' / job['id'] / attempt['id']
-        receipt_path = folder / 'receipt.json'
+        receipt_path = self.receipt_path(job)
         if not receipt_path.exists():
             if time.time() > attempt['started'] + attempt['timeout_seconds'] + 120:
                 raise AppError('WORKER_OUTCOME_UNKNOWN', '실행 결과가 확인되지 않았습니다. 중복 실행을 막기 위해 멈췄습니다.')
             return
         receipt = read_json(receipt_path)
+        if (not isinstance(receipt, dict) or
+                not {'attempt_id', 'binding', 'exit_code', 'report', 'error', 'process_group_quiescent'} <= set(receipt)):
+            raise AppError('INVALID_TERMINAL_RECEIPT')
         if receipt.get('attempt_id') != attempt['id'] or receipt.get('binding') != attempt['binding']:
             raise AppError('RECEIPT_BINDING_MISMATCH')
         if receipt.get('process_group_quiescent') is not True:
@@ -350,48 +466,53 @@ class Engine:
         # clearing any reservation, including login/setup and malformed output.
         if attempt['role'] != 'builder' and (self.repos.head(job) != attempt['head'] or not self.repos.clean(job)):
             raise AppError('READ_ONLY_ROLE_MODIFIED_CHECKOUT')
-        if receipt.get('error'):
+        if receipt.get('error') is not None:
             error = receipt['error']
+            if not isinstance(error, str) or not error or receipt.get('report') is not None:
+                raise AppError('CONTRADICTORY_TERMINAL_RECEIPT')
             if error == 'CHILD_PROCESS_GROUP_NOT_QUIESCENT':
                 raise AppError('WORKER_OUTCOME_UNKNOWN', '작업 프로세스 종료 상태를 확인해야 합니다: ' + error)
-            if error in PROVIDER_SETUP:
-                message = {'MODEL_UNAVAILABLE': '선택한 모델을 이 계정에서 사용할 수 없습니다. 모델 설정을 고친 뒤 이 작업에 새 설정을 적용해 주세요.',
-                           'PROVIDER_LOGIN_REQUIRED': '선택한 실행 도구에 로그인이 필요합니다. Mac에서 로그인한 뒤 이어서 진행해 주세요.',
-                           'CLI_SETUP_REQUIRED': '선택한 실행 도구의 버전 또는 sandbox 설정 확인이 필요합니다.',
-                           'PROVIDER_PERMISSION_OR_RESULT_ERROR': '실행 도구의 필수 권한 또는 구조화된 결과 설정을 확인해야 합니다.'}[error]
-                self.store.update(job['id'], attempt=None, state='needs_user', provider_error=error, question=message)
-                self.store.event(job['id'], 'setup_required', message); self.notify(job); return
-            delay = min(3600, 300 * 2 ** min(job['failures'], 4))
-            self.store.update(job['id'], attempt=None, state='waiting_provider', not_before=time.time() + delay,
-                              failures=job['failures'] + 1)
-            self.store.event(job['id'], 'provider_wait', '실행 도구가 결과를 반환하지 못했습니다. 같은 모델로 나중에 다시 시도합니다. ' + error)
+            self.operational_failure(job, error)
             return
+        if type(receipt.get('exit_code')) is not int or receipt['exit_code'] != 0:
+            raise AppError('CONTRADICTORY_TERMINAL_RECEIPT')
         report = receipt['report']; role = attempt['role']
         if not isinstance(report, dict) or report.get('status') not in ('complete', 'fail', 'needs_user'):
             raise AppError('INVALID_RECEIPT_REPORT')
         provider_evidence = receipt.get('provider_evidence')
-        if provider_evidence is not None:
-            profile = job['settings']['roles'][role]
-            if (not isinstance(provider_evidence, dict) or provider_evidence.get('provider') != profile['provider'] or
-                    provider_evidence.get('harness') != agents.CATALOG[profile['provider']]['harness'] or
-                    provider_evidence.get('model_requested') != profile['model']):
-                raise AppError('PROVIDER_PROFILE_MISMATCH')
+        profile = job['settings']['roles'][role]
+        if (not isinstance(provider_evidence, dict) or provider_evidence.get('provider') != profile['provider'] or
+                provider_evidence.get('harness') != agents.CATALOG[profile['provider']]['harness'] or
+                provider_evidence.get('model_requested') != profile['model']):
+            raise AppError('PROVIDER_PROFILE_MISMATCH')
+        agents.validate_report(report)
+        if report['status'] == 'complete' and (report['findings'] or report['question'].strip() or
+                                                not report['checks'] or any(not check.strip() for check in report['checks'])):
+            report = dict(report, status='fail', findings=report['findings'] or ['완료 보고에 미해결 질문이 있거나 실제 검증 근거가 없습니다. 검사 근거를 남기고 다시 보고하세요.'])
         self.store.update(job['id'], attempt=None, failures=0, not_before=0, summary=report['summary'],
-                          last_provider_evidence=provider_evidence)
+                          last_provider_evidence=provider_evidence, provider_error=None, blocker=None, failure_fingerprint=None,
+                          state=ROLE_STATE[role], last_terminal={'attempt': attempt['id'], 'role': role, 'head': attempt['head'],
+                          'at': time.time(), 'exit_code': 0, 'status': report['status']})
         self.store.event(job['id'], 'result', report['summary'])
         if report['status'] == 'needs_user':
             self.store.update(job['id'], state='needs_user', question=report['question']); self.notify(job); return
         if report['status'] == 'fail':
             feedback = report['findings'] or [report['summary']]
+            fingerprint = digest({'role': role, 'task': attempt['task'], 'head': self.repos.head(job), 'feedback': feedback})
+            repeats = job.get('feedback_repeats', 0) + 1 if job.get('feedback_fingerprint') == fingerprint else 0
+            retry_at = time.time() + min(300, 10 * 2 ** min(repeats, 5))
+            self.store.update(job['id'], feedback_fingerprint=fingerprint, feedback_repeats=repeats)
             if role == 'planner':
-                self.store.update(job['id'], state='planning', feedback=feedback, not_before=time.time() + 10)
+                self.store.update(job['id'], state='planning', feedback=feedback, not_before=retry_at)
             elif role == 'builder':
-                self.store.update(job['id'], state='building', feedback=feedback)
-            else: self.rework(job, feedback)
+                self.store.update(job['id'], state='building', feedback=feedback, not_before=retry_at)
+            else: self.rework(job, feedback, retry_at)
             return
         if role == 'planner':
             try:
-                plan = validate_plan(report['plan']); pins = self.repos.source_pins(job, plan)
+                plan = validate_plan(report['plan']); plan = bind_specs(plan, job.get('program_scope'))
+                validate_plan(plan); validate_coverage(plan, job.get('program_scope'))
+                pins = self.repos.source_pins(job, plan)
             except AppError as exc:
                 self.store.update(job['id'], state='planning', feedback=['계획을 수정하세요: ' + str(exc)], not_before=time.time() + 10); return
             self.store.update(job['id'], plan=plan, source_pins=pins, state='building', phase='building', feedback=[])
@@ -419,10 +540,32 @@ class Engine:
                     raise AppError('INDEPENDENT_REVIEW_REQUIRED')
                 self.store.update(job['id'], supervision=evidence, phase='publishing', state='publishing', feedback=[])
 
-    def rework(self, job, feedback):
+    def rework(self, job, feedback, retry_at=0):
         self.store.update(job['id'], state='building', phase='building', correcting=True,
-                          feedback=feedback, review=None, supervision=None, ci=None, not_before=0)
+                          feedback=feedback, review=None, supervision=None, ci=None, not_before=retry_at)
         self.store.event(job['id'], 'rework', '개발자가 검토 의견을 반영하고 테스트를 다시 진행합니다.')
+
+    def inspected_head(self, job):
+        return (self.repos.head(job) == job['head'] and self.repos.clean(job) and
+                all(job.get(role) and job[role]['head'] == job['head'] for role in ('review', 'supervision')) and
+                job['review']['attempt'] != job['supervision']['attempt'])
+
+    def validate_acceptance(self, job):
+        if job['state'] != 'ready': raise AppError('NOT_READY_FOR_ACCEPTANCE')
+        if not self.inspected_head(job):
+            self.rework(job, ['사용자 검수 전에 코드가 변경되었습니다. 전체 검증을 다시 실행하세요.'])
+            raise AppError('INSPECTION_CHANGED', '검토 대상이 변경되어 다시 검증합니다.')
+        sync = self.repos.synchronize_base(job)
+        if sync['changed']:
+            self.store.update(job['id'], verified_base=sync['base'], head=self.repos.head(job))
+            self.rework(job, ['사용자 검수 전에 기준 브랜치가 변경되었습니다. 통합과 전체 검증을 다시 진행하세요.'])
+            raise AppError('INSPECTION_CHANGED', '기준 브랜치가 변경되어 다시 검증합니다.')
+        if job.get('pr_url'):
+            ci = self.repos.checks(job); self.store.update(job['id'], ci=ci)
+            if ci['state'] == 'failed': self.rework(job, ['사용자 검수 전 CI 실패를 해결하세요: ' + encoded(ci['checks'])])
+            elif ci['state'] == 'pending': self.store.update(job['id'], state='verifying', phase='verifying', not_before=time.time()+60)
+            if ci['state'] in ('failed', 'pending'):
+                raise AppError('INSPECTION_CHANGED', '최신 CI 결과를 다시 확인합니다.')
 
 
 def service_lock(directory):

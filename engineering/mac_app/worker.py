@@ -29,6 +29,14 @@ def failure_code(folder, returncode):
         return 'PROVIDER_LOGIN_REQUIRED'
     if re.search(r'unexpected argument|unrecognized (argument|option)|unknown option|sandbox.{0,80}(unavailable|not available|failed|not supported)', message):
         return 'CLI_SETUP_REQUIRED'
+    if re.search(r'permission denied|(?:sudo.{0,80})?(?:a )?password (?:is )?required|(?:approval|permission).{0,60}(?:required|non.?interactive)|(?:cannot|can not|unable to).{0,40}(?:prompt|ask).{0,40}(?:approval|permission)', message):
+        return 'PROVIDER_PERMISSION_REQUIRED'
+    # Exhausted subscription capacity needs an operator action, even if the
+    # provider reports HTTP 429. It is not a transient rate-limit retry.
+    if re.search(r'(?:subscription|free(?:.?tier)?|weekly|usage|quota).{0,80}(?:exhausted|exceeded|depleted|reached|used up)|(?:insufficient|exhausted|exceeded|depleted).{0,30}(?:quota|credits)|(?:usage|weekly|subscription|free(?:.?tier)?).{0,40}(?:limit|cap).{0,40}(?:hit|reached|exceeded)|(?:hit|reached|exceeded).{0,40}(?:usage|weekly|subscription|free(?:.?tier)?).{0,40}(?:limit|cap)|(?:out of|no remaining).{0,20}(?:credits|quota)', message):
+        return 'PROVIDER_USAGE_LIMIT'
+    if re.search(r'temporar(?:y|ily).{0,60}(?:unavailable|failure|error)|(?:connection|network).{0,40}(?:reset|refused|unreachable|timed out|timeout)|econnreset|econnrefused|etimedout|rate.?limit|\b429\b|\b(?:http(?: status)?|status(?: code)?|error(?: code)?)\s*[:=]?\s*5\d\d\b|\b5\d\d\s+(?:bad gateway|service unavailable|internal server error|gateway timeout)', message):
+        return 'PROVIDER_TEMPORARILY_UNAVAILABLE'
     return 'PROVIDER_EXIT_' + str(returncode)
 
 
@@ -41,7 +49,7 @@ def run(folder):
         stream.write(str(os.getpid())); stream.flush(); os.fsync(stream.fileno())
     receipt = {'attempt_id': request['attempt_id'], 'binding': request['binding'],
                'started': time.time(), 'exit_code': None, 'report': None, 'error': None,
-               'process_group_quiescent': False}
+               'provider_started': False, 'process_group_quiescent': False}
     atomic_json(folder / 'running.json', {'pid': os.getpid(), 'started': receipt['started']})
     child = None
     try:
@@ -51,6 +59,7 @@ def run(folder):
             child = subprocess.Popen(argv, cwd=request['checkout'], stdin=subprocess.PIPE,
                                      stdout=stdout, stderr=stderr,
                                      env=agents.environment(request['profile'], request['role']), start_new_session=True)
+            receipt['provider_started'] = True
             try:
                 stdin = b'' if request['profile']['provider'] in ('grok_build', 'devin') else request['prompt'].encode()
                 child.communicate(stdin, timeout=request['timeout_seconds'])

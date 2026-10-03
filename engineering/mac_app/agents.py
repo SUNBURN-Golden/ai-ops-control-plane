@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import time
 import uuid
 
 from common import AppError, ROLES, atomic_json, encoded, parse_json, validate_profile
@@ -30,6 +31,7 @@ SCHEMA = object_schema({
     'findings': STRINGS, 'checks': STRINGS, 'reviewed_head': STRING,
     'covered_tasks': STRINGS,
 })
+REPORT_LIMIT = 2 * 1024 * 1024
 
 RULES = """You are one role in AIOPS Mac, operating on a user-owned GitHub repository.
 Read AGENTS.md and the repository's authoritative requirements, approved architecture,
@@ -59,11 +61,25 @@ def prompt(job, role, head):
     instruction = {
         'planner': 'Read the repository and derive an ordered, dependency-aware plan covering ALL deliverables in its authoritative documents and the user goal. Reuse an existing approved .aiops/program.json where present. Identify real source paths and concrete acceptance criteria. Do not implement or edit. Return complete plus plan, or needs_user with the exact irreducible question.',
         'builder': 'You are the only implementation owner. Complete the assigned task and address all supplied findings. Run appropriate tests. Leave changes in the checkout; do not commit. Return complete only when the task acceptance criteria hold; plan must be null.',
-        'reviewer': 'You are a fresh, independent, non-author reviewer. Do not modify any file. Independently inspect the actual source and diff from base_sha to the exact head below, applicable contracts, acceptance criteria and available test evidence. Do not trust the writer summary as proof. Return fail for unresolved defects or insufficient evidence, needs_user for a consequential required decision, and complete only for a passing review of this exact head. covered_tasks must include the assigned task id. plan must be null.',
+        'reviewer': 'You are a fresh, independent, non-author reviewer. Do not modify any file. Independently inspect the actual source and diff from base_sha to the exact head below, applicable contracts, acceptance criteria and available test evidence. Do not trust the writer summary as proof. Return fail for unresolved defects or insufficient evidence, needs_user for a consequential required decision, and complete only for a passing review of this exact head. covered_tasks must list every planned task id. plan must be null.',
         'supervisor': 'You are the independent final inspector, not the planner or writer. Do not modify any file. Read the original repository deliverable specifications yourself. Check the entire current diff, every planned task, cross-task integration, tests and user-visible usability. Find omissions in the plan as well as implementation defects. Return complete only if ALL source-defined deliverables and the user goal are satisfied at this exact head. covered_tasks must list every task id. Missing live credentials/evidence is not a passing result. plan must be null.',
     }[role]
-    context = {key: job.get(key) for key in ('id', 'repository', 'goal', 'base_sha', 'plan', 'feedback', 'user_answers')}
+    context = {key: job.get(key) for key in ('id', 'repository', 'goal', 'base_sha', 'plan', 'source_pins', 'program_scope', 'feedback', 'user_answers')}
     context.update(role=role, exact_head=head, current_task=task)
+    if job.get('program_scope'):
+        instruction += (' Keep EVERY original program node ID and exact local dependencies in the plan. '
+                        'Supply concise implementation notes and concrete acceptance criteria; the app attaches each original spec locally. '
+                        'List .aiops/program.json in sources. Order tasks topologically. The program is scope data, not a new host approval. '
+                        'Read original authoritative requirements at base_sha (git show base_sha:path) alongside current files. '
+                        'Pending/external scope, required architecture audits, merged dependencies and release decisions remain explicit blockers. '
+                        'App implementation checkpoints are not legacy DONE or post-merge proof.')
+        if role != 'planner':
+            context['program_scope'] = dict(job['program_scope'], nodes=[
+                {key: value for key, value in node.items() if key != 'spec'} for node in job['program_scope']['nodes']])
+    if role == 'builder':
+        context['plan'] = {key: job['plan'][key] for key in ('summary', 'sources')}
+        context['plan']['task_ids'] = [item['id'] for item in job['plan']['tasks']]
+        context['built_tasks'] = job['built_tasks']
     return (RULES + '\nROLE ASSIGNMENT\n' + instruction + '\nTRUSTED JOB CONTEXT\n' + encoded(context)
             + '\nOUTPUT CONTRACT\nReturn exactly one JSON object matching this schema as your final answer. '
               'No prose outside the JSON, no Markdown fences, and no result file written by a tool.\n' + encoded(SCHEMA))
@@ -188,7 +204,7 @@ def json_answer(value):
     value = value.strip()
     # Accept a whole fenced final answer, never search logs/tool output for JSON.
     if value.startswith('```json\n') and value.endswith('\n```'): value = value[8:-4]
-    return parse_json(value, 262144)
+    return parse_json(value, REPORT_LIMIT)
 
 
 def validate_report(report):
@@ -294,7 +310,7 @@ def devin_completion(raw):
 def completion(profile, folder):
     provider = profile['provider']; folder = Path(folder); sid = None
     if provider == 'codex':
-        report = parse_json(read_output(folder / 'last-message.json', 262144))
+        report = parse_json(read_output(folder / 'last-message.json', REPORT_LIMIT), REPORT_LIMIT)
     elif provider == 'devin':
         report, sid = devin_completion(read_output(folder / 'trajectory.json'))
     elif provider == 'glm':
@@ -325,12 +341,12 @@ def result(profile, folder):
     return completion(profile, folder)['report']
 
 
-def availability():
+def availability(providers=None, versions=True):
     data = {}
-    for tool in ('git', 'gh', *CATALOG):
+    for tool in ('git', 'gh', *(CATALOG if providers is None else sorted(providers))):
         path = executable(tool) if tool in CATALOG else shutil.which(tool)
         item = {'installed': bool(path), 'version': '', 'executable': path or '', 'authentication': 'not_checked'}
-        if path:
+        if path and versions:
             try:
                 run = subprocess.run([path, '--version'], capture_output=True, text=True, timeout=5, env=environment())
                 item['version'] = run.stdout.strip().split('\n')[0][:120] if run.returncode == 0 else ''
@@ -343,4 +359,5 @@ def availability():
                                  capture_output=True, timeout=8, env=environment())
             data['github_authenticated'] = run.returncode == 0
         except (OSError, subprocess.TimeoutExpired): pass
+    data['checked_at'] = time.time()
     return data

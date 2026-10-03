@@ -56,18 +56,29 @@ class Application:
         self.doctor = agents.availability()
 
     def state(self):
-        return {'version': VERSION, 'settings': self.store.settings(), 'jobs': self.store.jobs(),
+        return {'version': VERSION, 'settings': self.store.settings(), 'jobs': [self.engine.describe(j) for j in self.store.jobs()],
                 'providers': public_catalog(),
                 'connections': self.doctor, 'data_directory': str(self.store.directory),
                 'cli_path': str(Path(__file__).resolve()), 'python_path': sys.executable}
 
     def start(self, value):
+        existing = self.store.existing_request(value)
+        if existing: return existing
+        # Discovery is a preflight observation, not a permanent start-time cache.
+        # It does not run a model or claim provider authentication is qualified.
+        needed = {v['provider'] for v in self.store.settings()['roles'].values()}
+        self.doctor.update(agents.availability(providers=needed, versions=False))
         if not self.doctor['git']['installed'] or not self.doctor['gh']['installed'] or not self.doctor['github_authenticated']:
             raise AppError('GITHUB_CONNECTION_REQUIRED', '연결 설정에서 GitHub 로그인을 완료한 뒤 다시 시작해 주세요.')
-        needed = {v['provider'] for v in self.store.settings()['roles'].values()}
         if any(not self.doctor[x]['installed'] for x in needed):
             raise AppError('MODEL_CONNECTION_REQUIRED', '모델 설정에서 선택한 실행 도구를 먼저 설치해 주세요.')
         job = self.store.create(value); self.engine.wake.set(); return job
+
+    def action(self, key, action, value):
+        with self.store.lock:
+            if action == 'accept': self.engine.validate_acceptance(self.store.get(key))
+            result = self.store.action(key, action, value)
+        self.engine.wake.set(); return result
 
 
 def handler(app, origin):
@@ -115,10 +126,10 @@ def handler(app, origin):
                     return self.send(200, (ASSETS / path).read_bytes(), mime)
                 self.principal()
                 if self.path == '/api/state': return self.send(200, app.state())
-                if self.path == '/api/jobs': return self.send(200, app.store.jobs())
+                if self.path == '/api/jobs': return self.send(200, [app.engine.describe(j) for j in app.store.jobs()])
                 if self.path.startswith('/api/jobs/'):
                     parts = self.path.split('/')
-                    if len(parts) == 4: return self.send(200, app.store.get(parts[3]))
+                    if len(parts) == 4: return self.send(200, app.engine.describe(app.store.get(parts[3])))
                     if len(parts) == 5 and parts[4] == 'events': return self.send(200, app.store.events(parts[3]))
                 self.send(404, {'error': 'NOT_FOUND'})
             except AppError as exc: self.send(401 if exc.code == 'UNAUTHENTICATED' else 400, {'error': exc.code, 'message': str(exc)})
@@ -147,8 +158,7 @@ def handler(app, origin):
                     if len(parts) == 5:
                         action = parts[4]
                         if principal != 'owner' and action != 'pause': raise AppError('OWNER_REQUIRED')
-                        result = app.store.action(parts[3], action, value)
-                        app.engine.wake.set(); return self.send(200, result)
+                        return self.send(200, app.action(parts[3], action, value))
                 self.send(404, {'error': 'NOT_FOUND'})
             except (AppError, UnicodeError, ValueError) as exc:
                 code = exc.code if isinstance(exc, AppError) else 'INVALID_REQUEST'

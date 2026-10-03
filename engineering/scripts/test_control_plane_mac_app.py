@@ -47,6 +47,8 @@ class FakeRepos:
     def head(self, job): return self.sha
     def clean(self, job): return not self.dirty
     def assert_binding(self, job): pass
+    def program_scope(self, job): return None
+    def assert_scope(self, job): pass
     def source_pins(self, job, value): return {'README.md': '1' * 40}
     def checkpoint(self, job): self.sha = 'b' * 40; self.dirty = False; return self.sha
     def synchronize_base(self, job): return self.sync
@@ -71,9 +73,14 @@ class AppTests(unittest.TestCase):
     def finish(self, value=None, error=None):
         job = self.job(); attempt = job['attempt']
         receipt = {'attempt_id': attempt['id'], 'binding': attempt['binding'], 'exit_code': 0,
-                   'report': value or report(job, attempt['role']), 'error': error, 'process_group_quiescent': True}
+                   'report': None if error else value or report(job, attempt['role']), 'error': error, 'process_group_quiescent': True,
+                   'provider_evidence': self.evidence(job, attempt['role'])}
         path = self.directory / 'jobs' / job['id'] / attempt['id'] / 'receipt.json'
         common.atomic_json(path, receipt); self.engine.step(job); return self.job()
+    def evidence(self, job, role):
+        profile = job['settings']['roles'][role]
+        return {'provider': profile['provider'], 'harness': agents.CATALOG[profile['provider']]['harness'],
+                'model_requested': profile['model'], 'session_id': None}
     def prepared(self):
         self.new(); self.engine.step(self.job()); self.launch(); self.finish()
     def built(self):
@@ -142,7 +149,7 @@ class AppTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.store.db.execute('DELETE FROM jobs');self.store.db.execute('DELETE FROM events')
                 self.built();job=self.launch();self.finish(report(job,'reviewer',**changes))
-                self.assertEqual(self.job()['state'],'reviewing');self.assertIsNone(self.job()['review'])
+                self.assertEqual(self.job()['state'],'building' if 'checks' in changes or 'findings' in changes else 'reviewing');self.assertIsNone(self.job()['review'])
 
     def test_read_only_role_modification_fences_attempt(self):
         self.built();self.launch();self.repos.dirty=True
@@ -161,7 +168,7 @@ class AppTests(unittest.TestCase):
         for evidence in ({'provider': 'cursor', 'harness': 'CURSOR_CLI', 'model_requested': ''},
                          {'provider': 'codex', 'harness': 'GROK_BUILD_CLI', 'model_requested': ''},
                          {'provider': 'codex', 'harness': 'CODEX_CLI', 'model_requested': 'other'}, []):
-            common.atomic_json(path, {'attempt_id': attempt['id'], 'binding': attempt['binding'], 'error': None,
+            common.atomic_json(path, {'attempt_id': attempt['id'], 'binding': attempt['binding'], 'error': None, 'exit_code': 0,
                 'report': report(job, 'reviewer'), 'process_group_quiescent': True, 'provider_evidence': evidence})
             with self.subTest(evidence=evidence), self.assertRaisesRegex(common.AppError, 'PROVIDER_PROFILE_MISMATCH'):
                 self.engine.step(job)
@@ -224,7 +231,7 @@ class AppTests(unittest.TestCase):
     def test_restart_consumes_existing_receipt_once(self):
         self.prepared();job=self.launch();attempt=job['attempt']
         path=self.directory/'jobs'/job['id']/attempt['id']/'receipt.json'
-        common.atomic_json(path,{'attempt_id':attempt['id'],'binding':attempt['binding'],'exit_code':0,'error':None,'report':report(job,'builder'),'process_group_quiescent':True})
+        common.atomic_json(path,{'attempt_id':attempt['id'],'binding':attempt['binding'],'exit_code':0,'error':None,'report':report(job,'builder'),'process_group_quiescent':True,'provider_evidence':self.evidence(job,'builder')})
         self.store.close();self.store=core.Store(self.directory);self.engine=core.Engine(self.store,self.repos)
         with mock.patch.object(core.subprocess,'Popen') as popen:self.engine.step(self.job())
         popen.assert_not_called();self.assertEqual(self.job()['state'],'reviewing');self.assertEqual(self.job()['calls'],2)
@@ -238,7 +245,7 @@ class AppTests(unittest.TestCase):
     def test_mismatched_receipt_never_advances(self):
         self.prepared();job=self.launch();attempt=job['attempt']
         path=self.directory/'jobs'/job['id']/attempt['id']/'receipt.json'
-        common.atomic_json(path,{'attempt_id':attempt['id'],'binding':'wrong','report':report(job,'builder')})
+        common.atomic_json(path,{'attempt_id':attempt['id'],'binding':'wrong','report':report(job,'builder'),'error':None,'exit_code':0,'process_group_quiescent':True})
         with self.assertRaisesRegex(common.AppError,'RECEIPT_BINDING_MISMATCH'):self.engine.step(job)
 
     def test_ci_failure_returns_to_builder_not_ready(self):
@@ -281,6 +288,164 @@ class AppTests(unittest.TestCase):
                                  'report':report(job,'builder'),'process_group_quiescent':False})
         with self.assertRaisesRegex(common.AppError,'종료 상태'):self.engine.step(job)
         self.assertIsNotNone(self.job()['attempt'])
+
+    def terminal(self, job, **changes):
+        attempt = job['attempt']
+        receipt = {'attempt_id': attempt['id'], 'binding': attempt['binding'], 'exit_code': 0,
+                   'report': report(job, attempt['role']), 'error': None, 'process_group_quiescent': True,
+                   'provider_evidence': self.evidence(job, attempt['role'])}
+        receipt.update(changes)
+        common.atomic_json(self.engine.receipt_path(job), receipt)
+
+    def test_late_terminal_receipt_releases_unknown_once_without_launch(self):
+        self.prepared(); job = self.launch(); attempt = dict(job['attempt'], started=0)
+        self.store.update(job['id'], attempt=attempt)
+        with mock.patch.object(self.engine, 'notify') as notify:
+            self.engine.tick(); self.engine.tick(); notify.assert_called_once()
+        self.assertEqual(self.job()['state'], 'unknown')
+        self.terminal(self.job())
+        with mock.patch.object(core.subprocess, 'Popen') as popen:
+            self.assertTrue(self.engine.tick()); popen.assert_not_called()
+        current = self.job(); self.assertEqual(current['state'], 'reviewing')
+        self.assertIsNone(current['attempt']); self.assertIsNone(current['blocker'])
+        self.assertEqual(current['calls'], job['calls'])
+        self.assertEqual(len([e for e in self.store.events(job['id']) if e['kind']=='result']), 2)
+
+    def test_late_bad_or_live_receipt_keeps_global_fence(self):
+        self.prepared(); job = self.launch(); self.store.update(job['id'], state='unknown')
+        self.new('example/other', 'request-002')
+        for changes in ({'binding': 'wrong'}, {'process_group_quiescent': False}):
+            current = self.store.get(job['id']); self.terminal(current, **changes)
+            with mock.patch.object(core.subprocess, 'Popen') as popen: self.engine.tick()
+            popen.assert_not_called(); self.assertIsNotNone(self.store.get(job['id'])['attempt'])
+            self.assertEqual(self.store.get(job['id'])['state'], 'unknown')
+
+    def test_conflicting_error_and_success_or_nonzero_exit_cannot_advance(self):
+        self.prepared(); job = self.launch()
+        for changes in ({'error': 'PROVIDER_USAGE_LIMIT'}, {'exit_code': 1}, {'exit_code': True}, {'error': ''}):
+            self.terminal(job, **changes)
+            with self.subTest(changes=changes), mock.patch.object(core.subprocess, 'Popen') as popen:
+                self.engine.tick(); popen.assert_not_called()
+            current = self.job(); self.assertEqual(current['state'], 'unknown'); self.assertIsNotNone(current['attempt'])
+            self.assertEqual(current['task_index'], 0); self.assertFalse(current['built_tasks'])
+
+    def test_missing_provider_profile_or_malformed_receipt_fences(self):
+        self.prepared(); job = self.launch()
+        self.terminal(job, provider_evidence=None); self.engine.tick()
+        self.assertEqual(self.job()['blocker']['code'], 'PROVIDER_PROFILE_MISMATCH')
+        common.atomic_json(self.engine.receipt_path(job), [])
+        self.engine.tick(); self.assertEqual(self.job()['blocker']['code'], 'INVALID_TERMINAL_RECEIPT')
+        self.assertIsNotNone(self.job()['attempt'])
+
+    def test_incomplete_builder_success_returns_to_same_task(self):
+        for changes in ({'findings':['Incorrect invariant.']}, {'checks':[]}, {'checks':['  ']}, {'question':'Required approval?'}):
+            self.store.db.execute('DELETE FROM jobs'); self.store.db.execute('DELETE FROM events')
+            self.prepared(); job = self.launch()
+            current = self.finish(report(job, 'builder', **changes))
+            self.assertEqual(current['state'], 'building'); self.assertEqual(current['task_index'], 0)
+            self.assertFalse(current['built_tasks']); self.assertEqual(current['settings'], job['settings'])
+            self.assertTrue(current['feedback']); self.assertIsNone(current['attempt'])
+            self.assertEqual(current['last_terminal']['status'],'fail')
+
+    def test_identical_engineering_failures_backoff_without_user_cutoff(self):
+        self.prepared(); delays=[]
+        for _ in range(5):
+            job=self.launch(); self.finish(report(job, 'builder', 'fail', findings=['Fix the same defect.']))
+            current=self.job(); delays.append(current['not_before']-time.time())
+            self.assertEqual(current['state'], 'building'); self.assertIsNone(current['question'])
+            self.assertEqual(current['settings'], job['settings'])
+        self.assertGreater(delays[-1], delays[0]*8)
+        self.repos.sha='c'*40; job=self.launch(); self.finish(report(job, 'builder', 'fail', findings=['Fix the same defect.']))
+        self.assertEqual(self.job()['feedback_repeats'], 0)
+
+    def test_permanent_infrastructure_failure_stops_once_without_model_change(self):
+        for error in ('PROVIDER_PERMISSION_REQUIRED', 'PROVIDER_USAGE_LIMIT'):
+            self.store.db.execute('DELETE FROM jobs'); self.store.db.execute('DELETE FROM events')
+            self.prepared(); job=self.launch()
+            with mock.patch.object(self.engine,'notify') as notify:
+                self.finish(error=error); self.engine.tick(); self.engine.tick(); notify.assert_called_once()
+            current=self.job(); self.assertEqual(current['state'],'needs_user')
+            self.assertEqual(current['provider_error'],error); self.assertEqual(current['settings'],job['settings'])
+            self.store.action(job['id'],'resume',{})
+            self.assertEqual(self.job()['state'],'building'); self.assertEqual(self.job()['settings'],job['settings'])
+
+    def test_repeated_unknown_operational_error_holds_after_three_verified_exits(self):
+        self.prepared()
+        for count in range(1,4):
+            self.launch(); current=self.finish(error='PROVIDER_EXIT_1')
+            self.assertEqual(current['failures'],count)
+            self.assertEqual(current['state'],'needs_user' if count==3 else 'waiting_provider')
+        self.assertIsNone(current['attempt']); self.assertFalse(current['built_tasks'])
+
+    def test_explicit_temporary_outage_retries_automatically_with_bounded_delay(self):
+        self.prepared()
+        for _ in range(5):
+            job=self.launch(); current=self.finish(error='PROVIDER_TEMPORARILY_UNAVAILABLE')
+            self.assertEqual(current['state'],'waiting_provider'); self.assertIsNone(current['question'])
+            self.assertLessEqual(current['not_before']-time.time(),3600)
+            self.assertEqual(current['settings'],job['settings'])
+
+    def test_health_exposes_observation_and_deadline_without_log_contents(self):
+        self.prepared(); job=self.launch(); folder=self.engine.receipt_path(job).parent
+        (folder/'stdout.log').write_text('SECRET not a completion receipt')
+        current=self.engine.describe(job); health=current['health']
+        self.assertEqual(health['status'],'running'); self.assertGreater(health['output_bytes'],0)
+        self.assertEqual(health['deadline_at'],job['attempt']['started']+job['attempt']['timeout_seconds'])
+        self.assertNotIn('SECRET',common.encoded(current)); self.assertEqual(health['completion_kind'],'draft_delivery')
+        (folder/'stdout.log').unlink(); self.assertEqual(self.engine.describe(job)['health']['status'],'quiet')
+
+    def test_waiting_job_names_the_unknown_owner_without_starting(self):
+        self.prepared(); job=self.launch(); self.store.update(job['id'],state='unknown')
+        other=self.new('example/other','request-002'); health=self.engine.describe(other)['health']
+        self.assertEqual(health['status'],'waiting_for_owner'); self.assertEqual(health['blocking_job_id'],job['id'])
+        self.assertEqual(self.store.get(other['id'])['state'],'queued')
+
+    def test_global_unknown_owner_takes_priority_over_retry_countdown(self):
+        first=self.new(); self.store.update(first['id'],state='waiting_provider',not_before=time.time()+600)
+        other=self.new('example/other','request-002')
+        self.store.update(other['id'],state='unknown',attempt={'id':'unconfirmed','role':'builder','started':time.time(),'timeout_seconds':600})
+        health=self.engine.describe(self.store.get(first['id']))['health']
+        self.assertEqual(health['status'],'waiting_for_owner');self.assertIsNone(health['retry_at'])
+
+    def test_ci_window_mutation_cannot_become_ready(self):
+        self.reviewed(); self.engine.step(self.job()); self.repos.dirty=True
+        self.engine.step(self.job()); self.assertEqual(self.job()['state'],'building')
+        self.assertIsNone(self.job()['review']); self.assertIsNone(self.job()['supervision'])
+
+    def test_failed_latest_ci_or_changed_head_cannot_be_accepted(self):
+        self.reviewed(); self.engine.step(self.job()); self.engine.step(self.job()); job=self.job()
+        self.repos.checked={'state':'failed','checks':[{'name':'tests','status':'FAILURE'}]}
+        with self.assertRaisesRegex(common.AppError,'최신 CI'):self.engine.validate_acceptance(job)
+        self.assertEqual(self.job()['state'],'building'); self.assertIsNone(self.job()['review'])
+
+    def test_changed_base_during_ci_invalidates_all_review_evidence(self):
+        self.reviewed(); self.engine.step(self.job()); self.repos.sync={'changed':True,'base':'c'*40}
+        self.engine.step(self.job()); self.assertEqual(self.job()['state'],'building')
+        self.assertIsNone(self.job()['review']); self.assertIsNone(self.job()['supervision'])
+
+    def test_changed_base_after_ready_cannot_be_accepted(self):
+        self.reviewed(); self.engine.step(self.job()); self.engine.step(self.job())
+        self.repos.sync={'changed':True,'base':'c'*40}
+        with self.assertRaisesRegex(common.AppError,'기준 브랜치'):self.engine.validate_acceptance(self.job())
+        self.assertEqual(self.job()['state'],'building');self.assertIsNone(self.job()['supervision'])
+
+    def test_program_scope_is_loaded_before_plan_and_cannot_be_omitted(self):
+        import program_scope
+        manifest={'schema_version':1,'program':'sample','repository':'example/product',
+                  'approval_pointer':'https://github.com/example/product/issues/1','authoritative_doc_pointers':'README.md',
+                  'nodes':[{'id':'001','title':'Original scope','spec':'Keep the complete original specification.'}]}
+        scope=program_scope.load_scope(manifest,'example/product','1'*40)
+        with mock.patch.object(self.repos,'program_scope',return_value=scope):
+            self.new(); self.engine.step(self.job())
+        self.assertEqual(self.job()['program_scope']['node_ids'],['001'])
+        self.launch(); current=self.finish()
+        self.assertEqual(current['state'],'planning'); self.assertIsNone(current['plan'])
+        self.assertIn('고정된 프로그램',current['feedback'][0])
+        approved={'summary':'Full program','sources':['README.md','.aiops/program.json'],
+                  'tasks':[{'id':'001','title':'Original scope','instructions':manifest['nodes'][0]['spec'],
+                            'acceptance':['Actual evidence'], 'depends_on':[]}]}
+        job=self.launch(); current=self.finish(report(job,'planner',plan=approved))
+        self.assertEqual(current['state'],'building'); self.assertEqual(current['plan']['tasks'][0]['id'],'001')
 
 
 class ContractTests(unittest.TestCase):
@@ -348,7 +513,7 @@ class ContractTests(unittest.TestCase):
 
     def test_terminal_cli_error_classification_never_exposes_secrets(self):
         with tempfile.TemporaryDirectory() as d:
-            for message,code in [('model x does not exist TOKEN','MODEL_UNAVAILABLE'),('Please log in TOKEN','PROVIDER_LOGIN_REQUIRED'),('Unexpected argument --schema TOKEN','CLI_SETUP_REQUIRED'),('429 quota exceeded TOKEN','PROVIDER_EXIT_1')]:
+            for message,code in [('model x does not exist TOKEN','MODEL_UNAVAILABLE'),('Please log in TOKEN','PROVIDER_LOGIN_REQUIRED'),('Unexpected argument --schema TOKEN','CLI_SETUP_REQUIRED'),('429 quota exceeded TOKEN','PROVIDER_USAGE_LIMIT')]:
                 (Path(d)/'stderr.log').write_text(message)
                 self.assertEqual(worker.failure_code(d,1),code)
 
@@ -369,6 +534,39 @@ class ContractTests(unittest.TestCase):
 
 
 class GitTests(unittest.TestCase):
+    def test_real_git_scope_stays_bound_after_an_agent_commits_a_changed_manifest(self):
+        import program_scope
+        with tempfile.TemporaryDirectory() as d:
+            repos=gitops.Repositories(d);job={'id':'scope','repository':'example/product','branch':'aiops/scope','current_task':{'title':'Feature'}}
+            checkout=repos.path(job);checkout.mkdir()
+            gitops.git(checkout,'init','-b',job['branch']);gitops.git(checkout,'config','user.name','Test');gitops.git(checkout,'config','user.email','test@example.invalid')
+            gitops.git(checkout,'remote','add','origin','https://github.com/example/product.git')
+            (checkout/'.aiops').mkdir()
+            value={'schema_version':1,'program':'test','repository':job['repository'],
+                   'approval_pointer':'https://github.com/example/product/issues/1','authoritative_doc_pointers':'README.md',
+                   'nodes':[{'id':'001','title':'Feature','spec':'Original required output.'}]}
+            target=checkout/program_scope.PATH;target.write_text(json.dumps(value));(checkout/'README.md').write_text('spec')
+            gitops.git(checkout,'add','.');gitops.git(checkout,'commit','-m','baseline');job['base_sha']=repos.head(job)
+            scope=repos.program_scope(job);job['program_scope']=scope
+            self.assertEqual(scope['node_ids'],['001']);self.assertEqual(scope['blob'],gitops.git(checkout,'rev-parse','HEAD:.aiops/program.json'))
+            repos.assert_scope(job)
+            value['nodes'][0]['spec']='Weakened output.';target.write_text(json.dumps(value))
+            gitops.git(checkout,'add','.');gitops.git(checkout,'commit','-m','unauthorized committed scope edit')
+            with self.assertRaisesRegex(common.AppError,'원래 프로그램'):repos.assert_scope(job)
+            with self.assertRaisesRegex(common.AppError,'원래 프로그램'):repos.checkpoint(job)
+
+    def test_already_committed_authority_edits_cannot_bypass_checkpoint_guard(self):
+        with tempfile.TemporaryDirectory() as d:
+            repos=gitops.Repositories(d);job={'id':'scope','repository':'example/product','branch':'aiops/scope','current_task':{'title':'Feature'}}
+            checkout=repos.path(job);checkout.mkdir()
+            gitops.git(checkout,'init','-b',job['branch']);gitops.git(checkout,'config','user.name','Test');gitops.git(checkout,'config','user.email','test@example.invalid')
+            gitops.git(checkout,'remote','add','origin','https://github.com/example/product.git')
+            target=checkout/'AGENTS.md';target.write_text('Original authority')
+            gitops.git(checkout,'add','.');gitops.git(checkout,'commit','-m','baseline');job['base_sha']=repos.head(job)
+            target.write_text('Weakened authority');gitops.git(checkout,'add','.');gitops.git(checkout,'commit','-m','authority edit')
+            self.assertTrue(repos.clean(job))
+            with self.assertRaisesRegex(common.AppError,'기준 계약'):repos.checkpoint(job)
+
     def test_missing_repo_and_expired_login_are_actionable_without_leaking_stderr(self):
         for stderr,code in [('repository not found token-secret','REPOSITORY_ACCESS_REQUIRED'),('HTTP 401 token-secret','GITHUB_LOGIN_REQUIRED')]:
             result=subprocess.CompletedProcess(['gh'],1,'',stderr)
@@ -419,6 +617,31 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue((destination/'Contents/Resources/ui/app.js').is_file())
 
 
+class ReadinessTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory()
+        self.available={k:{'installed':True,'version':'test'} for k in ('git','gh','codex')}
+        self.available['github_authenticated']=True
+        with mock.patch.object(agents,'availability',return_value=self.available):
+            self.app=aiops.Application(Path(self.temp.name)/'state')
+    def tearDown(self):self.app.store.close();self.temp.cleanup()
+    def test_new_start_refreshes_authentication_and_does_not_reserve_after_logout(self):
+        fresh=dict(self.available,github_authenticated=False)
+        with mock.patch.object(agents,'availability',return_value=fresh) as probe:
+            with self.assertRaisesRegex(common.AppError,'GitHub 로그인'):
+                self.app.start({'repository':'example/product','request_id':'request-001'})
+        probe.assert_called_once_with(providers={'codex'},versions=False)
+        self.assertFalse(self.app.store.jobs())
+    def test_same_request_remains_queryable_when_connection_has_changed(self):
+        value={'repository':'example/product','request_id':'request-001'}
+        prior=self.app.store.create(value)
+        with mock.patch.object(agents,'availability',side_effect=AssertionError('No new admission probe')):
+            self.assertEqual(self.app.start(value)['id'],prior['id'])
+            with self.assertRaisesRegex(common.AppError,'REQUEST_ID_CONFLICT'):
+                self.app.start(dict(value,goal='Different request'))
+        self.assertEqual(len(self.app.store.jobs()),1)
+
+
 class HttpTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
@@ -456,7 +679,8 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.request('/api/settings','POST',self.app.store.settings(),header)[0],200)
     def test_bot_start_is_idempotent_but_cannot_accept_or_change_models(self):
         auth={'Authorization':'Bearer '+self.app.relay_token};value={'repository':'example/product','request_id':'request-001'}
-        first=self.request('/api/jobs','POST',value,auth);second=self.request('/api/jobs','POST',value,auth)
+        with mock.patch.object(agents,'availability',return_value=self.app.doctor):
+            first=self.request('/api/jobs','POST',value,auth);second=self.request('/api/jobs','POST',value,auth)
         self.assertEqual(first[0],201);self.assertEqual(json.loads(first[2])['id'],json.loads(second[2])['id'])
         self.assertEqual(self.request('/api/settings','POST',self.app.store.settings(),auth)[0],409)
         key=json.loads(first[2])['id'];self.app.store.update(key,state='ready')

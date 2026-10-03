@@ -54,6 +54,24 @@ function actionButton(title, action, kind='secondary'){
 }
 async function action(job, name, value={}) { await api('/jobs/'+job.id+'/'+name,value); await refresh(); }
 function ask(job,name,title,context){dialogAction={job,name};$('#feedback-title').textContent=title;$('#feedback-context').textContent=context||'';$('#feedback-text').value='';$('#feedback-dialog').showModal();$('#feedback-text').focus();}
+function moment(value){return new Date(value*1000).toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'});}
+function renderHealth(job){
+  const h=job.health;if(!h)return null;
+  const box=el('div','execution-card'),heading=el('strong'),body=el('p');
+  if(job.attempt){
+    const minutes=Math.floor(h.elapsed_seconds/60),profile=h.profile;
+    heading.textContent=h.status==='outcome_unknown'?'종료 확인을 기다리고 있어요':h.status==='finishing'?'실행 종료를 확인하고 있어요':h.status==='quiet'?'실행 중 · 최근 출력 없음':'실행 중 · 출력 관측됨';
+    body.textContent=`${roleInfo[h.role][0]} · ${providerInfo(profile.provider)?.name||profile.provider} · ${minutes}분 경과 · 실행 한도 ${moment(h.deadline_at)}. `+(h.last_output_at?`마지막 출력 ${moment(h.last_output_at)}. `:'아직 출력이 관측되지 않았어요. ')+(h.status==='outcome_unknown'?'같은 실행의 종료 기록을 다시 확인하며 중복 작업을 막고 있어요.':'출력 관측은 작업 완료를 의미하지 않아요.');
+  }else if(h.status==='waiting_for_owner'){
+    heading.textContent='앞선 실행의 확인을 기다려요';body.textContent=h.blocking_repository+'의 미확정 실행이 정리되면 자동으로 이어갑니다.';
+  }else if(h.retry_at){
+    heading.textContent=h.status==='feedback_wait'?'같은 작업의 보완을 이어갑니다':'연결을 다시 시도할 예정이에요';
+    body.textContent=`${moment(h.retry_at)}에 같은 도구와 설정으로 자동 진행합니다.`;
+  }else if(['ready','accepted'].includes(job.state)){
+    heading.textContent=job.state==='accepted'?'사용자 검수 완료':'결과를 검수할 수 있어요';body.textContent='현재 코드의 감사·감리와 CI 결과를 기준으로 한 개발 산출물입니다. 병합·배포와 병합 후 검증은 별도입니다.';
+  }else return null;
+  box.append(heading,body);return box;
+}
 function renderDetail(scroll){
   const job=state.jobs.find(j=>j.id===selected);const detail=$('#job-detail');
   if(!job){detail.hidden=true;return;}
@@ -62,8 +80,10 @@ function renderDetail(scroll){
   const steps=[['planning','계획'],['building','개발·테스트'],['reviewing','감사'],['supervising','감리'],['publishing','결과 정리'],['ready','최종 검수']];
   const phase=['ready','accepted'].includes(job.state)?'ready':job.phase==='verifying'?'publishing':job.phase;const index=steps.findIndex(s=>s[0]===phase);const pipe=el('div','pipeline');
   steps.forEach((s,i)=>{if(i)pipe.append(el('span','pipeline-arrow','›'));pipe.append(el('span','pipeline-step '+(job.state==='ready'&&i===5||phase===s[0]?'current':i<index?'done':''),(i<index?'✓ ':'')+s[1]));});detail.append(pipe);
+  const health=renderHealth(job);if(health)detail.append(health);
   if(job.summary)detail.append(el('div','detail-summary',job.summary));
   if(job.plan){
+    if(job.program_scope)detail.append(el('div','scope-note',`원본 프로그램 ${job.program_scope.count}개 · 구현 단계 ${job.built_tasks.length}개. 원본 노드·명세·의존성을 고정해 계획 누락을 검사합니다. 별도 대기 카탈로그와 실환경·릴리스 완료는 이 수치에 포함되지 않습니다.`));
     const tasks=el('ul','tasks');for(const task of job.plan.tasks){const built=job.built_tasks.includes(task.id);const item=el('li','task-item'+(built?'':' pending'));item.append(el('span','task-check',built?'✓':'○'));const content=el('div');content.append(el('strong','',task.title),el('p','',built?'구현 단계 완료 · 전체 검증 결과는 아래에서 확인':task.acceptance.join(' · ')));item.append(content);tasks.append(item);}detail.append(tasks);
     const review=job.review?.head===job.head, supervision=job.supervision?.head===job.head;
     const ci={passed:'통과',pending:'진행 중',failed:'수정 중',not_configured:'등록된 검사 없음',not_published:'로컬 결과 · 미확인'}[job.ci?.state]||'대기';
@@ -75,7 +95,10 @@ function renderDetail(scroll){
   if(job.state==='ready'){
     buttons.append(actionButton('검수 완료 ✓',()=>action(job,'accept'),'primary'));
     buttons.append(actionButton('수정 요청',()=>ask(job,'revise','어떤 부분을 더 수정할까요?','의견을 반영한 뒤 감사와 감리를 다시 거칩니다.')));
-  }else if(job.state==='needs_user')buttons.append(actionButton('답하고 계속 진행',()=>ask(job,'resume','필요한 결정만 알려 주세요',job.question),'primary'));
+  }else if(job.state==='needs_user'){
+    if(job.provider_error){buttons.append(actionButton('연결 확인 후 계속',()=>action(job,'resume'),'primary'),actionButton('연결 설정 보기',()=>go('connect')));}
+    else buttons.append(actionButton('답하고 계속 진행',()=>ask(job,'resume','필요한 결정만 알려 주세요',job.question),'primary'));
+  }
   else if(['paused','waiting_provider'].includes(job.state))buttons.append(actionButton('이어서 진행 ↗',()=>action(job,'resume'),'primary'));
   else if(!['unknown','accepted','cancelled'].includes(job.state))buttons.append(actionButton(job.pause_requested?'일시정지 요청됨':'일시정지',()=>action(job,'pause')));
   if(!job.attempt&&['paused','needs_user','waiting_provider'].includes(job.state))buttons.append(actionButton('작업 취소',()=>action(job,'cancel')));
@@ -83,7 +106,7 @@ function renderDetail(scroll){
   detail.append(buttons);
   const team=Object.entries(job.settings.roles).map(([role,config])=>roleInfo[role][0]+': '+(providerInfo(config.provider)?.name||config.provider)+(config.model?' / '+config.model:' / CLI 기본값')).join(' · ');
   detail.append(el('div','detail-meta',team));
-  if(job.head)detail.append(el('div','detail-meta',`검토 대상 ${job.head.slice(0,12)} · 모델 실행 ${job.calls}회`));
+  if(job.head)detail.append(el('div','detail-meta',`검토 대상 ${job.head.slice(0,12)} · 실행 요청 ${job.calls}회`));
   const events=el('details','events');events.open=wasOpen;events.append(el('summary','','작업 기록 보기'));const log=el('div');events.append(log);detail.append(events);
   const load=async()=>{try{const rows=await api('/jobs/'+job.id+'/events');if(selected!==job.id)return;log.replaceChildren();for(const row of rows){const node=el('div','event',row.message);node.prepend(el('time','',new Date(row.created*1000).toLocaleString('ko-KR')));log.append(node);}}catch(error){log.textContent=error.message;}};
   events.addEventListener('toggle',()=>{if(events.open)load();});if(wasOpen)load();
@@ -112,7 +135,7 @@ function renderConnections(){
   $('#setup-banner').hidden=configured;
   const list=$('#connection-list');list.replaceChildren();
   for(const [key,name] of [['git','Git'],['gh','GitHub CLI'],...state.providers.map(p=>[p.id,p.name])]){
-    const item=c[key]||{},row=el('div','connection-row'),body=el('div');body.append(el('strong','',name),el('p','',item.version||'설치 후 다시 확인해 주세요.'));const ready=item.installed&&(key!=='gh'||c.github_authenticated);row.append(body,el('span','status-pill '+(ready?'ready':'muted'),ready?(key==='gh'?'로그인됨':'설치됨'):item.installed?'로그인 필요':'미설치'));
+    const item=c[key]||{},row=el('div','connection-row'),body=el('div');body.append(el('strong','',name),el('p','',item.version||(item.installed?'설치 확인됨':'설치 후 다시 확인해 주세요.')));const ready=item.installed&&(key!=='gh'||c.github_authenticated);row.append(body,el('span','status-pill '+(ready?'ready':'muted'),ready?(key==='gh'?'로그인됨':key==='git'?'설치됨':'설치됨 · 로그인 미확인'):item.installed?'로그인 필요':'미설치'));
     const info=providerInfo(key);if(info){const help=el('p','connection-help');help.append(el('code','',info.login_command),document.createTextNode(' · '));const link=el('a','','설치 안내 ↗');link.href=info.docs_url;link.target='_blank';link.rel='noopener noreferrer';help.append(link);body.append(help);}list.append(row);
   }
   const prefix=shellQuote(state.python_path)+' '+shellQuote(state.cli_path)+' --data-dir '+shellQuote(state.data_directory);

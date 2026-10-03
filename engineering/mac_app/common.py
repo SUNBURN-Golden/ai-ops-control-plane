@@ -10,7 +10,7 @@ import stat
 import tempfile
 from provider_catalog import CATALOG
 
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 ROLES = ('planner', 'builder', 'reviewer', 'supervisor')
 PROVIDERS = tuple(CATALOG)
 TERMINAL = ('accepted', 'cancelled')
@@ -137,23 +137,23 @@ def strings(value, name, maximum=100):
 def validate_plan(value):
     if not isinstance(value, dict) or set(value) != {'summary', 'sources', 'tasks'}:
         raise AppError('INVALID_PLAN')
-    if len(encoded(value).encode()) > 65536:
+    if len(encoded(value).encode()) > 2 * 1024 * 1024:
         raise AppError('PLAN_TOO_LARGE')
     text(value['summary'], 'summary')
     sources = strings(value['sources'], 'sources')
     if any(Path(p).is_absolute() or '..' in Path(p).parts for p in sources):
         raise AppError('INVALID_SOURCE_PATH')
     tasks = value['tasks']
-    if not isinstance(tasks, list) or not 1 <= len(tasks) <= 64:
+    if not isinstance(tasks, list) or not 1 <= len(tasks) <= 256:
         raise AppError('INVALID_TASKS')
     seen = set()
     for task in tasks:
         if not isinstance(task, dict) or set(task) != {'id', 'title', 'instructions', 'acceptance', 'depends_on'}:
             raise AppError('INVALID_TASK')
         key = task['id']
-        if not isinstance(key, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,47}', key) or key in seen:
+        if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}', key) or key in seen:
             raise AppError('INVALID_TASK_ID')
-        text(task['title'], 'title', 160); text(task['instructions'], 'instructions')
+        text(task['title'], 'title', 160); text(task['instructions'], 'instructions', 65536)
         strings(task['acceptance'], 'acceptance')
         deps = task['depends_on']
         if not isinstance(deps, list) or any(not isinstance(dep, str) or dep not in seen for dep in deps) or len(deps) != len(set(deps)):
