@@ -97,7 +97,7 @@ class FakeGitHub:
         self.issues, self.comments_by_issue, self.pulls, self.reviews, self.checks = {}, {}, {}, {}, {}
         self.changed_files = {}
         self.contents, self.compare, self.statuses = {}, {}, {}
-        self.file_contents, self.workflows = {}, []
+        self.file_contents, self.workflows, self.workflow_jobs = {}, [], {}
         self.latest_plan_commit = None
         self.unmerged = set()      # commits not on the default branch
         self.next_issue, self.next_comment, self.next_review = 30, 5000, 900
@@ -198,6 +198,9 @@ class FakeGitHub:
             return {"content": base64.b64encode(json.dumps(self.contents[ref]).encode()).decode()}
         if method == "GET" and path_only == "/actions/runs":
             return {"workflow_runs": self.workflows if page == 1 else []}
+        match = re.fullmatch(r"/actions/runs/(\d+)/attempts/(\d+)/jobs", path_only)
+        if match and method == "GET":
+            return {"jobs": self.workflow_jobs.get((int(match.group(1)), int(match.group(2))), []) if page == 1 else []}
         match = re.fullmatch(r"/compare/main\.\.\.([0-9a-f]{40})", path_only)
         if match:
             return {"status": "ahead" if match.group(1) in self.unmerged else "behind"}
@@ -320,6 +323,8 @@ class ProgramModeTests(unittest.TestCase):
             "allowed_builders": list(prog.LANE_ORDER), "enabled_builders": list(prog.LANE_ORDER),
             "control_record_actor": ACTOR, "allowed_task_actors": [ACTOR], "allowed_dispatch_actors": [ACTOR],
             "program_merge_policy": "STANDARD", "program_required_checks": ["offline"],
+            "program_post_merge_required_checks": ["offline"],
+            "program_post_merge_workflows": {".github/workflows/offline.yml": ["offline"]},
         }
         for target, value in ((cp, "load_config"), (cp, "require_runtime_enabled")):
             patcher = patch.object(target, value, return_value=self.cfg if value == "load_config" else None)
@@ -766,6 +771,7 @@ class ProgramModeTests(unittest.TestCase):
         merged = prog.merge(issue, 7)
         self.assertEqual((merged["status"], merged["head"]), ("MERGED", HEAD))
         self.assertEqual(self.gh.merges, [(7, {"sha": HEAD})])
+        self.successful_post_merge(self.cfg)
         done = prog.start(issue, "zari", "n1", PLAN1, self.file("p.json"), preflight=lambda lane: True)
         self.assertEqual(done["status"], "DONE")
 
@@ -787,7 +793,7 @@ class ProgramModeTests(unittest.TestCase):
         issue, _ = self.released_writer()
         self.gh.pulls[7].update(merged=True, state="closed")
         done = prog.start(issue, "zari", "n1", PLAN1, self.file("p.json"), preflight=lambda lane: True)
-        self.assertEqual(done["status"], "DONE")
+        self.assertEqual(done["status"], "MERGED_POST_VERIFY")
         self.assertEqual(self.record(issue)["attempt_id"], 1)
 
     def test_d1_a_reviewer_escalation_is_a_verdict_never_a_retry(self):
@@ -1040,6 +1046,7 @@ class ProgramModeTests(unittest.TestCase):
         waiting = prog.start(second, "zari", "n2", PLAN1, self.file("p.json"), preflight=lambda lane: True)
         self.assertEqual((waiting["status"], waiting["pending"]), ("WAITING_ON_DEPENDENCIES", ["n1"]))
         self.gh.pulls[7].update(merged=True, state="closed")  # n1's delivered head merged
+        self.successful_post_merge(self.cfg)
         started = self.launch_writer(second, "n2")
         self.assertEqual(started["status"], "PREPARED")
 
@@ -1068,20 +1075,34 @@ class ProgramModeTests(unittest.TestCase):
         self.assertEqual(self.host.ledger.materialize_status("zari", "n1")["plan_commit"], PLAN1)
         self.assertFalse(self.file("packet.json").exists())
 
+    def successful_post_merge(self, cfg, merge="f" * 40):
+        self.gh.checks[merge], self.gh.workflows, self.gh.workflow_jobs = [], [], {}
+        check_id = 200
+        for run_id, (path, names) in enumerate(cfg["program_post_merge_workflows"].items(), 200):
+            self.gh.workflows.append({"id": run_id, "workflow_id": run_id, "check_suite_id": run_id,
+                                      "event": "push", "head_branch": "main", "head_sha": merge,
+                                      "path": path, "repository": {"full_name": cfg["repository"]},
+                                      "head_repository": {"full_name": cfg["repository"]}, "run_attempt": 1,
+                                      "status": "completed", "conclusion": "success", "run_number": 1})
+            jobs = self.gh.workflow_jobs[(run_id, 1)] = []
+            for name in names:
+                check_id += 1
+                self.gh.checks[merge].append({"name": name, "id": check_id, "check_suite": {"id": run_id},
+                                            "head_sha": merge, "app": {"id": 15368, "slug": "github-actions"},
+                                            "status": "completed", "conclusion": "success"})
+                jobs.append({"name": name, "id": check_id, "run_id": run_id, "run_attempt": 1,
+                             "head_sha": merge, "head_branch": "main", "status": "completed", "conclusion": "success",
+                             "check_run_url": f"https://api.github.com/repos/{cfg['repository']}/check-runs/{check_id}"})
+
     def kix_post_merge_fixture(self):
         cfg = {**self.cfg, "repository": "BeautifulMind-JT/kix-protocol", "project": "KIX",
                "program_required_checks": ["kernel", "protocol"],
-               "program_post_merge_required_checks": ["protocol"]}
+               "program_post_merge_required_checks": ["protocol"],
+               "program_post_merge_workflows": {".github/workflows/protocol.yml": ["protocol"]}}
         merge = "f" * 40
         self.pr(merged=True, state="closed", head={"sha": HEAD, "ref": "astra/zari-n1",
                 "repo": {"full_name": cfg["repository"]}})
-        self.gh.checks[merge] = [{"name": name, "id": suite, "check_suite": {"id": suite},
-                                "status": "completed", "conclusion": "success"}
-                               for name, suite in (("protocol", 200),)]
-        self.gh.workflows = [{"id": suite, "workflow_id": suite, "check_suite_id": suite,
-                              "event": "push", "head_branch": "main", "head_sha": merge,
-                              "status": "completed", "conclusion": "success", "run_number": 1}
-                             for suite in (200,)]
+        self.successful_post_merge(cfg, merge)
         # Real KIX workflows at main 78b78b1 and registration HEAD 37b7c73:
         # ktx-kernel.yml (blob 4a73103) has pull_request/workflow_dispatch only;
         # protocol.yml (blob dc3794f) alone has a main push trigger. Do not invent
@@ -1210,6 +1231,202 @@ class ProgramModeTests(unittest.TestCase):
                 patch.object(prog, "task_rows", return_value=[row]):
             self.assertEqual(prog.pending_dependencies(self.gh, cfg, plan([node("n1"), node("n2", depends_on=["n1"])]),
                                                        node("n2", depends_on=["n1"])), ["n1"])
+
+    def product_post_merge_fixture(self, repository="BeautifulMind-JT/film-unit-mv-studio"):
+        profiles = json.loads((cp.ROOT / ".github/control-plane/projects.json").read_text())
+        cfg = profiles[repository]
+        self.pr(merged=True, state="closed", head={"sha": HEAD, "ref": "astra/zari-n1",
+                                                   "repo": {"full_name": repository}})
+        self.successful_post_merge(cfg)
+        return cfg, {"kind": "DELIVERY", "pr": 7, "head": HEAD}, "f" * 40
+
+    def test_every_non_kix_product_needs_its_complete_post_merge_profile(self):
+        for repository in (REPO, "BeautifulMind-JT/film-unit-mv-studio", "BeautifulMind-JT/kix-commerce-apps"):
+            cfg, pin, merge = self.product_post_merge_fixture(repository)
+            with self.subTest(repository=repository):
+                done = prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")
+                self.assertEqual(done["status"], "DONE")
+                self.assertEqual(len(done["verification_runs"][0]["checks"]), len(cfg["program_post_merge_required_checks"]))
+                self.gh.workflows.clear()
+                self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "MERGED_POST_VERIFY")
+
+    def test_film_merged_failed_push_is_failed_even_after_old_pr_ci_passed(self):
+        cfg, pin, merge = self.product_post_merge_fixture()
+        self.gh.checks[HEAD] = [dict(check, head_sha=HEAD) for check in self.gh.checks[merge]]
+        self.gh.workflows[0]["conclusion"] = "failure"
+        for check in self.gh.checks[merge]:
+            check["conclusion"] = "failure"
+        result = prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")
+        self.assertEqual(result["status"], "POST_MERGE_FAILED")
+        self.assertEqual(result["verification_runs"][0]["run"], 200)
+
+    def test_post_merge_requires_every_matrix_leg_success_without_skipped_or_neutral(self):
+        for mode in ("missing", "skipped", "neutral", "running", "job-skipped"):
+            cfg, pin, merge = self.product_post_merge_fixture()
+            if mode == "missing": self.gh.checks[merge].pop()
+            elif mode == "running": self.gh.checks[merge][-1]["status"] = "in_progress"
+            elif mode == "job-skipped": self.gh.workflow_jobs[(200, 1)][-1]["conclusion"] = "skipped"
+            else: self.gh.checks[merge][-1]["conclusion"] = mode
+            with self.subTest(mode=mode):
+                self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "MERGED_POST_VERIFY")
+
+    def test_commerce_skipped_adapter_cannot_complete_despite_other_two_successes(self):
+        cfg, pin, merge = self.product_post_merge_fixture("BeautifulMind-JT/kix-commerce-apps")
+        self.assertEqual(self.gh.checks[merge][-1]["name"], "Adapter tests against the reviewed gate")
+        self.gh.checks[merge][-1]["conclusion"] = "skipped"
+        self.gh.workflow_jobs[(200, 1)][-1]["conclusion"] = "skipped"
+        self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "MERGED_POST_VERIFY")
+
+    def test_post_merge_rejects_missing_or_malformed_protected_profiles(self):
+        for mode in ("missing-checks", "missing-workflows", "empty", "string", "blank", "space", "duplicate-check",
+                     "workflow-list", "wrong-path", "empty-workflow", "mismatch", "duplicate-owner"):
+            cfg, pin, merge = self.product_post_merge_fixture()
+            cfg = json.loads(json.dumps(cfg))
+            names = cfg["program_post_merge_required_checks"]
+            if mode == "missing-checks": cfg.pop("program_post_merge_required_checks")
+            elif mode == "missing-workflows": cfg.pop("program_post_merge_workflows")
+            elif mode in ("empty", "string", "blank", "space"):
+                cfg["program_post_merge_required_checks"] = {"empty": [], "string": "test", "blank": [""], "space": [" test"]}[mode]
+            elif mode == "duplicate-check": names.append(names[0])
+            elif mode == "workflow-list": cfg["program_post_merge_workflows"] = [".github/workflows/ci.yml"]
+            elif mode == "wrong-path": cfg["program_post_merge_workflows"] = {"../ci.yml": names}
+            elif mode == "empty-workflow": cfg["program_post_merge_workflows"] = {".github/workflows/ci.yml": []}
+            elif mode == "mismatch": cfg["program_post_merge_workflows"] = {".github/workflows/ci.yml": names[:1]}
+            else: cfg["program_post_merge_workflows"][".github/workflows/other.yml"] = names
+            with self.subTest(mode=mode):
+                result = prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")
+                self.assertEqual(result["status"], "MERGED_POST_VERIFY")
+                self.assertIn("profile is missing or invalid", " ".join(result["reasons"]))
+
+    def test_post_merge_rejects_wrong_workflow_or_job_check_origin(self):
+        for mode in ("run-sha", "run-event", "run-branch", "run-repo", "head-repo", "run-path", "run-suite",
+                     "check-sha", "check-app", "job-sha", "job-branch", "job-run", "job-attempt", "job-check-url"):
+            cfg, pin, merge = self.product_post_merge_fixture()
+            run, check, job = self.gh.workflows[0], self.gh.checks[merge][0], self.gh.workflow_jobs[(200, 1)][0]
+            if mode == "run-sha": run["head_sha"] = HEAD
+            elif mode == "run-event": run["event"] = "pull_request"
+            elif mode == "run-branch": run["head_branch"] = "feature"
+            elif mode == "run-repo": run["repository"] = {"full_name": "other/repo"}
+            elif mode == "head-repo": run["head_repository"] = {"full_name": "other/repo"}
+            elif mode == "run-path": run["path"] = ".github/workflows/other.yml"
+            elif mode == "run-suite": run["check_suite_id"] = 999
+            elif mode == "check-sha": check["head_sha"] = HEAD
+            elif mode == "check-app": check["app"] = {"id": 999, "slug": "other"}
+            elif mode == "job-sha": job["head_sha"] = HEAD
+            elif mode == "job-branch": job["head_branch"] = "feature"
+            elif mode == "job-run": job["run_id"] = 999
+            elif mode == "job-attempt": job["run_attempt"] = 2
+            else: job["check_run_url"] = "https://api.github.com/repos/other/repo/check-runs/201"
+            with self.subTest(mode=mode):
+                self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "MERGED_POST_VERIFY")
+
+    def test_latest_workflow_attempt_never_reuses_an_older_success(self):
+        for mode in ("running", "failed", "skipped", "missing-jobs", "old-attempt-jobs"):
+            cfg, pin, merge = self.product_post_merge_fixture()
+            rerun = {**self.gh.workflows[0], "run_attempt": 2}
+            self.gh.workflows.append(rerun)
+            if mode == "running": rerun["status"] = "in_progress"
+            elif mode == "failed": rerun["conclusion"] = "failure"
+            elif mode == "skipped": rerun["conclusion"] = "skipped"
+            elif mode == "old-attempt-jobs": self.gh.workflow_jobs[(200, 2)] = self.gh.workflow_jobs[(200, 1)]
+            with self.subTest(mode=mode):
+                self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"],
+                                 "POST_MERGE_FAILED" if mode == "failed" else "MERGED_POST_VERIFY")
+
+    def test_latest_successful_attempt_uses_only_its_check_ids(self):
+        cfg, pin, merge = self.product_post_merge_fixture()
+        self.gh.workflows.append({**self.gh.workflows[0], "run_attempt": 2})
+        newer = []
+        for job in self.gh.workflow_jobs[(200, 1)]:
+            check_id = job["id"] + 100
+            newer.append({**job, "id": check_id, "run_attempt": 2,
+                          "check_run_url": f"https://api.github.com/repos/{cfg['repository']}/check-runs/{check_id}"})
+        self.gh.workflow_jobs[(200, 2)] = newer
+        self.gh.checks[merge].extend(dict(check, id=check["id"] + 100) for check in list(self.gh.checks[merge]))
+        result = prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")
+        self.assertEqual(result["status"], "DONE")
+        self.assertEqual(result["verification_runs"][0]["attempt"], 2)
+        self.assertEqual(result["verification_runs"][0]["checks"], [301, 302])
+
+    def test_workflow_recreation_cannot_reuse_older_success_with_higher_run_number(self):
+        cfg, pin, merge = self.product_post_merge_fixture()
+        self.gh.workflows[0]["run_number"] = 99
+        self.gh.workflows.append({**self.gh.workflows[0], "id": 300, "workflow_id": 999,
+                                  "run_number": 1, "conclusion": "failure"})
+        self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "POST_MERGE_FAILED")
+
+    def test_non_kix_failed_completion_holds_dependencies_even_with_done_comment(self):
+        cfg, pin, merge = self.product_post_merge_fixture()
+        self.gh.workflows[0]["conclusion"] = "failure"
+        self.gh.create_comment(31, "DONE; merged; correction approved")
+        row = {"role": "WRITER", "state": "RECONCILED", "resolution": cp.VERIFIED_RELEASE, "pin": pin}
+        with patch.object(prog, "host", return_value={"status": "CREATED", "repository": cfg["repository"]}), \
+                patch.object(prog, "task_rows", return_value=[row]):
+            self.assertEqual(prog.pending_dependencies(self.gh, cfg, plan([node("n1"), node("n2", depends_on=["n1"])]),
+                                                       node("n2", depends_on=["n1"])), ["n1"])
+
+    def test_non_kix_start_holds_successor_and_does_not_restart_merged_original(self):
+        self.gh.contents[PLAN1] = plan([node("n1"), node("n2", depends_on=["n1"])])
+        original, _ = self.released_writer(node_id="n1")
+        successor = self.materialized("n2")
+        self.gh.pulls[7].update(merged=True, state="closed")
+        self.successful_post_merge(self.cfg)
+        self.gh.workflows[0]["conclusion"] = "failure"
+        failed = prog.start(original, "zari", "n1", PLAN1, self.file("failed.json"), preflight=lambda _: True)
+        waiting = prog.start(successor, "zari", "n2", PLAN1, self.file("successor.json"), preflight=lambda _: True)
+        self.assertEqual(failed["status"], "POST_MERGE_FAILED")
+        self.assertEqual((waiting["status"], waiting["pending"]), ("WAITING_ON_DEPENDENCIES", ["n1"]))
+        self.assertFalse(self.file("failed.json").exists())
+        self.assertFalse(self.file("successor.json").exists())
+        self.assertEqual(self.record(original)["attempt_id"], 1)
+
+    def test_rerun_started_during_job_read_invalidates_prior_attempt_success(self):
+        cfg, pin, merge = self.product_post_merge_fixture()
+        real = self.gh._request
+        def start_rerun(method, path, payload=None):
+            result = real(method, path, payload)
+            if "/attempts/1/jobs" in path:
+                self.gh.workflows[0] = {**self.gh.workflows[0], "run_attempt": 2, "status": "in_progress"}
+            return result
+        with patch.object(self.gh, "_request", side_effect=start_rerun):
+            result = prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")
+        self.assertEqual(result["status"], "MERGED_POST_VERIFY")
+        self.assertIn("changed during verification", " ".join(result["reasons"]))
+
+    def test_malformed_newer_workflow_cannot_fall_back_to_older_pass(self):
+        for field, bad in (("id", "300"), ("run_attempt", "2"), ("check_suite_id", None), ("workflow_id", True)):
+            cfg, pin, merge = self.product_post_merge_fixture()
+            newer = {**self.gh.workflows[0], "id": 300, "status": "in_progress", field: bad}
+            self.gh.workflows.append(newer)
+            with self.subTest(field=field):
+                result = prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")
+                self.assertEqual(result["status"], "MERGED_POST_VERIFY")
+                self.assertIn("malformed", " ".join(result["reasons"]))
+
+    def test_malformed_nested_origin_fields_hold_instead_of_crashing(self):
+        for mode in ("run-repository", "head-repository", "check-app", "check-suite"):
+            cfg, pin, merge = self.product_post_merge_fixture()
+            if mode == "run-repository": self.gh.workflows[0]["repository"] = ["invalid"]
+            elif mode == "head-repository": self.gh.workflows[0]["head_repository"] = ["invalid"]
+            elif mode == "check-app": self.gh.checks[merge][0]["app"] = ["invalid"]
+            else: self.gh.checks[merge][0]["check_suite"] = ["invalid"]
+            with self.subTest(mode=mode):
+                self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "MERGED_POST_VERIFY")
+
+    def test_missing_terminal_outcome_holds_without_claiming_a_proven_failure(self):
+        for mode in ("run", "check", "job"):
+            cfg, pin, merge = self.product_post_merge_fixture()
+            value = {"run": self.gh.workflows[0], "check": self.gh.checks[merge][0],
+                     "job": self.gh.workflow_jobs[(200, 1)][0]}[mode]
+            value["conclusion"] = None
+            with self.subTest(mode=mode):
+                self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "MERGED_POST_VERIFY")
+
+    def test_malformed_check_list_is_an_explicit_control_plane_error(self):
+        cfg, pin, merge = self.product_post_merge_fixture()
+        self.gh.checks[merge] = [None]
+        with self.assertRaisesRegex(prog.ProgramError, "check-run list is malformed"):
+            prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")
 
     def test_latest_held_plan_refuses_historical_merged_ancestor(self):
         # Actual Git merge topology: a registration stack has an old approved
