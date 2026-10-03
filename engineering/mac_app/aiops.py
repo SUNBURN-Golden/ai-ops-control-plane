@@ -17,6 +17,9 @@ import urllib.request
 import uuid
 import webbrowser
 
+if __name__ == '__main__':
+    sys.dont_write_bytecode = True
+
 import agents
 from provider_catalog import public_catalog
 from common import AppError, VERSION, atomic_json, encoded, parse_json, private_directory, read_json

@@ -249,6 +249,50 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(common.AppError, 'INSTALLATION_BINDING_MISMATCH'): self.install(update=True)
         self.assertEqual([x[1] for x in self.calls], ['print'])
 
+    def test_framework_python_process_representation_preserves_exact_service_argv(self):
+        self.install(); self.job(); self.pid = 12345
+        common.atomic_json(self.state / 'endpoint.json', {'pid': self.pid})
+        config = plistlib.loads(self.plist.read_bytes())
+        runtime = '/Library/Frameworks/Python.framework/Versions/3.10/Resources/Python.app/Contents/MacOS/Python'
+        native_command = ' '.join([runtime, *config['ProgramArguments'][1:]])
+        command = self.command
+        def host(argv, **kwargs):
+            if argv[0] == '/bin/ps': return subprocess.CompletedProcess(argv, 0, native_command + '\n', '')
+            return command(argv, **kwargs)
+        with self.platform(), mock.patch.object(installer.subprocess, 'run', side_effect=host), \
+                mock.patch.object(installer, 'interpreter_process_path', return_value=runtime) as probe:
+            self.assertTrue(installer.loaded_service('gui/' + str(os.getuid()), config, self.state))
+            probe.assert_called_once_with(config['ProgramArguments'][0])
+            for suffix in (' extra', '--wrong-data-dir'):
+                native_command = ' '.join([runtime, *config['ProgramArguments'][1:]]) + suffix
+                with self.assertRaisesRegex(common.AppError, 'INSTALLATION_BINDING_MISMATCH'):
+                    installer.loaded_service('gui/' + str(os.getuid()), config, self.state)
+        self.assertNotIn('bootout', [x[1] for x in self.calls])
+
+    def test_interpreter_probe_is_isolated_fixed_and_rejects_invalid_output(self):
+        with mock.patch.object(installer.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '/framework/Python\n', '')) as run:
+            self.assertEqual(installer.interpreter_process_path('/fixed/python'), '/framework/Python')
+            args, kwargs = run.call_args
+            self.assertEqual(args[0][:4], ['/fixed/python', '-I', '-S', '-c'])
+            self.assertEqual(kwargs['env'], {'PATH': '/usr/bin:/bin'})
+            self.assertEqual(kwargs['timeout'], 5)
+        for code, output in ((1, '/framework/Python'), (0, 'relative'), (0, '/first\n/second'), (0, '')):
+            with mock.patch.object(installer.subprocess, 'run', return_value=subprocess.CompletedProcess([], code, output, '')):
+                with self.assertRaisesRegex(common.AppError, 'INSTALLATION_BINDING_MISMATCH'):
+                    installer.interpreter_process_path('/fixed/python')
+
+    def test_plain_python_cli_does_not_modify_installed_bundle(self):
+        self.install()
+        original = installer.file_hashes(self.app)
+        env = dict(os.environ); env.pop('PYTHONDONTWRITEBYTECODE', None)
+        env.pop('PYTHONPYCACHEPREFIX', None)
+        result = subprocess.run([sys.executable, str(self.app / 'Contents/Resources/aiops.py'), '--help'],
+                                env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.app / 'Contents/Resources/__pycache__').exists())
+        self.assertEqual(installer.file_hashes(self.app), original)
+        installer.installed_binding(self.app, self.state, self.plist)
+
     def test_an_unregistered_live_service_cannot_be_overwritten(self):
         self.install(); self.loaded = False; self.lock = core.service_lock(self.state)
         old = installer.file_hashes(self.app); self.calls.clear()
