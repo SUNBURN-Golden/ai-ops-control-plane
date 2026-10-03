@@ -61,6 +61,10 @@ class AppTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(); self.directory = Path(self.temp.name) / 'private'
         self.store = core.Store(self.directory); self.repos = FakeRepos(Path(self.temp.name))
         self.engine = core.Engine(self.store, self.repos)
+        # These are state-machine tests, not desktop notification/power tests.
+        # Keep them offline and prevent native subprocesses on the actual Mac.
+        self.engine.keep_awake = mock.Mock()
+        self.engine.notify = mock.Mock()
     def tearDown(self): self.store.close(); self.temp.cleanup()
     def new(self, repo='example/product', request_id='request-001'):
         return self.store.create({'repository': repo, 'goal': 'Finish repository deliverables', 'request_id': request_id})
@@ -93,6 +97,19 @@ class AppTests(unittest.TestCase):
         with self.assertRaises(common.AppError):
             self.store.create({'repository':'example/product','goal':'different','request_id':'request-001'})
         self.assertEqual(len(self.store.jobs()),1)
+
+    def test_exited_wrapper_without_receipt_fences_immediately_and_keeps_owner(self):
+        self.new(); self.engine.step(self.job()); job = self.launch()
+        child = mock.Mock(); child.poll.return_value = 0
+        self.engine.children[job['attempt']['id']] = child
+        self.engine.tick()
+        current = self.job()
+        self.assertEqual(current['state'], 'unknown')
+        self.assertEqual(current['attempt'], job['attempt'])
+        self.assertEqual(current['calls'], 1)
+        with self.assertRaisesRegex(common.AppError, 'CANNOT_CANCEL_ACTIVE_ATTEMPT'):
+            self.store.action(job['id'], 'cancel')
+        self.assertEqual((self.engine.receipt_path(job).parent / 'worker-errors.log').stat().st_mode & 0o777, 0o600)
 
     def test_one_repository_owner_including_paused_and_ready(self):
         job = self.new(); self.store.update(job['id'], state='paused')
@@ -534,6 +551,14 @@ class ContractTests(unittest.TestCase):
 
 
 class GitTests(unittest.TestCase):
+    def test_repo_metadata_uses_positional_repository_and_prs_keep_repo_flag(self):
+        with mock.patch.object(gitops, 'execute', return_value='{}') as run:
+            gitops.gh('example/product', 'repo', 'view', '--json', 'defaultBranchRef,isArchived')
+            run.assert_called_once_with(['gh', 'repo', 'view', 'example/product', '--json', 'defaultBranchRef,isArchived'])
+            run.reset_mock()
+            gitops.gh('example/product', 'pr', 'view', 'aiops/test', '--json', 'headRefOid')
+            run.assert_called_once_with(['gh', 'pr', 'view', 'aiops/test', '--json', 'headRefOid', '--repo', 'example/product'])
+
     def test_real_git_scope_stays_bound_after_an_agent_commits_a_changed_manifest(self):
         import program_scope
         with tempfile.TemporaryDirectory() as d:

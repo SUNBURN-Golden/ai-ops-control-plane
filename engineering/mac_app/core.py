@@ -488,12 +488,20 @@ class Engine:
             'supervisor': '산출물 전체를 독립적으로 감리합니다.'}[role])
         # Once admission is persisted, a crash leaves an UNKNOWN fence unless a
         # bound terminal worker receipt is available after the service restarts.
+        child = None
         try:
-            child = subprocess.Popen([sys.executable, str(Path(__file__).with_name('worker.py')), '--attempt', str(attempt_dir)],
-                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                     start_new_session=True, env=agents.environment())
+            # Preserve wrapper failures privately; provider stderr already has
+            # its own log. Neither log is returned by the status API.
+            fd = os.open(attempt_dir / 'worker-errors.log', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'wb') as errors:
+                child = subprocess.Popen([sys.executable, str(Path(__file__).with_name('worker.py')), '--attempt', str(attempt_dir)],
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors,
+                                         start_new_session=True, env=agents.environment())
             self.children[attempt_id] = child
         except OSError:
+            if child is not None:
+                self.children[attempt_id] = child
+                raise AppError('WORKER_OUTCOME_UNKNOWN')
             self.store.update(job['id'], attempt=None)
             raise AppError('WORKER_SPAWN_FAILED')
 
@@ -501,6 +509,9 @@ class Engine:
         attempt = job['attempt']; folder = self.store.directory / 'jobs' / job['id'] / attempt['id']
         receipt_path = self.receipt_path(job)
         if not receipt_path.exists():
+            child = self.children.get(attempt['id'])
+            if child is not None and type(child.poll()) is int:
+                raise AppError('WORKER_OUTCOME_UNKNOWN', '실행 감시 프로그램이 종료 기록 없이 끝났습니다. 중복 실행을 막기 위해 멈췄습니다.')
             if time.time() > attempt['started'] + attempt['timeout_seconds'] + 120:
                 raise AppError('WORKER_OUTCOME_UNKNOWN', '실행 결과가 확인되지 않았습니다. 중복 실행을 막기 위해 멈췄습니다.')
             return

@@ -36,6 +36,8 @@ def git(checkout, *args, **kwargs):
 
 
 def gh(repo, *args, **kwargs):
+    if args[:2] == ('repo', 'view'):
+        return execute(['gh', 'repo', 'view', repo, *args[2:]], **kwargs)
     return execute(['gh', *args, '--repo', repo], **kwargs)
 
 

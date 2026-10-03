@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -127,6 +128,50 @@ class WorkerReliabilityTests(unittest.TestCase):
                 worker.run(self.folder)
         spawn.assert_not_called()
         self.assertEqual(common.read_json(self.folder / 'receipt.json'), receipt)
+
+    def test_failed_final_group_probe_still_writes_fenced_receipt(self):
+        self.install_cli()
+        # Normal provider exit followed by an unavailable final observation.
+        with mock.patch.object(worker.os, 'killpg', side_effect=[ProcessLookupError(), PermissionError('secret-test-marker')]):
+            receipt = self.run_worker()
+        self.assertEqual(receipt['exit_code'], 0)
+        self.assertEqual(receipt['error'], 'PROCESS_GROUP_OBSERVATION_FAILED')
+        self.assertFalse(receipt['process_group_quiescent'])
+        self.assertIsNone(receipt['report'])
+        self.assertNotIn('provider_evidence', receipt)
+        self.assertNotIn('secret-test-marker', json.dumps(receipt))
+
+    def test_unexpected_adapter_error_has_bound_terminal_failure(self):
+        self.install_cli()
+        with mock.patch.object(worker.agents, 'completion', side_effect=KeyError('secret-test-marker')):
+            receipt = self.run_worker()
+        self.assertEqual(receipt['error'], 'KeyError')
+        self.assertTrue(receipt['process_group_quiescent'])
+        self.assertIsNone(receipt['report'])
+        self.assertNotIn('secret-test-marker', json.dumps(receipt))
+
+    def test_process_and_exit_journals_do_not_grant_completion(self):
+        self.install_cli('Permission denied', 7)
+        receipt = self.run_worker()
+        process = common.read_json(self.folder / 'provider-process.json')
+        exited = common.read_json(self.folder / 'provider-exit.json')
+        self.assertEqual(process['pid'], process['pgid'])
+        self.assertEqual(process['pid'], exited['pid'])
+        self.assertEqual(exited['exit_code'], 7)
+        self.assertEqual(exited['attempt_id'], receipt['attempt_id'])
+        self.assertEqual(exited['binding'], receipt['binding'])
+        self.assertIsNone(receipt['report'])
+
+    def test_detached_worker_process_persists_all_terminal_evidence(self):
+        self.install_cli()
+        env = dict(agents.environment(), PATH=str(self.root))
+        result = subprocess.run([sys.executable, str(APP / 'worker.py'), '--attempt', str(self.folder)],
+                                env=env, capture_output=True, text=True, timeout=20, start_new_session=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = common.read_json(self.folder / 'receipt.json')
+        self.assertEqual(receipt['report'], completed_report())
+        self.assertTrue(receipt['process_group_quiescent'])
+        self.assertEqual(common.read_json(self.folder / 'provider-exit.json')['exit_code'], 0)
 
 
 if __name__ == '__main__':

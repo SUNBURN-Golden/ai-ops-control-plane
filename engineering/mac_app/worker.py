@@ -60,6 +60,11 @@ def run(folder):
                                      stdout=stdout, stderr=stderr,
                                      env=agents.environment(request['profile'], request['role']), start_new_session=True)
             receipt['provider_started'] = True
+            # Persist identity before waiting: an interrupted wrapper must not
+            # leave operators guessing which provider process group it owned.
+            atomic_json(folder / 'provider-process.json', {
+                'attempt_id': request['attempt_id'], 'binding': request['binding'],
+                'pid': child.pid, 'pgid': child.pid, 'started': time.time()})
             try:
                 stdin = b'' if request['profile']['provider'] in ('grok_build', 'devin') else request['prompt'].encode()
                 child.communicate(stdin, timeout=request['timeout_seconds'])
@@ -70,6 +75,9 @@ def run(folder):
                     os.killpg(child.pid, signal.SIGKILL); child.wait(timeout=10)
                 raise AppError('SESSION_TIMEOUT')
             receipt['exit_code'] = child.returncode
+            atomic_json(folder / 'provider-exit.json', {
+                'attempt_id': request['attempt_id'], 'binding': request['binding'],
+                'pid': child.pid, 'exit_code': child.returncode, 'observed': time.time()})
             # Fence descendants left behind by a CLI: no next writer until the group is gone.
             try:
                 os.killpg(child.pid, 0)
@@ -81,7 +89,9 @@ def run(folder):
         completed = agents.completion(request['profile'], folder)
         receipt['report'] = completed.pop('report')
         receipt['provider_evidence'] = completed
-    except (OSError, AppError, ValueError) as exc:
+    except Exception as exc:
+        # Unexpected adapter failures also need a terminal record. Never copy
+        # exception messages, credentials or provider logs into that record.
         receipt['error'] = exc.code if isinstance(exc, AppError) else type(exc).__name__
     finally:
         if child is None:
@@ -91,6 +101,13 @@ def run(folder):
             # admitted process group is gone. A timeout alone is not that proof.
             try: os.killpg(child.pid, 0)
             except ProcessLookupError: receipt['process_group_quiescent'] = True
+            except OSError:
+                # Failed observation is not proof of termination. In particular
+                # EPERM here must not prevent the receipt itself being written.
+                receipt['error'] = 'PROCESS_GROUP_OBSERVATION_FAILED'
+            if not receipt['process_group_quiescent']:
+                receipt['report'] = None
+                receipt.pop('provider_evidence', None)
         receipt['finished'] = time.time()
         atomic_json(folder / 'receipt.json', receipt)
 

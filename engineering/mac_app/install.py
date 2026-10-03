@@ -19,6 +19,9 @@ import sys
 import tempfile
 import time
 
+if __name__ == '__main__':
+    sys.dont_write_bytecode = True
+
 from common import AppError, JOB_RECORD_LIMIT, VERSION, encoded, parse_json, private_directory
 from core import service_lock
 
@@ -178,6 +181,22 @@ def launchctl(*args, check=True):
     return subprocess.run(['/bin/launchctl', *args], check=check, capture_output=True, text=True, timeout=15)
 
 
+def interpreter_process_path(interpreter):
+    # Framework Python execs its Python.app binary. Observe that representation
+    # from the exact configured interpreter in isolation, never from PATH or a
+    # guessed alias. The full service argv must still match below.
+    script = ('import os, subprocess; '
+              'print(subprocess.check_output(["/bin/ps", "-p", str(os.getpid()), '
+              '"-o", "comm="], text=True).strip())')
+    result = subprocess.run([interpreter, '-I', '-S', '-c', script],
+                            env={'PATH': '/usr/bin:/bin'}, check=False,
+                            capture_output=True, text=True, timeout=5)
+    path = result.stdout.strip()
+    if result.returncode != 0 or not Path(path).is_absolute() or '\n' in path or '\r' in path:
+        raise AppError('INSTALLATION_BINDING_MISMATCH')
+    return path
+
+
 def loaded_service(domain, config, state):
     result = launchctl('print', domain + '/' + LABEL, check=False)
     if result.returncode != 0:
@@ -203,8 +222,13 @@ def loaded_service(domain, config, state):
                                 check=False, capture_output=True, text=True, timeout=5)
         # ps renders argv with spaces but does not shell-quote paths containing
         # spaces. Compare its full expected rendering, never split that output.
-        if result.returncode != 0 or result.stdout.strip() != ' '.join(config['ProgramArguments']):
+        if result.returncode != 0:
             raise AppError('INSTALLATION_BINDING_MISMATCH')
+        arguments = config['ProgramArguments']
+        if result.stdout.strip() != ' '.join(arguments):
+            observed = interpreter_process_path(arguments[0])
+            if result.stdout.strip() != ' '.join([observed, *arguments[1:]]):
+                raise AppError('INSTALLATION_BINDING_MISMATCH')
     return True
 
 
