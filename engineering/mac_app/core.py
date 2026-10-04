@@ -36,7 +36,7 @@ ACTIVE = ('queued', 'preparing', 'planning', 'building', 'reviewing', 'supervisi
 PROVIDER_SETUP = ('MODEL_UNAVAILABLE', 'PROVIDER_LOGIN_REQUIRED', 'CLI_SETUP_REQUIRED', 'PROVIDER_PERMISSION_OR_RESULT_ERROR',
                   'PROVIDER_PERMISSION_REQUIRED', 'PROVIDER_USAGE_LIMIT', 'MISSING_PROVIDER', 'WORKER_SPAWN_FAILED',
                   'MAC_CODEX_PROFILE_UNVERIFIED','MAC_CODEX_PROTOCOL_UNVERIFIED','MAC_CODEX_PERMISSION_REQUIRED',
-                  'MAC_CODEX_TURN_TIMEOUT')
+                  'MAC_CODEX_TURN_TIMEOUT','MAC_CODEX_CONFIG_CHANGED','MAC_CODEX_TRUST_REQUIRED','MAC_CODEX_RUNTIME_UNQUALIFIED')
 TRANSIENT_FAILURES = ('PROVIDER_TEMPORARILY_UNAVAILABLE', 'COMMAND_TIMEOUT', 'SESSION_TIMEOUT')
 EXECUTION_BLOCKERS = ('HOST_ADMISSION_REQUIRED', 'ADMISSION_OBSERVATION_UNRESOLVED',
                       'TRANSPORT_EXECUTION_UNRESOLVED', 'TRANSPORT_JOURNAL_UNVERIFIED')
@@ -443,7 +443,10 @@ class Engine:
             'MISSING_PROVIDER': '선택한 실행 도구가 설치되어 있지 않습니다. 연결 화면을 확인해 주세요.',
             'WORKER_SPAWN_FAILED': '로컬 작업 프로세스를 시작하지 못했습니다. 실행 환경을 확인해 주세요.',
             'MAC_CODEX_PROFILE_UNVERIFIED': 'Codex의 실제 권한 profile과 기존 sandbox 설정 또는 활성 도구가 AIOPS의 배정 범위와 일치하지 않습니다. 설정을 보존하고 해당 경계를 확인해야 합니다.',
-            'MAC_CODEX_PROTOCOL_UNVERIFIED': 'Codex의 공식 App Server 응답을 검증하지 못했습니다. 같은 작업을 재호출하지 않고 런타임을 확인해야 합니다.',
+            'MAC_CODEX_PROTOCOL_UNVERIFIED': 'Codex의 공식 실행 응답을 검증하지 못했습니다. 같은 작업을 재호출하지 않고 런타임을 확인해야 합니다.',
+            'MAC_CODEX_CONFIG_CHANGED': 'Codex 설정의 비대상 변경이 감지됐습니다. 변경을 덮어쓰지 않고 같은 작업에서 기다립니다.',
+            'MAC_CODEX_TRUST_REQUIRED': '이 checkout 한 곳의 Codex 신뢰 등록에 대한 사용자 승인이 필요합니다. 다른 설정은 보존됩니다.',
+            'MAC_CODEX_RUNTIME_UNQUALIFIED': '설치된 Codex 실행 파일이 검증된 버전과 다릅니다. 같은 작업을 재호출하지 않고 호환성을 확인해야 합니다.',
             'MAC_CODEX_PERMISSION_REQUIRED': 'Codex가 추가 권한 또는 배정 밖 도구 사용을 요청했습니다. 요청을 거절하고 같은 작업에서 기다립니다.',
             'MAC_CODEX_TURN_TIMEOUT': 'Codex 작업이 세션 제한에 도달해 정상 중지했습니다. 같은 작업을 자동으로 재호출하지 않고 기다립니다.',
             'HOST_ADMISSION_REQUIRED': '기존 canonical 작업의 Mac 실행 승인·이관 경로가 아직 없습니다. 기존 소유권과 계획을 보존하고 실행 승인을 확인해야 합니다.',

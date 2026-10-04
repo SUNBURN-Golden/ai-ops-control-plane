@@ -53,6 +53,9 @@ writer. Use only your assigned role. All authority requests must name the concre
 action and the exact repository instruction. Use needs_user only for missing credentials,
 required consequential scope/security/contract decisions, or a truly unavailable dependency.
 For ordinary code/test/review failures return fail with actionable findings instead.
+Wait for every command and test to finish and observe its exit before returning the report.
+Continue reading an active command session until it exits; a background session is not evidence
+that a test passed. Never return while a command or its child is still running.
 Return the provided JSON schema. checks must identify actual evidence and distinguish
 executed tests from suggestions. Empty or missing evidence must not become a PASS.
 For status=complete, findings MUST be [], question MUST be an empty string, and checks

@@ -234,7 +234,8 @@ class WorkerNativeProtocolTests(unittest.TestCase):
         text='#!'+sys.executable+'\nAPP_PATH='+repr(str(APP))+'\nMODE='+repr(mode)+'\nREPORT='+repr(report('needs_user' if mode=='needs-user' else 'complete'))+'\n'+FAKE_SERVER
         path=self.bin/'codex';path.write_text(text);path.chmod(0o755)
     def run_worker(self):
-        with mock.patch.dict(os.environ,PATH=str(self.bin)+os.pathsep+os.environ.get('PATH','')):
+        with mock.patch.dict(os.environ,PATH=str(self.bin)+os.pathsep+os.environ.get('PATH','')), \
+                mock.patch.object(worker,'native_command',lambda folder:[sys.executable,str(APP/'codex_app_server.py'),'--attempt',str(folder)]):
             worker.run(self.folder)
         return common.read_json(self.folder/'receipt.json')
     def test_real_stdio_subprocess_preserves_bound_native_completion_and_private_proof(self):
@@ -271,7 +272,11 @@ class WorkerNativeProtocolTests(unittest.TestCase):
     def test_wrapper_normal_stop_interrupts_the_admitted_sdk_only(self):
         self.fake_server('hang')
         env=dict(agents.environment(),PATH=str(self.bin)+os.pathsep+os.environ.get('PATH',''))
-        child=subprocess.Popen([sys.executable,str(APP/'worker.py'),'--attempt',str(self.folder)],env=env,
+        fixture_wrapper=self.base/'sdk-worker-fixture.py'
+        fixture_wrapper.write_text('import sys\nsys.path.insert(0,'+repr(str(APP))+')\nimport worker\n'
+            'worker.native_command=lambda folder:[sys.executable,'+repr(str(APP/'codex_app_server.py'))+',"--attempt",str(folder)]\n'
+            'worker.run(sys.argv[1])\n')
+        child=subprocess.Popen([sys.executable,str(fixture_wrapper),str(self.folder)],env=env,
             stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
         self.addCleanup(lambda:child.poll() is None and child.terminate())
         deadline=time.monotonic()+5

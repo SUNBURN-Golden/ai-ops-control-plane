@@ -37,3 +37,11 @@
 0.3.7 설치 후 같은 job의 owner resume 한 번은 profile 사전 검사에서 차단됐다. named profile 내용과 선택은 일치했으나 실제 loaded config의 legacy sandbox/MCP/notify 존재가 경계와 달랐다. thread/turn/model과 제품 command는 0이며 typed needs_user, 정상 server/group 종료를 확인했다. 0.3.8 소스는 inline notify=[]를 추가해 process별 외부 notify를 차단하고 legacy/MCP guard는 유지한다. 실제 빈 계정/합성 설정 4case와 회귀가 통과했다. 이 후속 소스는 아직 설치하지 않았다.
 
 설치 CLI의 --ignore-user-config는 exec에서만 지원하며 app-server에서는 지원하지 않는다. official native exec의 합성 Responses fixture에서 사용자 config 제외와 explicit named profile을 검증했다. 코드/원장/토큰/Git/agent 설정 경계와 role별 network, 정상 SIGINT 및 command 자식 종료가 확인됐다. 다만 builder는 사용자 CODEX_HOME/config.toml에 project trust를 기록한다. canonical 경로, skip-git-repo-check, read-only 기반 explicit-write profile에서도 재현됐다. 사용자 config 수정 금지 조건 때문에 이 후보는 production에 연결하지 않았다. 모델 없는 합성 SID/결과는 실제 계정 또는 제품 개발 근거가 아니다. 정확한 단일 checkout trust 기록의 사용자 승인과 실제 job 재개 승인은 별도로 필요하다.
+
+0.3.9는 사용자가 승인한 정확한 KIX checkout의 trust_level=trusted 근거를 확인한 뒤 Mac-local worker에서 공식 native exec를 호출한다. 확인 당시 해당 항목은 이미 trusted여서 설정 쓰기 없이 승인 근거만 기록했다. 계정·토큰·다른 폴더의 설정은 수정하지 않았다. 다른 checkout에는 이 승인이 적용되지 않으며 scoped approval이 없으면 모델 시작 전에 needs_user로 대기한다.
+
+native exec는 --ignore-user-config와 최고 우선순위의 canonical project trust=untrusted override로 사용자·프로젝트 config를 실행에서 제외한다. 시스템/관리/session layer의 legacy sandbox·MCP·notify·hook은 계속 거부한다. 공식 config/profile/feature 읽기 preflight와 정상 ChatGPT 계정 유형을 확인하며 thread/turn은 그 사전 검사에서 시작하지 않는다. named role profile과 disabled surfaces를 실제 OS 합성 검사로 확인한 bundled CLI의 정확한 wrapper/binary hash에 고정한다. 런타임이 바뀌면 새 호환성 검사 전에는 실행하지 않는다. active_profile_verified는 qualified-native-exec의 명시적 profile 적용 근거이며 App Server thread/start 응답이라는 주장이 아니다.
+
+정상 exec의 실제 JSON stream에서 단일 SID/turn·command 종료·배정된 file-change·최종 schema를 확인한다. exit0만으로 완료하지 않는다. trusted adapter가 private command/policy evidence를 보존하고 실제 CLI final과 validated report가 같은지도 검사한다. 비대상 config 바이트·mode 변경은 덮어쓰지 않고 needs_user에 보존한다. 정상 중지는 살아 있는 CLI에 SIGINT를 보내며 관찰한 자식의 UID/시작시각을 확인하고 종료를 검증한다. 관찰 PID는 종료 명령에 사용하지 않는다. 종료가 확인되지 않은 command, 자식 또는 소유 process group은 완료나 새 실행의 근거가 되지 않으며 UNKNOWN 경계를 유지한다.
+
+이 지원 수리는 별도의 제품 개발 경로가 아니다. 설치된 AIOPS의 동일 generation/job/worker에서만 배정된 제품을 실행한다. 설치·회귀·모델 없는 합성 SID와 실제 제품 SID/코드/test 결과는 각각 별도로 보고한다. auto-merge, 외부 개발 재개, 새로운 인증 grant는 추가하지 않는다.

@@ -15,6 +15,10 @@ import mac_sandbox
 from common import AppError, WORKER_REQUEST_LIMIT, atomic_json, digest, read_json
 
 
+def native_command(folder):
+    return [sys.executable,str(Path(__file__).with_name('codex_native_exec.py')),'--attempt',str(folder)]
+
+
 def communicate(child,request,folder,stdin):
     if 'host_directory' not in request:
         return child.communicate(stdin,timeout=request['timeout_seconds'])
@@ -88,7 +92,7 @@ def run(folder):
         if 'host_directory' in request:
             native_codex = request['profile']['provider']=='codex'
             if native_codex:
-                argv=[sys.executable,str(Path(__file__).with_name('codex_app_server.py')),'--attempt',str(folder)]
+                argv=native_command(folder)
             else:
                 argv = mac_sandbox.command(argv, request['host_directory'], folder, request['checkout'],writing=request['role']=='builder')
         with open(folder / 'stdout.log', 'wb') as stdout, open(folder / 'stderr.log', 'wb') as stderr:
@@ -123,13 +127,13 @@ def run(folder):
                 os.killpg(child.pid, signal.SIGTERM)
                 raise AppError('CHILD_PROCESS_GROUP_NOT_QUIESCENT')
             if native_codex:
-                import codex_app_server
+                import codex_native_exec
                 proof=parse_adapter_json(folder/'codex-policy-evidence.json')
                 adapter_shutdown=proof.get('shutdown_verified') is True
                 if child.returncode != 0:
                     error=parse_adapter_json(folder/'codex-adapter-error.json')
                     if (error.get('attempt_id')!=request['attempt_id'] or error.get('binding')!=request['binding'] or
-                            error.get('code') not in codex_app_server.ERRORS):
+                            error.get('code') not in codex_native_exec.ERRORS):
                         raise AppError('MAC_CODEX_PROTOCOL_UNVERIFIED')
                     raise AppError(error['code'])
                 if (proof.get('attempt_id')!=request['attempt_id'] or proof.get('binding')!=request['binding'] or
@@ -139,7 +143,7 @@ def run(folder):
             elif child.returncode != 0: raise AppError(failure_code(folder, child.returncode))
         completed = agents.completion(request['profile'], folder)
         if native_codex:
-            completed.update(transport='app-server',profile_id=proof['profile_id'],profile_sha256=proof['profile_sha256'],
+            completed.update(transport=proof['transport'],profile_id=proof['profile_id'],profile_sha256=proof['profile_sha256'],
                              policy_evidence_sha256=digest(proof))
         receipt['report'] = completed.pop('report')
         receipt['provider_evidence'] = completed

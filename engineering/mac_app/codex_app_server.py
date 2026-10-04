@@ -168,7 +168,7 @@ class Adapter:
         self.evidence={'attempt_id':request['attempt_id'],'binding':request['binding'],
             'profile_id':self.name,'profile_sha256':digest(self.expected),'role':request['role'],
             'checkout':request['checkout'],'model_turn_requested':False,'commands':[],
-            'native_profile':True,'outer_sandbox':False,'shutdown_verified':False}
+            'native_profile':True,'outer_sandbox':False,'shutdown_verified':False,'transport':'app-server'}
 
     def save(self):atomic_json(self.folder/'codex-policy-evidence.json',self.evidence)
 
