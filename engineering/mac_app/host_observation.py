@@ -178,11 +178,17 @@ def assess(record, evidence, *, now=None):
         statuses[node] = state
         rows = _rows(get(['task-status', '--repository', repo, '--task', task_id(program, node)]), repo, task_id(program, node))
         history[node] = rows
-        writers = [r for r in rows if r['role'] == 'WRITER' and r['state'] != 'FAILED_PRESTART']
+        writer_attempts = [r for r in rows if r['role'] == 'WRITER']
+        writers = [r for r in writer_attempts if r['state'] != 'FAILED_PRESTART']
         owners[node] = writers[0]['lane'] if writers else None
         if len({r['lane'] for r in writers}) > 1: hold('HOST_OWNER_HISTORY_CONFLICT', node=node)
         declared = (projection or {}).get('declared_owners', [])
-        if declared and declared != [owners[node]]: hold('HOST_OWNER_PROJECTION_MISMATCH', node=node)
+        # A confirmed pre-start failure never acquired ownership. Its last lane
+        # declaration can remain on the issue, but cannot become a new owner.
+        failed_declaration = (not writers and writer_attempts and
+                              declared == [writer_attempts[-1]['lane']])
+        if declared and declared != [owners[node]] and not failed_declaration:
+            hold('HOST_OWNER_PROJECTION_MISMATCH', node=node)
         for row in rows:
             rid = row['launch_request_id']; args = ['status', '--launch-request-id', rid]; dynamic.append(args)
             status_row = get(args)

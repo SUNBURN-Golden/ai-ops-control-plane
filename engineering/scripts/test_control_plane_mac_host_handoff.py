@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import sys
+import subprocess
 import threading
 import unittest
 from unittest import mock
@@ -163,6 +164,39 @@ class HostHandoffTests(unittest.TestCase):
         self.assertTrue(result['observations_consistent']); self.assertEqual(result['owners']['n1'], 'DEVIN')
         self.assertFalse(preview['execution_allowed']); self.assertEqual(preview['owner_lane'], 'DEVIN')
         self.assertNotIn('builder_id', preview['request'])
+
+    def fail_before_start(self, live=()):
+        packet_file, result_file = self.f.file('failed-packet.json'), self.f.file('failed-result.json')
+        program_fixture.prog.start(self.issue, 'zari', 'n1', program_fixture.PLAN1, packet_file,
+                                   preflight=lambda lane: True)
+        packet = json.loads(packet_file.read_text())
+        def fail(packet, policy):
+            return subprocess.CompletedProcess([], 0, json.dumps(program_fixture.host.result_for(
+                packet, 'FAILED_PRESTART', reason='fixture prestart failure')))
+        with mock.patch.object(self.f.host, 'confirm', side_effect=fail), \
+             mock.patch.object(program_fixture.host, 'lane_quiescence', return_value=list(live)):
+            program_fixture.cp.launch_dispatch(packet_file, result_file)
+        return program_fixture.cp.finalize_dispatch(self.issue, result_file, packet['launch_request_id'])
+
+    def test_verified_failed_prestart_declaration_is_not_an_owner_and_can_retry(self):
+        self.assertEqual(self.fail_before_start(), 'FAILED_PRESTART')
+        preview = self.preview()
+        self.assertIsNone(preview['owner_lane']); self.assertFalse(preview['execution_allowed'])
+        api = self.workflow_api(); relay.submit(preview['request'], self.journal('retry-failed'), api)
+        self.assertEqual(api.results[0]['status'], 'PREPARED')
+        self.assertEqual([r['state'] for r in self.f.rows()], ['FAILED_PRESTART', 'CONFIRMED'])
+
+    def test_owner_declaration_without_matching_failed_attempt_remains_blocked(self):
+        record = self.record(); record['snapshot']['tasks'][0]['declared_owners'] = ['DEVIN']
+        self.assertIn('HOST_OWNER_PROJECTION_MISMATCH', {b['code'] for b in self.assess(record=record)['blockers']})
+        self.fail_before_start()
+        record = self.record(); record['snapshot']['tasks'][0]['declared_owners'] = ['CURSOR']
+        self.assertIn('HOST_OWNER_PROJECTION_MISMATCH', {b['code'] for b in self.assess(record=record)['blockers']})
+
+    def test_unproven_prestart_failure_stays_unknown_and_cannot_retry(self):
+        self.assertEqual(self.fail_before_start(live=(9876,)), 'UNKNOWN')
+        self.assertIn('HOST_EXECUTION_UNRESOLVED', {b['code'] for b in self.assess()['blockers']})
+        with self.assertRaisesRegex(common.AppError, 'HOST_OBSERVATION_BLOCKED'): self.preview()
 
     def test_active_confirmed_writer_and_reviewer_hold_observation(self):
         writer = self.f.launch_writer(self.issue)

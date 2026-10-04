@@ -132,6 +132,9 @@ task 조회와 개별 launch·lane 조회가 달라졌으면 새 권한으로 �
 
 첫 writer의 lane은 종료 후에도 owner다. owner 변경 이력, 활성 writer/reviewer,
 SUBMITTING·UNKNOWN, 확인되지 않은 종료, 로컬 미확정 상태는 보류한다.
+호스트가 `FAILED_PRESTART`로 확정한 시도는 owner가 아니다. 실제 owner가 없고
+마지막 실패 시도의 lane과 이슈 선언이 일치하는 경우 재시도 미리보기가 가능하지만,
+이력 없는 선언이나 다른 lane 선언은 계속 보류한다. 실제 재시도는 기존 admission을 거친다.
 `observations_consistent: true`도 실행 승인이나 보호 호스트 인증을 뜻하지 않는다.
 모든 fixture 결과는 `execution_allowed: false`다.
 
