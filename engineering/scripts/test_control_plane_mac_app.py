@@ -510,7 +510,12 @@ class ContractTests(unittest.TestCase):
                 self.assertIn('--ephemeral',argv);self.assertNotIn('--dangerously-bypass-approvals-and-sandbox',argv)
                 self.assertIn('workspace-write' if role=='builder' else 'read-only',argv)
                 claude=agents.command({'provider':'claude','model':'my-model'},role,Path('/tmp/attempt'))
-                self.assertIn('--bare',claude);self.assertNotIn('bypassPermissions',claude)
+                self.assertNotIn('--bare',claude);self.assertNotIn('bypassPermissions',claude)
+                self.assertEqual(claude[claude.index('--setting-sources')+1],'')
+                self.assertIn('--disable-slash-commands',claude);self.assertIn('--strict-mcp-config',claude)
+                self.assertEqual(json.loads(claude[claude.index('--mcp-config')+1]),{'mcpServers':{}})
+                settings=json.loads(claude[claude.index('--settings')+1])
+                self.assertTrue(settings['disableAllHooks']);self.assertFalse(settings['autoMemoryEnabled'])
                 if role!='builder':self.assertEqual(claude[claude.index('--tools')+1],'Read,Glob,Grep')
                 self.assertFalse(json.loads(claude[claude.index('--settings')+1])['sandbox']['allowUnsandboxedCommands'])
 

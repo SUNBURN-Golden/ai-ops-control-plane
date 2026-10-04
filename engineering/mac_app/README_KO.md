@@ -48,6 +48,10 @@ bash engineering/mac_app/Install.command --update
 
 0.3.4부터 업데이트 전에 중지한 서비스는 업데이트 후에도 중지 상태로 유지합니다. 실행 중이던 서비스만 정상 종료 후 다시 시작하며, 로그인 자동 시작의 활성·비활성 설정은 변경하지 않습니다. 업데이트 성공은 제품 실행이나 기존 canonical 작업의 Mac 이관 완료를 의미하지 않습니다.
 
+기존 Mac relay의 `UNKNOWN`·`SUBMITTED` 전달 영수증이 있으면 새 작업과 모든 native 모델 실행을 보류합니다. 구형 전달 원장에는 레포·작업 binding이 없어 같은 레포만 안전하게 골라낼 수 없습니다. 원장은 읽기 전용으로 검사하며, 새 요청 ID·앱 재시작·이슈 종료로 해소하지 않습니다. 읽기 실패도 실행을 보류합니다. 이 추가 검사는 호스트 admission이나 원자적 이관 승인이 아닙니다.
+
+Claude Code는 기존 OAuth/키체인 로그인을 사용하는 일반 실행 모드에서 hooks·skills·MCP와 프로젝트 설정을 제외하고 역할별 도구 제한을 유지합니다. Devin은 설치된 로컬 CLI의 `auto` permission mode와 기존 역할별 allow/deny 설정을 사용합니다. 계정 토큰을 복사하거나 API 과금 경로로 전환하지 않습니다.
+
 `launchctl print`의 서비스 인자·PID와 실제 프로세스를 비교해 기존 설치의 소유권을 확인합니다. 출력 형태를 확인할 수 없으면 안전하게 거절합니다. 이 출력 형태와 LaunchAgent 시작은 실제 Mac에서 확인해야 합니다. Mac의 Codex에 넘길 설치 지시는 [MAC_INSTALL_HANDOFF_KO.md](../docs/MAC_INSTALL_HANDOFF_KO.md)에 있습니다.
 
 `AIOPS.app`을 열고 **연결**에서 상태를 확인한 다음 **모델 설정**에서 사용할 도구와 모델을 정합니다. Codex·Claude·Grok Build·Devin은 모델 ID를 비우면 해당 CLI의 계정 기본 모델을 사용합니다. Cursor와 GLM은 정확한 모델 ID를 필수로 입력합니다. CLI 버전·모델 가용성·계정 권한은 실제 Mac에서 최종 확인해야 합니다. 연결 화면의 **설치됨**은 로그인·실제 모델 호출 성공을 의미하지 않습니다.

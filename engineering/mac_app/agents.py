@@ -163,9 +163,15 @@ def command(profile, role, attempt_dir, *, checkout=None):
                 *model, '-']
     if provider == 'claude':
         tools = 'Read,Glob,Grep,Edit,Write,Bash' if writing else 'Read,Glob,Grep'
-        settings = {'sandbox': {'enabled': True, 'failIfUnavailable': True,
+        settings = {'disableAllHooks': True, 'autoMemoryEnabled': False,
+                    'sandbox': {'enabled': True, 'failIfUnavailable': True,
                                 'autoAllowBashIfSandboxed': True, 'allowUnsandboxedCommands': False}}
-        return [cli, '--bare', '-p', '--output-format', 'json', '--json-schema', encoded(SCHEMA),
+        # --bare skips OAuth/keychain credentials in current Claude Code. Keep
+        # the installed account login while excluding hooks, project settings,
+        # skills and MCP; environment() still strips API keys and relay tokens.
+        return [cli, '-p', '--output-format', 'json', '--json-schema', encoded(SCHEMA),
+                '--setting-sources', '', '--disable-slash-commands',
+                '--strict-mcp-config', '--mcp-config', encoded({'mcpServers': {}}),
                 '--tools', tools, '--allowedTools', tools, '--disallowedTools', 'mcp__*',
                 '--permission-mode', 'acceptEdits' if writing else 'dontAsk',
                 '--settings', encoded(settings), *model]
@@ -189,7 +195,7 @@ def command(profile, role, attempt_dir, *, checkout=None):
     if provider == 'devin':
         return [cli, '--print', '--prompt-file', str(folder / 'prompt.txt'),
                 '--export', str(folder / 'trajectory.json'), '--config', str(folder / 'devin-config.json'),
-                '--sandbox', '--permission-mode', 'autonomous', '--respect-workspace-trust', 'false', *model]
+                '--sandbox', '--permission-mode', 'auto', '--respect-workspace-trust', 'false', *model]
     raise AppError('UNSUPPORTED_PROVIDER')
 
 

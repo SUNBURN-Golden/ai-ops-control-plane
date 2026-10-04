@@ -110,6 +110,7 @@ class ProviderContracts(unittest.TestCase):
                             if role != 'builder': self.assertIn('Edit', argv); self.assertIn('Bash', argv)
                         if provider == 'devin':
                             self.assertIn('--sandbox', argv); self.assertIn('--export', argv)
+                            self.assertEqual(argv[argv.index('--permission-mode') + 1], 'auto')
                             self.assertNotIn('dangerous', argv)
 
     def test_cursor_alias_and_missing_provider_no_implicit_fallback(self):

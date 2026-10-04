@@ -22,6 +22,7 @@ import uuid
 import agents
 import admission
 import handoff
+import transport_guard
 from common import (AppError, DEFAULTS, TERMINAL, EVENT_RECORD_LIMIT, JOB_RECORD_LIMIT,
                     JOB_CONTROL_RESERVE, WORKER_REQUEST_LIMIT, atomic_json, digest, encoded,
                     parse_json, private_directory, read_json, repository, text,
@@ -34,6 +35,8 @@ ACTIVE = ('queued', 'preparing', 'planning', 'building', 'reviewing', 'supervisi
 PROVIDER_SETUP = ('MODEL_UNAVAILABLE', 'PROVIDER_LOGIN_REQUIRED', 'CLI_SETUP_REQUIRED', 'PROVIDER_PERMISSION_OR_RESULT_ERROR',
                   'PROVIDER_PERMISSION_REQUIRED', 'PROVIDER_USAGE_LIMIT', 'MISSING_PROVIDER', 'WORKER_SPAWN_FAILED')
 TRANSIENT_FAILURES = ('PROVIDER_TEMPORARILY_UNAVAILABLE', 'COMMAND_TIMEOUT', 'SESSION_TIMEOUT')
+EXECUTION_BLOCKERS = ('HOST_ADMISSION_REQUIRED', 'ADMISSION_OBSERVATION_UNRESOLVED',
+                      'TRANSPORT_EXECUTION_UNRESOLVED', 'TRANSPORT_JOURNAL_UNVERIFIED')
 ROLE_STATE = {'planner': 'planning', 'builder': 'building', 'reviewer': 'reviewing', 'supervisor': 'supervising'}
 
 
@@ -136,6 +139,7 @@ class Store:
                     job = parse_json(prior[0], JOB_RECORD_LIMIT)
                     if (job['repository'].lower(), job['goal']) != (repo.lower(), goal): raise AppError('REQUEST_ID_CONFLICT')
                     self.db.execute('COMMIT'); return job
+                transport_guard.require_clear(self.directory)
                 predecessors = [parse_json(row[0], JOB_RECORD_LIMIT) for row in self.db.execute(
                     'SELECT document FROM jobs WHERE lower(repository)=lower(?)', (repo,))]
                 for previous in predecessors:
@@ -417,11 +421,15 @@ class Engine:
             'PROVIDER_USAGE_LIMIT': '선택한 계정의 사용 한도에 도달했습니다. 한도가 갱신된 뒤 계속 진행해 주세요.',
             'MISSING_PROVIDER': '선택한 실행 도구가 설치되어 있지 않습니다. 연결 화면을 확인해 주세요.',
             'WORKER_SPAWN_FAILED': '로컬 작업 프로세스를 시작하지 못했습니다. 실행 환경을 확인해 주세요.',
+            'HOST_ADMISSION_REQUIRED': '기존 canonical 작업의 Mac 실행 승인·이관 경로가 아직 없습니다. 기존 소유권과 계획을 보존하고 실행 승인을 확인해야 합니다.',
+            'ADMISSION_OBSERVATION_UNRESOLVED': '기존 작업의 실행 승인 관측이 불완전합니다. 실제 소유권 근거를 확인해야 합니다.',
+            'TRANSPORT_EXECUTION_UNRESOLVED': '기존 전달의 실제 실행·종료가 미확인입니다. 영수증을 보존하고 인증된 대사 근거를 확인해야 합니다.',
+            'TRANSPORT_JOURNAL_UNVERIFIED': '기존 전달 원장을 확인할 수 없습니다. 원본을 보존하고 읽기 상태를 확인해야 합니다.',
         }
         # This holds infrastructure failures, never ordinary engineering FAILs.
         # Explicit transient outages remain automatic; unknown repeated faults
         # need a concrete environment check instead of spending calls forever.
-        blocked = code in PROVIDER_SETUP or (code not in TRANSIENT_FAILURES and failures >= 3)
+        blocked = code in PROVIDER_SETUP or code in EXECUTION_BLOCKERS or (code not in TRANSIENT_FAILURES and failures >= 3)
         delay = min(3600, 300 * 2 ** min(failures - 1, 4))
         now = time.time()
         message = messages.get(code, '같은 실행 오류가 반복되었습니다. 실행 도구를 확인한 뒤 같은 작업을 계속 진행해 주세요.')
@@ -525,6 +533,7 @@ class Engine:
         # Network reads must not prevent status/pause/cancel. Recheck everything
         # under the reservation lock afterwards, including a newly prepared handoff.
         try:
+            transport_guard.require_clear(self.store.directory)
             observation = self.repos.execution_admission(context)
         except (AppError, OSError, ValueError):
             with self.store.lock:
@@ -545,6 +554,7 @@ class Engine:
                 self.store.update(job['id'], state='paused'); return
             self.store.update(job['id'], admission=observation)
             admission.require_native(observation)
+            transport_guard.require_clear(self.store.directory)
             self._launch(job, role)
 
     def _launch(self, job, role):
