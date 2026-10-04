@@ -94,3 +94,54 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s engineering/scripts
 호스트 인계 검증이 아니다. 앱 갱신 전 비작성자 검토와 정확한 변경 버전의 검증을
 수행하고 기존 설치 지침의 종료 상태 확인 및 `Install.command --update`를 따른다.
 실행 중 앱에 일부 파일만 복사하여 적용하지 않는다.
+
+## 보호 호스트 응답 대조와 기존 승인 경로 미리보기
+
+```sh
+python3 aiops.py handoff host-plan HANDOFF_ID
+python3 aiops.py handoff check-fixture HANDOFF_ID --fixture host-observation.json
+python3 aiops.py handoff preview-start HANDOFF_ID --fixture host-observation.json --node NODE --request-id request-001
+```
+
+`host-plan`은 고정 읽기 명령 목록을 반환한다. API는
+`GET /api/handoffs/{id}/host-plan`, MCP는 `aiops_handoff_host_plan`이다.
+실제 호스트 접속을 시작하지 않는다. 목록에는 프로그램 전체의 `materialize-list`,
+각 노드의 `materialize-status`와 `task-status`, `status --lanes`가 들어간다.
+관측한 모든 launch request에는 개별 `status --launch-request-id` 조회도 필요하다.
+삭제된 이슈나 현재 계획 밖의 호스트 등록을 정상적인 owner 부재로 해석하지 않는다.
+
+`host_observation.capture_fixture(record, read)`는 기존 v2 보호 호스트 공개 응답을
+읽기 함수에 연결하는 개발용 어댑터다. 네트워크·SSH·토큰·sudo 실행 구현은 없으며,
+연결이 없으면 `HOST_TRANSPORT_NOT_CONFIGURED`로 끝난다. 결과 envelope는 항상
+`source: fixture`다. `check-fixture`는 로컬 파일을 판독하며 서비스 DB에 저장하지 않는다.
+타입·조회 누락·중복·예상하지 않은 명령, 레포·program/node·issue·materialization
+request·plan commit 불일치, 60초를 넘는 조회 구간/관측 노후화를 거부한다.
+task 조회와 개별 launch·lane 조회가 달라졌으면 새 권한으로 간주하지 않고 보류한다.
+
+첫 writer의 lane은 종료 후에도 owner다. owner 변경 이력, 활성 writer/reviewer,
+SUBMITTING·UNKNOWN, 확인되지 않은 종료, 로컬 미확정 상태는 보류한다.
+`observations_consistent: true`도 실행 승인이나 보호 호스트 인증을 뜻하지 않는다.
+모든 fixture 결과는 `execution_allowed: false`다.
+
+`preview-start`는 일치하는 CREATED 노드에 한해 **기존 호스트에서 이어가기 위한**
+relay 요청을 만든다. 직접 lane·모델·worker·launch packet을 지정하지 않는다.
+이 요청의 `execution_host: current`는 기존 root workflow가 이미 지원하는 라우팅이다.
+`engineering/mac_host/relay.py prepare`로 해당 요청을 추가 검증할 수 있다.
+기존 relay의 기본값은 계속 `macbook`이며 그 모드는 정확한 runner 이름을 요구한다.
+`current`에는 runner override를 넣을 수 없다.
+
+실제 전송 단계에서는 기존 `control_plane_program.start`가 최신 프로그램·canonical
+등록·의존성·기존 owner·의사결정·preflight를 다시 확인하고, 기존 호스트 원장이
+원자적으로 승인한다. 로컬 관측 결과로 이 검사를 생략하지 않는다. 전달 응답 유실은
+relay의 기존 UNKNOWN 보존과 동일 요청 비재전송 규칙을 따른다. Workflow 접수/성공은
+task 승인·완료가 아니다. 이 경로는 Mac 네이티브 writer로 소유권을 옮기지 않는다.
+
+현재 제공한 검증은 실제 program start/dispatch/finalize 로직과 **임시** 보호 원장,
+가짜 GitHub·provider를 연결한다. 여러 클라이언트, 오래된 빈 관측, 동시 예약,
+응답 유실, 원래 owner 재개를 검증한다. 실제 호스트 qualification 증거가 아니다.
+
+운영 연결에는 정확한 보호 호스트/원장 식별, 인증된 고정 읽기 전송, 설치 helper의
+버전·해시, 동일 원장을 사용하는 workflow runner의 qualification이 필요하다.
+현재 `current` 라우팅을 보고 동일 호스트임을 추정하지 않는다. Mac 네이티브 writer
+수용에는 기존 Linux UID·/proc 격리와 owner 유지 계약을 보존하는 별도 승인 설계 및
+호스트 구현·검증이 필요하며, 여기서 policy나 보호 원장을 변경하지 않는다.

@@ -21,6 +21,11 @@ python3 engineering/mac_host/host.py guest-check
 
 ## 고정 명령 릴레이
 
+기존 보호 호스트에서 이어가는 인계 요청은 `execution_host: current`와 runner 이름
+생략을 명시할 수 있다. 기본값은 계속 `macbook`이다. `current`는 기존 workflow의
+라우팅을 사용하며 Mac 네이티브 실행이나 소유권 이동이 아니다. 실제 전송 전 동일한
+보호 호스트·원장·runner qualification을 확인해야 한다. [인계 준비와 fixture 대조](../docs/MAC_HANDOFF_PREPARATION_KO.md)를 참고한다.
+
 ```bash
 python3 engineering/mac_host/relay.py prepare --request engineering/mac_host/examples/lanes.json
 python3 engineering/mac_host/relay.py submit --request engineering/mac_host/examples/lanes.json

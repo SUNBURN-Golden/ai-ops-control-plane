@@ -743,7 +743,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(len(rows),2);self.assertEqual(rows[0]['result']['protocolVersion'],'2025-06-18')
         names={x['name'] for x in rows[1]['result']['tools']};self.assertEqual(names,{
             'aiops_start','aiops_status','aiops_list','aiops_pause','aiops_handoff_inspect',
-            'aiops_handoff_prepare','aiops_handoff_list','aiops_handoff_status'})
+            'aiops_handoff_prepare','aiops_handoff_list','aiops_handoff_status','aiops_handoff_host_plan'})
 
     def test_mcp_malformed_objects_return_errors_without_crashing(self):
         data='[]\n{"id":1,"method":"tools/call","params":{"arguments":"bad"}}\n'

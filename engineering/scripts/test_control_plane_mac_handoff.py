@@ -271,6 +271,8 @@ class HandoffHttpTests(unittest.TestCase):
             self.assertEqual(self.request('/api/handoffs/inspect', 'POST', {'repository': REPO}, auth)[0], 200)
         self.assertEqual(self.request('/api/handoffs', headers=auth)[0], 200)
         self.assertEqual(json.loads(self.request('/api/handoffs/' + record['id'], headers=auth)[2]), record)
+        self.assertEqual(self.request('/api/handoffs/' + record['id'] + '/host-plan', headers=auth)[0], 200)
+        self.assertEqual(self.request('/api/handoffs/' + record['id'] + '/host-plan')[0], 401)
         self.assertEqual(self.request('/api/handoffs/' + record['id'] + '/resume', 'POST', {}, auth)[0], 404)
         owner = {'Authorization': 'Bearer ' + self.app.owner_token}
         self.assertEqual(self.request('/api/jobs/' + record['id'] + '/resume', 'POST', {}, owner)[0], 409)
@@ -290,7 +292,8 @@ class BridgeTests(unittest.TestCase):
     def test_cli_commands_route_only_to_preparation_endpoints(self):
         cases = [(['inspect', '--repo', REPO], '/api/handoffs/inspect'),
                  (['prepare', '--repo', REPO, '--request-id', REQUEST['request_id']], '/api/handoffs'),
-                 (['list'], '/api/handoffs'), (['status', 'a' * 16], '/api/handoffs/' + 'a' * 16)]
+                 (['list'], '/api/handoffs'), (['status', 'a' * 16], '/api/handoffs/' + 'a' * 16),
+                 (['host-plan', 'a' * 16], '/api/handoffs/' + 'a' * 16 + '/host-plan')]
         for args, endpoint in cases:
             with self.subTest(args=args), mock.patch.object(aiops, 'client', return_value={}) as client, contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(aiops.main(['handoff', *args]), 0)
@@ -301,6 +304,7 @@ class BridgeTests(unittest.TestCase):
         calls = [('aiops_handoff_inspect', {'repository': REPO}, '/api/handoffs/inspect'),
                  ('aiops_handoff_prepare', REQUEST, '/api/handoffs'),
                  ('aiops_handoff_list', {}, '/api/handoffs'),
+                 ('aiops_handoff_host_plan', {'handoff_id': 'a' * 16}, '/api/handoffs/' + 'a' * 16 + '/host-plan'),
                  ('aiops_handoff_status', {'handoff_id': 'a' * 16}, '/api/handoffs/' + 'a' * 16)]
         for name, args, endpoint in calls:
             source = io.StringIO(json.dumps({'id': 1, 'method': 'tools/call', 'params': {'name': name, 'arguments': args}}) + '\n')

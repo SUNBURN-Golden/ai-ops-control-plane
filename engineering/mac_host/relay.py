@@ -75,12 +75,18 @@ def validate_value(value, kind):
 def prepare(request):
     if not isinstance(request, dict) or type(request.get("schema_version")) is not int or request["schema_version"] != 1:
         raise RelayError("SCHEMA_VERSION_REQUIRED")
-    if set(request) - {"schema_version", "request_id", "runner_name", "repository", "operation", "issue_number", "args", "builder_id"}:
+    if set(request) - {"schema_version", "request_id", "runner_name", "execution_host", "repository", "operation", "issue_number", "args", "builder_id"}:
         raise RelayError("UNKNOWN_REQUEST_FIELD")
     if not matches(request.get("request_id"), r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}"):
         raise RelayError("REQUEST_ID_REQUIRED")
-    if not matches(request.get("runner_name"), r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"):
-        raise RelayError("EXACT_RUNNER_NAME_REQUIRED")
+    execution_host = request.get("execution_host", "macbook")
+    if execution_host == "macbook":
+        if not matches(request.get("runner_name"), r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"):
+            raise RelayError("EXACT_RUNNER_NAME_REQUIRED")
+    elif execution_host == "current":
+        if "runner_name" in request: raise RelayError("UNEXPECTED_RUNNER_OVERRIDE")
+    else:
+        raise RelayError("UNSUPPORTED_EXECUTION_HOST")
     if not isinstance(request.get("repository"), str) or request["repository"] not in TARGETS:
         raise RelayError("UNREGISTERED_TARGET")
     operation = request.get("operation")
@@ -101,9 +107,10 @@ def prepare(request):
         raise RelayError("ISSUE_NUMBER_REQUIRED")
     if "builder_id" in request and (operation != "preflight" or not isinstance(request["builder_id"], str) or request["builder_id"] not in LANES):
         raise RelayError("INVALID_PREFLIGHT_BUILDER")
-    inputs = {"execution_host": "macbook", "expected_runner_name": request["runner_name"],
+    inputs = {"execution_host": execution_host,
               "target_repository": request["repository"], "operation": operation,
               "program_args": canonical(args)}
+    if execution_host == "macbook": inputs["expected_runner_name"] = request["runner_name"]
     if issue is not None:
         inputs["issue_number"] = str(issue)
     if operation == "preflight":
