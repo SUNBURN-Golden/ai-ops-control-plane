@@ -16,7 +16,7 @@ import stat
 from common import AppError, parse_json
 
 
-def unresolved(directory):
+def unresolved(directory, *, include_digest=False):
     folder = Path(directory) / 'relay'
     database = folder / 'requests.sqlite3'
     try:
@@ -55,7 +55,7 @@ def unresolved(directory):
                         or receipt.get('request_id') != request_id or receipt.get('payload_sha256') != digest
                         or receipt.get('state') != state or receipt.get('task_completion') != 'NOT_CHECKED'):
                     raise ValueError('unverified transport receipt')
-                fences.append({'request_id': request_id, 'state': state})
+                fences.append({'request_id': request_id, 'state': state, **({'payload_sha256':digest} if include_digest else {})})
         current = database.lstat()
         if identity != (current.st_dev, current.st_ino): raise ValueError('journal changed identity')
         return fences

@@ -1,7 +1,7 @@
-"""Canonical Mac admission candidate with an explicit authenticated source seam.
+"""Serialized native attempts with a user-initialized Mac authority adapter.
 
-The installed factory is UnsupportedSource. JSON, fixtures and user answers do
-not configure an authenticated transport. No VM/workflow dispatch is provided.
+An uninitialized adapter fails closed. The optional protected-source seam remains
+unsupported by the installed factory. No VM/workflow dispatch is provided.
 """
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ import transport_guard
 from common import AppError, TERMINAL, WORKER_REQUEST_LIMIT, atomic_json, digest, encoded, parse_json, private_directory, read_json, repository
 from gitops import git
 
-PROVIDERS = {'DEVIN': 'devin', 'GROK_BUILD': 'grok_build', 'GLM': 'glm', 'CURSOR': 'cursor'}
+PROVIDERS = {'DEVIN': 'devin', 'GROK_BUILD': 'grok_build', 'GLM': 'glm', 'CURSOR': 'cursor',
+             'MAC_CLAUDE': 'claude', 'MAC_CODEX': 'codex'}
 FIELDS = {'repository', 'task_id', 'task_revision', 'issue', 'program', 'node',
           'materialization_request_id', 'plan_commit', 'plan_blob', 'dependencies',
           'owner_lane', 'source_host', 'target_host', 'work_sha256'}
@@ -32,7 +33,10 @@ def require(test, code='NATIVE_RECEIPT_INVALID'):
 
 
 def binding(value):
-    require(isinstance(value, dict) and set(value) == FIELDS, 'NATIVE_BINDING_INVALID')
+    require(isinstance(value, dict) and set(value) in (FIELDS, FIELDS | {'authority_kind', 'canonical_task_pointer'}), 'NATIVE_BINDING_INVALID')
+    if 'authority_kind' in value:
+        require(value['authority_kind'] == 'MAC_LOCAL' and isinstance(value['canonical_task_pointer'], str) and
+                value['canonical_task_pointer'].startswith('mac-host:'), 'NATIVE_BINDING_INVALID')
     repository(value['repository'])
     for key in ('task_id', 'task_revision', 'program', 'node', 'source_host', 'target_host'):
         require(isinstance(value[key], str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', value[key]))
@@ -43,6 +47,9 @@ def binding(value):
     require(isinstance(value['dependencies'], list) and len(value['dependencies']) <= 256)
     seen = set()
     for dep in value['dependencies']:
+        if value.get('authority_kind') == 'MAC_LOCAL':
+            require(isinstance(dep,str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}',dep) and dep not in seen)
+            seen.add(dep); continue
         require(isinstance(dep, dict) and set(dep) == {'task_id', 'task_revision', 'launch_request_id', 'head_sha', 'gate_evidence'})
         require(isinstance(dep['task_id'], str) and dep['task_id'] not in seen and dep['task_id'] != value['task_id'])
         seen.add(dep['task_id'])
@@ -67,9 +74,12 @@ class UnsupportedSource:
         raise AppError('NATIVE_SOURCE_UNSUPPORTED', '인증된 canonical 이관 source adapter가 설치·검증되지 않았습니다. 제품 실행은 차단합니다.')
 
 
-def configured_source():
+def configured_source(store=None):
     # Implementing/provisioning a pinned, mutually authenticated fixed-operation
     # channel requires a separate protected service authorization. No fallback.
+    if store is not None:
+        from mac_authority import LocalSource
+        return LocalSource(store)
     return UnsupportedSource()
 
 
@@ -83,7 +93,9 @@ class NativeWorker:
                 work.get('plan_commit') == value['plan_commit'], 'NATIVE_SCOPE_MISMATCH')
         profile = self.settings()['roles']['builder']
         require(profile == work.get('profile') and profile['provider'] == PROVIDERS[value['owner_lane']], 'NATIVE_OWNER_PROFILE_MISMATCH')
-        folder = private_directory(self.directory / 'native' / request_id / attempt_id)
+        native=private_directory(self.directory / 'native')
+        request_folder=private_directory(native / request_id)
+        folder = private_directory(request_folder / attempt_id)
         checkout = folder / 'checkout'
         require(not checkout.exists(), 'NATIVE_CHECKOUT_EXISTS')
         git(None, 'clone', '--no-local', '--no-checkout', 'https://github.com/' + value['repository'] + '.git', str(checkout), timeout=600)
@@ -93,12 +105,14 @@ class NativeWorker:
         attempt = {'id': attempt_id, 'head': head, 'profile': profile}
         attempt['binding'] = digest({'request_id': request_id, 'canonical': value, **attempt})
         agents.command(profile, 'builder', folder, checkout=checkout)
-        prompt = ('You are the one original canonical writer. Preserve the exact task/revision/plan/dependencies and lane. '
+        prompt = (agents.RULES + '\nYou are the one original canonical writer. Preserve the exact task/revision/plan/dependencies and lane. '
                   'Implement only the frozen authorized task scope below. Do not replan, create another writer, run a VM, '
                   'merge or deploy. Return the AIOPS structured completion schema. Source gates and ownership are not '
                   'granted by your report.\nCanonical binding:\n' + encoded(value) + '\nFrozen scope:\n' + encoded(work) + '\n' + encoded(agents.SCHEMA))
         request = {'attempt_id': attempt_id, 'binding': attempt['binding'], 'profile': profile, 'role': 'builder',
                    'checkout': str(checkout), 'prompt': prompt, 'timeout_seconds': self.settings()['session_minutes'] * 60}
+        if value.get('authority_kind') == 'MAC_LOCAL':
+            request['host_directory'] = str(self.directory.resolve())
         require(len(encoded(request).encode()) <= WORKER_REQUEST_LIMIT, 'WORKER_REQUEST_TOO_LARGE')
         atomic_json(folder / 'request.json', request); atomic_json(folder / 'schema.json', agents.SCHEMA)
         return attempt
@@ -124,11 +138,17 @@ class NativeWorker:
             raise AppError('WORKER_OUTCOME_UNKNOWN')
         return None
 
+    def stop(self,record):
+        folder=self.folder(record)
+        require(folder.is_dir() and not folder.is_symlink(),'NATIVE_STOP_UNAVAILABLE')
+        atomic_json(folder / 'stop-request.json',{'attempt_id':record['attempt']['id'],
+                                                 'binding':record['attempt']['binding']})
+
 
 class Controller:
     def __init__(self, store, source=None, worker=None):
         self.store = store
-        self.source = source if source is not None else configured_source()
+        self.source = source if source is not None else configured_source(store)
         self.worker = worker if worker is not None else NativeWorker(store.directory, store.settings)
         self.in_progress = set()
         with store.lock:
@@ -137,16 +157,24 @@ class Controller:
                 CREATE UNIQUE INDEX IF NOT EXISTS native_local_one_active ON native_local((1)) WHERE state != 'TERMINAL';''')
 
     def capability(self):
-        return {'supported': self.source.production_qualified is True,
-                'code': 'NATIVE_SOURCE_UNSUPPORTED' if self.source.production_qualified is not True else 'QUALIFIED_SOURCE',
-                'execution_allowed': False}
+        return {'supported': self.authorized_source(),
+                'code': 'NATIVE_SOURCE_UNSUPPORTED' if not self.authorized_source() else 'MAC_HOST_CONFIGURED' if getattr(self.source,'mode',None)=='MAC' else 'QUALIFIED_SOURCE',
+                'execution_allowed': False, 'per_task_admission_required':True,
+                'mode': getattr(self.source, 'mode', 'PROTECTED_TRANSFER_CANDIDATE')}
+
+    def authorized_source(self):
+        # Mac mode initialization is an explicit owner decision; it is not a
+        # claim of production qualification or of a protected VM adapter audit.
+        if getattr(self.source,'mode',None)=='MAC': return self.source.authority_initialized is True
+        return self.source.production_qualified is True
 
     @staticmethod
     def public(record):
         require(record is not None, 'NATIVE_REQUEST_NOT_FOUND')
         return {key: record[key] for key in ('request_id', 'state', 'updated', 'error')} | {
             'canonical': {key:record['binding'][key] for key in ('repository','task_id','task_revision','plan_commit','owner_lane','source_host','target_host')},
-            'worker_started': record.get('worker_started')}
+            'worker_started': record.get('worker_started'), 'stop_requested':record.get('stop_requested',False),
+            'provider_started':record.get('provider_started')}
 
     def get(self, request):
         require(isinstance(request, str) and re.fullmatch(r'[0-9a-f]{32}', request), 'NATIVE_REQUEST_INVALID')
@@ -163,7 +191,8 @@ class Controller:
         return record
 
     def _call(self, operation, payload, value):
-        require(self.source.production_qualified is True, 'NATIVE_SOURCE_UNSUPPORTED')
+        require(self.authorized_source(), 'NATIVE_SOURCE_UNSUPPORTED')
+        if operation=='claim' and hasattr(self.source,'preflight'): self.source.preflight(value)
         require((self.source.source_host, self.source.target_host) == (value['source_host'], value['target_host']), 'NATIVE_CHANNEL_BINDING_MISMATCH')
         response = self.source.call(operation, copy.deepcopy(payload))
         require(isinstance(response, SourceReply) and (response.source_host, response.target_host) ==
@@ -177,7 +206,8 @@ class Controller:
         require(type(view['schema_version']) is int and view['schema_version'] == 1 and view['state'] == state)
         require(view['request'] == expected and digest(view['work']) == record['binding']['work_sha256'], 'NATIVE_RECEIPT_BINDING_MISMATCH')
         require(isinstance(view['source_snapshot_sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', view['source_snapshot_sha256']))
-        require(isinstance(view['source_authorization'], str) and view['source_authorization'].startswith('https://'))
+        prefix = 'mac-host:'+self.source.source_host+'#' if record['binding'].get('authority_kind')=='MAC_LOCAL' else 'https://'
+        require(isinstance(view['source_authorization'], str) and view['source_authorization'].startswith(prefix))
         require(type(view['reserved_at']) in (int, float) and math.isfinite(view['reserved_at']) and view['reserved_at'] >= 0)
         require(view['source_snapshot_sha256'] == record['source_snapshot_sha256'], 'NATIVE_SOURCE_SNAPSHOT_CHANGED')
         if state != 'TERMINAL': require(view['terminal'] is None)
@@ -190,7 +220,8 @@ class Controller:
         if previous:
             require(previous['binding'] == canonical, 'NATIVE_REQUEST_CONFLICT')
             return previous  # Replay is a read, including interrupted/terminal requests.
-        require(self.source.production_qualified is True, 'NATIVE_SOURCE_UNSUPPORTED')
+        require(self.authorized_source(), 'NATIVE_SOURCE_UNSUPPORTED')
+        if hasattr(self.source,'preflight'): self.source.preflight(canonical)
         with self.store.lock:
             self.store.db.execute('BEGIN IMMEDIATE')
             try:
@@ -200,7 +231,9 @@ class Controller:
                     self.store.db.execute('COMMIT'); return previous
                 require(not any(j['attempt'] or j['state'] not in TERMINAL for j in self.store.jobs()) and not self.store.execution_busy, 'NATIVE_LOCAL_WORK_BUSY')
                 require(not self.store.db.execute("SELECT 1 FROM native_local WHERE state!='TERMINAL'").fetchone(), 'NATIVE_LOCAL_TRANSFER_UNRESOLVED')
-                transport_guard.require_clear(self.store.directory)
+                if hasattr(self.source, 'check_external'):
+                    self.source.check_external(canonical)
+                else: transport_guard.require_clear(self.store.directory)
                 record = {'request_id': rid, 'binding': canonical, 'state': 'PREPARING', 'attempt': None,
                           'updated': time.time(), 'receipt': None, 'terminal': None, 'error': None, 'worker_started': False}
                 self.store.db.execute('INSERT INTO native_local VALUES (?,?,?)', (rid, 'PREPARING', encoded(record)))
@@ -220,6 +253,7 @@ class Controller:
             require(len(observed['dependencies']) == len(canonical['dependencies']))
             source_hash = digest({k:v for k,v in observed.items() if k not in ('status', 'observed_at')})
             attempt = self.worker.prepare(canonical, observed['work'], rid, uuid.uuid4().hex)
+            if hasattr(self.source,'preflight'): self.source.preflight(canonical)
             record = self.save(record, 'RESERVING', attempt=attempt, source_snapshot_sha256=source_hash)
             payload = {'request_id': rid, 'binding': canonical, 'attempt': attempt}
             reserved = self._view(self._call('reserve', payload, canonical), record, 'RESERVED')
@@ -227,7 +261,9 @@ class Controller:
             claim = {'request_id': rid, 'attempt': attempt}
             admitted = self._view(self._call('claim', claim, canonical), record, 'CLAIMED')
             require({k:v for k,v in admitted.items() if k != 'state'} == {k:v for k,v in reserved.items() if k != 'state'}, 'NATIVE_RECEIPT_CHANGED')
-            transport_guard.require_clear(self.store.directory)
+            if hasattr(self.source, 'check_external'):
+                self.source.check_external(canonical)
+            else: transport_guard.require_clear(self.store.directory)
             record = self.save(record, 'STARTING', receipt=admitted, worker_started=None)
             self.worker.launch(record)  # Only after both durable source/local fences.
             return self.save(record, 'RUNNING', worker_started=True)
@@ -277,7 +313,8 @@ class Controller:
             payload = {'request_id': record['request_id'], 'attempt': attempt, 'terminal': terminal}
             view = self._view(self._call('finish', payload, record['binding']), record, 'TERMINAL')
             require(view['terminal'] == terminal, 'NATIVE_TERMINAL_BINDING_MISMATCH')
-            self.save(record, 'TERMINAL', receipt=view, error=error, worker_started=receipt.get('provider_started') is True or record.get('worker_started'))
+            self.save(record, 'TERMINAL', receipt=view, error=error, provider_started=receipt.get('provider_started'),
+                      worker_started=receipt.get('provider_started') is True or record.get('worker_started'))
         except Exception as exc:
             self.save(record, 'UNKNOWN', error=exc.code if isinstance(exc, AppError) else type(exc).__name__)
         return True
@@ -290,6 +327,15 @@ class Controller:
         view = self._view(self._call('status', {'request_id': request, 'attempt': record['attempt']}, record['binding']), record, 'TERMINAL')
         require(view['terminal'] == record['terminal'], 'NATIVE_TERMINAL_BINDING_MISMATCH')
         return self.save(record, 'TERMINAL', receipt=view)
+
+    def stop(self,request):
+        record=self.get(request)
+        require(record is not None and record.get('attempt') and record['binding'].get('authority_kind')=='MAC_LOCAL'
+                and record['state'] in ('RUNNING','UNKNOWN'),'NATIVE_STOP_UNAVAILABLE')
+        self.worker.stop(record)
+        # A request is not a terminal result. Unknown execution remains fenced
+        # until the bound worker's exit and quiescence receipts are validated.
+        return self.save(record,record['state'],stop_requested=True)
 
 
 def local_fenced(db):

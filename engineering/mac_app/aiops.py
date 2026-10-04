@@ -23,6 +23,7 @@ if __name__ == '__main__':
 import agents
 import handoff
 import host_observation
+import mac_authority
 import native_transfer
 from provider_catalog import public_catalog
 from common import AppError, VERSION, atomic_json, encoded, parse_json, private_directory, read_json
@@ -78,6 +79,27 @@ class Application:
         record = self.canonical.start(value)
         self.engine.wake.set()
         return self.canonical.public(record)
+
+    def host_action(self, operation, value):
+        source=self.canonical.source
+        if not isinstance(source,mac_authority.LocalSource): raise AppError('MAC_HOST_ADAPTER_REQUIRED')
+        if operation=='initialize': return source.initialize(value)
+        if operation=='receipt-scope': return source.annotate_receipt(value)
+        if operation=='stop':
+            if set(value)!={'request_id'}: raise AppError('MAC_HOST_REQUEST_INVALID')
+            return self.canonical.public(self.canonical.stop(value['request_id']))
+        if operation in ('register','tasks'):
+            if set(value)!={'repository'}: raise AppError('MAC_HOST_REQUEST_INVALID')
+            if operation=='register':
+                # The owner cannot inject a fake history/program JSON over HTTP.
+                # The existing authenticated read-only GitHub reader imports it.
+                return source.register(handoff.inspect_repository(value['repository']))
+            return source.tasks(value['repository'])
+        if operation=='start':
+            if set(value)!={'repository','task_id','request_id'}: raise AppError('MAC_HOST_REQUEST_INVALID')
+            return self.canonical_start({'binding':source.select(value['repository'],value['task_id']),
+                                         'request_id':value['request_id']})
+        raise AppError('MAC_HOST_OPERATION_UNSUPPORTED')
 
     def start(self, value):
         existing = self.store.existing_request(value)
@@ -162,6 +184,10 @@ def handler(app, origin):
                 self.principal()
                 if self.path == '/api/state': return self.send(200, app.state())
                 if self.path == '/api/canonical/capability': return self.send(200, app.canonical.capability())
+                if self.path == '/api/host/status':
+                    if self.principal()!='owner': raise AppError('OWNER_REQUIRED')
+                    if not isinstance(app.canonical.source,mac_authority.LocalSource): raise AppError('MAC_HOST_ADAPTER_REQUIRED')
+                    return self.send(200,app.canonical.source.status())
                 if self.path.startswith('/api/canonical/') and len(self.path.split('/')) == 4:
                     return self.send(200, app.canonical.public(app.canonical.get(self.path.split('/')[3])))
                 if self.path == '/api/handoffs': return self.send(200, [handoff.summary(x) for x in app.store.handoffs()])
@@ -191,6 +217,9 @@ def handler(app, origin):
                 if self.path == '/api/session':
                     if principal != 'owner': raise AppError('OWNER_REQUIRED')
                     return self.send(200, {'ok': True}, cookie='aiops_session=' + app.session + '; HttpOnly; SameSite=Strict; Path=/')
+                if self.path.startswith('/api/host/'):
+                    if principal!='owner': raise AppError('OWNER_REQUIRED')
+                    return self.send(200,app.host_action(self.path.removeprefix('/api/host/'),value))
                 if self.path == '/api/canonical/start':
                     if principal != 'owner': raise AppError('OWNER_REQUIRED')
                     return self.send(201, app.canonical_start(value))
@@ -277,7 +306,7 @@ def client(directory, path, value=None, owner=False):
         def redirect_request(self, *args): raise AppError('REDIRECT_REFUSED')
     try:
         # Handoff observation can need four bounded GitHub reads, including pagination.
-        timeout = 600 if value is not None and path in ('/api/handoffs', '/api/handoffs/inspect', '/api/canonical/start') else 20
+        timeout = 600 if value is not None and path in ('/api/handoffs', '/api/handoffs/inspect', '/api/canonical/start','/api/host/register','/api/host/start') else 20
         with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(req, timeout=timeout) as response:
             return parse_json(response.read(16777217).decode(), 16777216)
     except urllib.error.HTTPError as exc:
@@ -366,6 +395,17 @@ def main(argv=None):
     native_start = native_actions.add_parser('start')
     native_start.add_argument('--binding', type=Path, required=True)
     native_start.add_argument('--request-id', required=True)
+    host = sub.add_parser('host', help='이 Mac의 원장과 단일 실행 예약; 기존 외부 실행을 종료로 간주하지 않음')
+    host_actions=host.add_subparsers(dest='host_command',required=True)
+    host_actions.add_parser('status')
+    host_init=host_actions.add_parser('initialize'); host_init.add_argument('--mode',choices=['MAC'],required=True)
+    host_init.add_argument('--decision',required=True)
+    for name in ('register','tasks'):
+        host_actions.add_parser(name).add_argument('--repo',required=True)
+    host_start=host_actions.add_parser('start'); host_start.add_argument('--repo',required=True)
+    host_start.add_argument('--task',required=True); host_start.add_argument('--request-id',required=True)
+    host_actions.add_parser('stop').add_argument('request_id')
+    host_scope=host_actions.add_parser('receipt-scope'); host_scope.add_argument('--association',type=Path,required=True)
     transfer = sub.add_parser('handoff', help='기존 계획과 기록의 인계 준비; 실행 권한 변경 없음')
     actions = transfer.add_subparsers(dest='handoff_command', required=True)
     probe = actions.add_parser('inspect'); probe.add_argument('--repo', required=True)
@@ -401,6 +441,16 @@ def main(argv=None):
             elif operation == 'reconcile':
                 result = client(args.data_dir, '/api/canonical/reconcile', {'request_id': args.request_id}, owner=True)
             else: result = client(args.data_dir, '/api/canonical/' + args.request_id, owner=True)
+        elif args.command == 'host':
+            operation=args.host_command
+            if operation=='status': result=client(args.data_dir,'/api/host/status',owner=True)
+            else:
+                if operation=='initialize': value={'mode':args.mode,'decision':args.decision}
+                elif operation=='receipt-scope': value=read_json(args.association,65536)
+                elif operation=='start': value={'repository':args.repo,'task_id':args.task,'request_id':args.request_id}
+                elif operation=='stop': value={'request_id':args.request_id}
+                else: value={'repository':args.repo}
+                result=client(args.data_dir,'/api/host/'+operation,value,owner=True)
         elif args.command == 'handoff':
             if args.handoff_command == 'inspect':
                 result = client(args.data_dir, '/api/handoffs/inspect', handoff.request({'repository': args.repo}, inspect=True))

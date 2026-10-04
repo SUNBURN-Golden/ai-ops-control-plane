@@ -10,7 +10,31 @@ import subprocess
 import time
 
 import agents
+import mac_sandbox
 from common import AppError, WORKER_REQUEST_LIMIT, atomic_json, read_json
+
+
+def communicate(child,request,folder,stdin):
+    if 'host_directory' not in request:
+        return child.communicate(stdin,timeout=request['timeout_seconds'])
+    deadline=time.monotonic()+request['timeout_seconds']
+    first=True
+    while True:
+        cancellation=folder / 'stop-request.json'
+        if cancellation.exists():
+            value=read_json(cancellation,4096)
+            if value!={'attempt_id':request['attempt_id'],'binding':request['binding']}:
+                raise AppError('STOP_REQUEST_BINDING_MISMATCH')
+            # Only this wrapper's live child group is signalled. A PID from an
+            # old receipt is never used to kill another process after a restart.
+            os.killpg(child.pid,signal.SIGTERM)
+            try: child.wait(timeout=10)
+            except subprocess.TimeoutExpired: raise AppError('STOP_NOT_TERMINAL')
+            raise AppError('USER_STOPPED')
+        remaining=deadline-time.monotonic()
+        if remaining<=0: raise subprocess.TimeoutExpired(child.args,request['timeout_seconds'])
+        try: return child.communicate(stdin if first else None,timeout=min(1,remaining))
+        except subprocess.TimeoutExpired: first=False
 
 
 def failure_code(folder, returncode):
@@ -55,6 +79,8 @@ def run(folder):
     try:
         argv = agents.command(request['profile'], request['role'], folder, checkout=request['checkout'])
         agents.prepare(request['profile'], request['role'], folder, request['checkout'], request['prompt'])
+        if 'host_directory' in request:
+            argv = mac_sandbox.command(argv, request['host_directory'], folder, request['checkout'])
         with open(folder / 'stdout.log', 'wb') as stdout, open(folder / 'stderr.log', 'wb') as stderr:
             child = subprocess.Popen(argv, cwd=request['checkout'], stdin=subprocess.PIPE,
                                      stdout=stdout, stderr=stderr,
@@ -67,7 +93,7 @@ def run(folder):
                 'pid': child.pid, 'pgid': child.pid, 'started': time.time()})
             try:
                 stdin = b'' if request['profile']['provider'] in ('grok_build', 'devin') else request['prompt'].encode()
-                child.communicate(stdin, timeout=request['timeout_seconds'])
+                communicate(child,request,folder,stdin)
             except subprocess.TimeoutExpired:
                 os.killpg(child.pid, signal.SIGTERM)
                 try: child.wait(timeout=10)
@@ -97,6 +123,11 @@ def run(folder):
         if child is None:
             receipt['process_group_quiescent'] = True
         else:
+            if type(child.poll()) is int:
+                receipt['exit_code']=child.returncode
+                atomic_json(folder / 'provider-exit.json', {
+                    'attempt_id': request['attempt_id'], 'binding': request['binding'],
+                    'pid': child.pid, 'exit_code': child.returncode, 'observed': time.time()})
             # Even a timed-out session may be continued only after its entire
             # admitted process group is gone. A timeout alone is not that proof.
             try: os.killpg(child.pid, 0)
