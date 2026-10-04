@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 
 import agents
 import admission
@@ -40,6 +41,22 @@ def gh(repo, *args, **kwargs):
     if args[:2] == ('repo', 'view'):
         return execute(['gh', 'repo', 'view', repo, *args[2:]], **kwargs)
     return execute(['gh', *args, '--repo', repo], **kwargs)
+
+
+def prepare_host_checkout(checkout, branch, base_sha, plan_blob):
+    """Fetch as the trusted host without moving the immutable admitted base."""
+    if not isinstance(branch,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]*',branch):
+        raise AppError('MAC_HOST_BASE_BRANCH_INVALID')
+    git(checkout,'check-ref-format','refs/heads/'+branch)
+    before=git(checkout,'rev-parse','HEAD')
+    if git(checkout,'rev-parse',base_sha+':.aiops/program.json')!=plan_blob:
+        raise AppError('MAC_HOST_PROGRAM_REVISION_CHANGED')
+    git(checkout,'fetch','--no-tags','origin',branch,timeout=120)
+    fetched=git(checkout,'rev-parse','FETCH_HEAD')
+    if fetched!=base_sha or git(checkout,'rev-parse','HEAD')!=before:
+        raise AppError('MAC_HOST_PROGRAM_REVISION_CHANGED')
+    return {'operation':'git fetch origin '+branch,'branch':branch,'base_sha':base_sha,
+            'plan_blob':plan_blob,'checkout_head':before,'fetched_head':fetched,'at':time.time()}
 
 
 class Repositories:
@@ -95,6 +112,11 @@ class Repositories:
 
     def head(self, job):
         return git(self.path(job), 'rev-parse', 'HEAD')
+
+    def prepare_native(self,job):
+        self.assert_binding(job);self.assert_scope(job)
+        bound=job['native_lineage']['binding']
+        return prepare_host_checkout(self.path(job),job['base_branch'],bound['plan_commit'],bound['plan_blob'])
 
     def clean(self, job):
         return not git(self.path(job), 'status', '--porcelain')

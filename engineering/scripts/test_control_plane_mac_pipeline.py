@@ -22,7 +22,8 @@ import test_control_plane_mac_authority as fixtures
 
 
 def report(head='',status='complete'):
-    return {'status':status,'summary':'Synthetic fixture outcome, not live product validation.','question':'',
+    return {'status':status,'summary':'Synthetic fixture outcome, not live product validation.',
+            'question':'Restore the assigned sandbox before continuing.' if status=='needs_user' else '',
             'plan':None,'findings':[] if status=='complete' else ['fixture rework required'],
             'checks':['fixture check'],'reviewed_head':head,'covered_tasks':['P-SDK-0']}
 
@@ -57,6 +58,8 @@ class FixtureRepositories(gitops.Repositories):
     def clean(self,job): return not self.dirty
     def assert_binding(self,job): pass
     def assert_scope(self,job): pass
+    def prepare_native(self,job):
+        return {'operation':'fixture host fetch','base_sha':job['base_sha'],'plan_blob':job['program_scope']['blob']}
     def synchronize_base(self,job): return {'changed':False}
     def publish(self,job): self.published+=1; return 'https://github.com/owner/kix/pull/2'
     def checks(self,job):
@@ -132,6 +135,18 @@ class MacPipelineTests(unittest.TestCase):
         job=self.seed(status='fail')
         self.assertEqual(job['state'],'building'); self.assertTrue(job['correcting'])
         self.assertEqual(job['feedback'],['fixture rework required'])
+    def test_native_needs_user_exit_zero_does_not_automatically_retry_or_lose_question(self):
+        job=self.seed(status='needs_user')
+        self.assertEqual(job['state'],'needs_user'); self.assertIsNone(job['attempt'])
+        self.assertEqual(job['question'],report(status='needs_user')['question'])
+        self.assertEqual(job['feedback'],report(status='needs_user')['findings'])
+        self.assertEqual(job['built_tasks'],[]);self.assertEqual(job['task_index'],0)
+        self.assertEqual(self.engine.describe(job)['health']['implementation_count'],0)
+        with patch.object(self.engine,'launch') as launch,patch.object(self.engine,'keep_awake'):
+            self.engine.tick(); self.engine.tick()
+        launch.assert_not_called(); self.assertEqual(self.store.get(job['id'])['calls'],1)
+        self.assertEqual(self.worker.launched,1); self.assertEqual(self.repos.published,0)
+        with self.assertRaises(common.AppError):self.app.action(job['id'],'resume',{})
     def test_login_failure_waits_for_user_instead_of_starting_another_provider(self):
         job=self.seed(error='PROVIDER_LOGIN_REQUIRED')
         self.assertEqual(job['state'],'needs_user'); self.assertEqual(job['provider_error'],'PROVIDER_LOGIN_REQUIRED')

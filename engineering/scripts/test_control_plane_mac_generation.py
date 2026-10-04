@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ import agents
 import common
 import core
 import gitops
+import install
 import mac_authority
 import mac_generation
 import mac_sandbox
@@ -155,6 +157,61 @@ class MacGenerationTests(unittest.TestCase):
         job['generation_policy']['auto_merge']=True
         with self.assertRaisesRegex(common.AppError,'PUBLICATION_POLICY_REQUIRED'):engine.pipeline.assert_job(job,refresh=False)
         self.assertIn('new isolated Mac generation',agents.prompt(self.store.jobs()[0],'reviewer',job['head']))
+    def blocked_delivery(self):
+        bound=self.adopt();record=self.controller.start(self.request(bound))
+        folder=self.store.directory/'native'/record['request_id']/record['attempt']['id']
+        checkout=common.private_directory(folder/'checkout')
+        common.atomic_json(folder/'request.json',{'attempt_id':record['attempt']['id'],
+            'binding':record['attempt']['binding'],'host_directory':str(self.store.directory.resolve()),'checkout':str(checkout.resolve())})
+        self.worker.result=delivery.private_outcome(folder,record['attempt'],delivery.report(status='needs_user'))
+        self.controller.tick();engine=core.Engine(self.store,delivery.FixtureRepositories(self.store.directory/'workspaces'),self.controller)
+        self.assertTrue(engine.pipeline.deliver())
+        return self.store.jobs()[0],folder
+    def test_update_preserves_quiescent_needs_user_generation_and_failure_without_state_mutation(self):
+        job,_=self.blocked_delivery();before=list(self.store.db.iterdump())
+        with patch('core.Store',side_effect=AssertionError('A read-only precheck cannot open a Store')):
+            install.idle_database(self.store.directory)
+        self.assertEqual(list(self.store.db.iterdump()),before)
+        self.assertEqual(self.store.get(job['id'])['state'],'needs_user')
+        self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'DELIVERING')
+        self.store.update(job['id'],state='paused');install.idle_database(self.store.directory)
+        self.assertEqual(self.store.get(job['id'])['state'],'paused')
+    def test_quiescent_update_rejects_lost_or_changed_private_proof_and_immutable_binding(self):
+        job,folder=self.blocked_delivery()
+        path=folder/'receipt.json';original=path.read_bytes();path.unlink()
+        with self.assertRaisesRegex(common.AppError,'작업을 완료'):install.idle_database(self.store.directory)
+        path.write_bytes(original);path.chmod(0o600)
+        value=common.read_json(path);value['process_group_quiescent']=False;common.atomic_json(path,value)
+        with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
+        path.write_bytes(original);path.chmod(0o600)
+        self.store.update(job['id'],generation_policy={**mac_generation.POLICY,'auto_merge':True})
+        with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
+    def test_quiescent_update_cannot_bypass_an_extra_attempt_or_actual_live_child(self):
+        job,folder=self.blocked_delivery()
+        extra=common.private_directory(self.store.directory/'jobs'/job['id']/('9'*32))
+        with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
+        extra.rmdir()
+        child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(.5)'],start_new_session=True)
+        try:
+            common.atomic_json(folder/'running.json',{'pid':child.pid})
+            with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
+        finally:child.wait(timeout=5)
+        install.idle_database(self.store.directory)
+    def test_completed_owned_native_wrapper_is_reaped_even_without_pending_work(self):
+        job,_=self.blocked_delivery()
+        worker=native_transfer.NativeWorker(self.store.directory,self.store.settings)
+        child=subprocess.Popen([sys.executable,'-c','pass'],start_new_session=True)
+        self.addCleanup(child.wait,timeout=5)
+        worker.children['owned-fixture']=child;self.controller.worker=worker
+        engine=core.Engine(self.store,delivery.FixtureRepositories(self.store.directory/'workspaces'),self.controller)
+        with patch.object(engine,'keep_awake'):
+            deadline=time.monotonic()+5
+            while child.returncode is None and time.monotonic()<deadline:
+                engine.tick();time.sleep(.01)
+        self.assertEqual(child.returncode,0)
+        self.assertEqual(self.store.get(job['id'])['calls'],1)
+        self.assertEqual(self.store.get(job['id'])['state'],'needs_user')
+        install.idle_database(self.store.directory)
     def test_publication_rejects_policy_tamper_before_any_git_or_github_write(self):
         repos=gitops.Repositories(self.store.directory/'workspaces')
         job={'native_lineage':{'binding':{'generation_id':'1'*32}},'generation_policy':{**mac_generation.POLICY,'auto_merge':True}}
@@ -192,8 +249,10 @@ class MacGenerationTests(unittest.TestCase):
         def git(checkout,*args,**kwargs):
             calls.append((checkout,args))
             if args[0]=='clone':Path(args[-1]).mkdir()
-            return bound['plan_commit'] if args[0]=='rev-parse' else ''
-        with patch('native_transfer.git',side_effect=git),patch('native_transfer.agents.command',return_value=['fixture']):
+            if args[0]=='symbolic-ref':return 'origin/main'
+            if args[0]=='rev-parse':return bound['plan_blob'] if ':' in args[1] else bound['plan_commit']
+            return ''
+        with patch('native_transfer.git',side_effect=git),patch('gitops.git',side_effect=git),patch('native_transfer.agents.command',return_value=['fixture']):
             native.prepare(bound,work,'3'*32,'4'*32)
         self.assertTrue(any(args[:2]==('checkout','-b') and args[2]=='aiops/native-'+('3'*16) for _,args in calls))
         self.assertTrue(all('astra/' not in str(args) for _,args in calls))

@@ -314,6 +314,9 @@ class Engine:
         self.pipeline=Pipeline(self.store,self.canonical.source,self.repos,failure=self.operational_failure) if getattr(self.canonical.source,'mode',None)=='MAC' else None
 
     def tick(self):
+        # Reap only Popen objects created by this host, including a native
+        # wrapper whose final receipt reached us just before it exited.
+        for process in list(getattr(getattr(self.canonical,'worker',None),'children',{}).values()): process.poll()
         if self.canonical.pending():
             self.keep_awake(self.store.settings()['keep_awake'])
             return self.canonical.tick()
@@ -553,6 +556,7 @@ class Engine:
         try:
             if job.get('native_lineage'):
                 self.pipeline.assert_job(context,refresh=True)
+                preparation=self.repos.prepare_native(context)
                 observation={'mode':'mac_local','binding':job['native_lineage']['binding']}
             else:
                 transport_guard.require_clear(self.store.directory)
@@ -575,7 +579,9 @@ class Engine:
             if job['pause_requested']:
                 self.store.update(job['id'], state='paused'); return
             self.store.update(job['id'], admission=observation)
-            if job.get('native_lineage'): self.pipeline.assert_job(job,refresh=False)
+            if job.get('native_lineage'):
+                self.pipeline.assert_job(job,refresh=False)
+                job=self.store.update(job['id'],host_preparation=preparation)
             else:
                 admission.require_native(observation)
                 transport_guard.require_clear(self.store.directory)
@@ -724,8 +730,9 @@ class Engine:
             current = self.store.get(job['id']); current['current_task'] = attempt['task']
             head = self.repos.checkpoint(current)
             built = list(job['built_tasks'])
-            if not job['correcting']: built.append(attempt['task']['id'])
-            index = job['task_index'] if job['correcting'] else job['task_index'] + 1
+            if not job['correcting'] or (job.get('native_lineage') and attempt['task']['id'] not in built):
+                built.append(attempt['task']['id'])
+            index = 1 if job.get('native_lineage') else job['task_index'] if job['correcting'] else job['task_index'] + 1
             phase = 'reviewing' if job['correcting'] or index >= len(job['plan']['tasks']) else 'building'
             self.store.update(job['id'], head=head, built_tasks=built, task_index=index, phase=phase, state=phase,
                               feedback=[], correcting=False, review=None, supervision=None, ci=None)

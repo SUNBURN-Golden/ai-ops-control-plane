@@ -72,7 +72,7 @@ def prompt(job, role, head):
         'reviewer': 'You are a fresh, independent, non-author reviewer. Do not modify any file. Independently inspect the actual source and diff from base_sha to the exact head below, applicable contracts, acceptance criteria and available test evidence. Do not trust the writer summary as proof. Return fail for unresolved defects or insufficient evidence, needs_user for a consequential required decision, and complete only for a passing review of this exact head. covered_tasks must list every planned task id. plan must be null.',
         'supervisor': 'You are the independent final inspector, not the planner or writer. Do not modify any file. Read the original repository deliverable specifications yourself. Check the entire current diff, every planned task, cross-task integration, tests and user-visible usability. Find omissions in the plan as well as implementation defects. Return complete only if ALL source-defined deliverables and the user goal are satisfied at this exact head. covered_tasks must list every task id. Missing live credentials/evidence is not a passing result. plan must be null.',
     }[role]
-    context = {key: job.get(key) for key in ('id', 'repository', 'goal', 'base_sha', 'plan', 'source_pins', 'program_scope', 'feedback', 'user_answers', 'generation_policy', 'generation_decision')}
+    context = {key: job.get(key) for key in ('id', 'repository', 'goal', 'base_sha', 'plan', 'source_pins', 'program_scope', 'feedback', 'user_answers', 'generation_policy', 'generation_decision', 'host_preparation')}
     context.update(role=role, exact_head=head, current_task=task)
     if job.get('program_scope'):
         instruction += ((' Preserve the admitted node and its exact canonical program dependencies. ' if job.get('native_lineage') else
@@ -90,6 +90,10 @@ def prompt(job, role, head):
         context['plan']['task_ids'] = [item['id'] for item in job['plan']['tasks']]
         context['built_tasks'] = job['built_tasks']
     if job.get('native_lineage'):
+        if job.get('host_preparation'):
+            instruction += (' The trusted AIOPS host performed git fetch and verified the exact pinned base/plan before this invocation. '
+                            'Read authoritative documents at that pin before editing. Git metadata is host-owned and read-only; '
+                            'do not repeat fetch, commit, push, checkout, or other metadata writes. Technical gates remain unchanged.')
         context['canonical_binding']=job['native_lineage']['binding']
         instruction += (' This delivery is exactly one admitted original program node. The full original program is context, '
                         'not authority to implement or claim completion of other nodes. Its canonical dependencies are separately gated by the Mac host. '

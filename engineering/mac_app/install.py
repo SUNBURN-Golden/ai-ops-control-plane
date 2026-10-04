@@ -22,7 +22,7 @@ import time
 if __name__ == '__main__':
     sys.dont_write_bytecode = True
 
-from common import AppError, JOB_RECORD_LIMIT, VERSION, encoded, parse_json, private_directory
+from common import AppError, JOB_RECORD_LIMIT, VERSION, digest, encoded, parse_json, private_directory
 from core import service_lock
 
 LABEL = 'local.aiops.mac'
@@ -142,6 +142,74 @@ def file_hashes(app, exclude=()):
             for p in sorted(app.rglob('*')) if p.is_file() and str(p.relative_to(app)) not in exclude}
 
 
+def quiescent_generation_delivery(db,state,job,tables):
+    """Prove one blocked new-generation lineage, without releasing its ownership."""
+    import mac_generation
+    import native_transfer
+    from mac_authority import LocalSource, require
+    require(job['state'] in ('needs_user','paused') and job.get('attempt') is None,'UPDATE_BUSY')
+    require({'mac_host_generations','mac_host_tasks','mac_host_attempts','native_local','mac_host_deliveries'} <= tables,
+            'UPDATE_BUSY')
+    lineage=job.get('native_lineage'); require(isinstance(lineage,dict),'UPDATE_BUSY')
+    bound=native_transfer.binding(lineage['binding'])
+    require('generation_id' in bound and job.get('generation_policy')==mac_generation.POLICY,'UPDATE_BUSY')
+    rid,aid=lineage['request_id'],lineage['attempt_id']
+    require(all(isinstance(v,str) and re.fullmatch(r'[0-9a-f]{32}',v) for v in (rid,aid)),'UPDATE_BUSY')
+    generation=db.execute('SELECT document FROM mac_host_generations WHERE id=?',(bound['generation_id'],)).fetchone()
+    task=db.execute('SELECT binding,work,state FROM mac_host_tasks WHERE repository=? AND task=?',
+                    (bound['repository'].lower(),bound['task_id'])).fetchone()
+    native=db.execute('SELECT document,terminal,state FROM mac_host_attempts WHERE request=?',(rid,)).fetchone()
+    local=db.execute('SELECT document,state FROM native_local WHERE request=?',(rid,)).fetchone()
+    delivery=db.execute('SELECT job,document,state FROM mac_host_deliveries WHERE request=?',(rid,)).fetchone()
+    require(all((generation,task,native,local,delivery)),'UPDATE_BUSY')
+    document=parse_json(generation[0],4*1024*1024); work=parse_json(task[1],1024*1024)
+    request=parse_json(native[0],1024*1024)['request']; terminal=parse_json(native[1])
+    local_record=parse_json(local[0],1024*1024); delivery_document=parse_json(delivery[1])
+    require(document['binding']==parse_json(task[0])==bound and document['policy']==mac_generation.POLICY and
+            digest(work)==bound['work_sha256'] and work['generation_policy']==mac_generation.POLICY and
+            work['generation_decision']==job.get('generation_decision') and
+            job['base_sha']==bound['plan_commit'] and job['program_scope']['blob']==bound['plan_blob'] and
+            job['branch']=='aiops/native-'+rid[:16] and job['settings']['roles']['builder']==work['profile'] and
+            job['settings']['publish_pr'] is True and len(job['plan']['tasks'])==1 and
+            job['plan']['tasks'][0]['id']==work['task']['id'] and
+            job['plan']['tasks'][0]['instructions']==work['task']['spec'] and
+            native[2]==local[1]=='TERMINAL' and task[2]==delivery[2]=='DELIVERING' and
+            request['binding']==local_record['binding']==bound and request['attempt']['id']==aid and
+            local_record['attempt']==request['attempt'] and local_record['terminal']==terminal and
+            delivery[0]==job['id'] and delivery_document['lineage']==lineage and
+            delivery_document['terminal_sha256']==digest(terminal),'UPDATE_BUSY')
+    # Construct no Store/LocalSource: this precheck must never migrate SQLite.
+    reader=object.__new__(LocalSource)
+    root=Path(state).resolve(); checkout=root/'native'/rid/aid/'checkout'
+    folders=[checkout.parent]
+    job_folder=root/'jobs'/job['id']
+    if job_folder.is_symlink(): raise AppError('UPDATE_BUSY')
+    if job_folder.exists():
+        for item in job_folder.iterdir():
+            if item.is_symlink(): raise AppError('UPDATE_BUSY')
+            if item.is_dir():
+                require(re.fullmatch(r'[0-9a-f]{32}',item.name) is not None,'UPDATE_BUSY')
+                folders.append(item)
+    require(type(job['calls']) is int and len(folders)==job['calls'],'UPDATE_BUSY')
+    for folder in folders:
+        private=reader._private_json(folder/'request.json')
+        require(private['host_directory']==str(root) and private['checkout']==str(checkout) and
+                private['attempt_id']==folder.name,'UPDATE_BUSY')
+        if folder==checkout.parent:
+            require(private['binding']==request['attempt']['binding'],'UPDATE_BUSY')
+        receipt=reader.private_receipt(folder,{'id':private['attempt_id'],'binding':private['binding']},
+                                       terminal['result_sha256'] if folder==checkout.parent else None)
+        running=folder/'running.json'
+        if running.exists():
+            pid=reader._private_json(running).get('pid')
+            require(type(pid) is int and pid>1,'UPDATE_BUSY')
+            try: os.killpg(pid,0)
+            except ProcessLookupError: pass
+            except OSError: raise AppError('UPDATE_BUSY') from None
+            else: raise AppError('UPDATE_BUSY')
+    return (bound['repository'].lower(),bound['task_id'])
+
+
 def idle_database(state):
     """Read existing state only. Both the reject-only precheck and fenced check use this."""
     database = state / 'app.sqlite3'
@@ -167,17 +235,24 @@ def idle_database(state):
             columns = {row[1] for row in db.execute('PRAGMA table_info(jobs)')}
             if not {'settings', 'jobs', 'events'} <= tables or columns != {'id', 'request_id', 'repository', 'state', 'document', 'created'}:
                 raise AppError('INSTALLATION_STATE_UNVERIFIED')
+            blocked_tasks=set()
             for key, state_name, document in db.execute('SELECT id,state,document FROM jobs'):
                 job = parse_json(document, JOB_RECORD_LIMIT)
                 if not isinstance(job, dict) or job.get('id') != key or job.get('state') != state_name or 'attempt' not in job:
                     raise AppError('INSTALLATION_STATE_UNVERIFIED')
                 if state_name not in ('accepted', 'cancelled') or job.get('attempt') is not None:
-                    raise AppError('UPDATE_BUSY', '작업을 완료·검수하거나 안전하게 취소한 뒤 업데이트해 주세요. 대기·일시정지·실행 불명 작업은 유지합니다.')
+                    try: blocked_tasks.add(quiescent_generation_delivery(db,state,job,tables))
+                    except (AppError,KeyError,TypeError,ValueError,OSError):
+                        raise AppError('UPDATE_BUSY', '작업을 완료·검수하거나 안전하게 취소한 뒤 업데이트해 주세요. 대기·일시정지·실행 불명 작업은 유지합니다.') from None
             for table,allowed in (('native_local',('TERMINAL',)),('mac_host_attempts',('TERMINAL',)),
-                                  ('mac_host_tasks',('READY','ACCEPTED'))):
+                                  ):
                 if table in tables:
                     marks=','.join('?' for _ in allowed)
                     if db.execute('SELECT 1 FROM '+table+' WHERE state NOT IN ('+marks+') LIMIT 1',allowed).fetchone():
+                        raise AppError('UPDATE_BUSY','Mac canonical 작업의 실행·검토·병합 근거가 미완료입니다. 원장과 산출물을 보존합니다.')
+            if 'mac_host_tasks' in tables:
+                for repo,task,state_name in db.execute('SELECT repository,task,state FROM mac_host_tasks'):
+                    if state_name not in ('READY','ACCEPTED') and not(state_name=='DELIVERING' and (repo,task) in blocked_tasks):
                         raise AppError('UPDATE_BUSY','Mac canonical 작업의 실행·검토·병합 근거가 미완료입니다. 원장과 산출물을 보존합니다.')
     except sqlite3.Error as exc:
         raise AppError('INSTALLATION_STATE_UNVERIFIED') from exc

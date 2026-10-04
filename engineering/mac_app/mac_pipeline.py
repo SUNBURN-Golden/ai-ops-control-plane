@@ -88,7 +88,7 @@ class Pipeline:
             job.update(native_lineage=lineage,settings=copy.deepcopy(work['settings']),base_sha=bound['plan_commit'],
                 base_branch=program['branch'],branch='aiops/native-'+rid[:16],program_scope=copy.deepcopy(program['scope']),
                 plan={'summary':node['title'],'sources':['.aiops/program.json'],'tasks':[item]},
-                source_pins={'.aiops/program.json':bound['plan_blob']},calls=1,task_index=1,built_tasks=[node['id']],
+                source_pins={'.aiops/program.json':bound['plan_blob']},calls=1,task_index=0,built_tasks=[],
                 current_task=item,builder_sessions=[] if receipt.get('error')=='PROVIDER_LOGIN_REQUIRED' else
                     [(receipt.get('provider_evidence') or {}).get('session_id')],
                 feedback=[],correcting=False,admission={'mode':'mac_local','binding':bound})
@@ -102,11 +102,19 @@ class Pipeline:
             if report is not None: agents.validate_report(report)
             passing=report and report['status']=='complete' and not report['findings'] and not report['question'].strip() and report['checks'] and all(c.strip() for c in report['checks'])
             if passing:
-                job.update(state='reviewing',phase='reviewing',summary=report['summary'])
+                job.update(state='reviewing',phase='reviewing',summary=report['summary'],task_index=1,built_tasks=[node['id']])
+            elif report and report['status']=='needs_user':
+                # A successful provider exit is not a successful implementation.
+                # Preserve the exact question without spending another model call.
+                job.update(state='needs_user',phase='building',correcting=True,
+                    summary=report['summary'],question=report['question'],feedback=report['findings'])
             else:
                 job.update(state='building',phase='building',correcting=True,
                     feedback=(report or {}).get('findings') or [receipt.get('error') or (report or {}).get('summary') or 'Native task needs rework.'])
                 if receipt.get('error')=='USER_STOPPED': job.update(state='paused',pause_requested=True)
+            job['last_terminal']={'attempt':lineage['attempt_id'],'role':'builder','head':head,
+                'at':time.time(),'exit_code':receipt['exit_code'],'status':(report or {}).get('status'),
+                'error':receipt.get('error')}
             with self.store.lock:
                 self.store.db.execute('BEGIN IMMEDIATE')
                 try:

@@ -107,6 +107,11 @@ class NativeWorker:
         git(checkout, 'config', 'user.email', 'aiops-mac@users.noreply.github.com')
         head = git(checkout, 'rev-parse', 'HEAD').strip()
         require(head == value['plan_commit'], 'NATIVE_CHECKOUT_BINDING_MISMATCH')
+        preparation=None
+        if value.get('authority_kind')=='MAC_LOCAL':
+            from gitops import prepare_host_checkout
+            branch=git(checkout,'symbolic-ref','--short','refs/remotes/origin/HEAD').removeprefix('origin/')
+            preparation=prepare_host_checkout(checkout,branch,value['plan_commit'],value['plan_blob'])
         attempt = {'id': attempt_id, 'head': head, 'profile': profile}
         attempt['binding'] = digest({'request_id': request_id, 'canonical': value, **attempt})
         agents.command(profile, 'builder', folder, checkout=checkout)
@@ -114,6 +119,11 @@ class NativeWorker:
                   'Implement only the frozen authorized task scope below. Do not replan, create another writer, run a VM, '
                   'merge or deploy. Return the AIOPS structured completion schema. Source gates and ownership are not '
                   'granted by your report.\nCanonical binding:\n' + encoded(value) + '\nFrozen scope:\n' + encoded(work) + '\n' + encoded(agents.SCHEMA))
+        if preparation:
+            prompt += ('\nTrusted host preparation:\n'+encoded(preparation)+
+                       '\nThe AIOPS host has performed the required git fetch and verified the pinned base and plan blob. '
+                       'Read all authoritative documents at that pin before editing. Git metadata is host-owned and read-only to you; '
+                       'do not repeat fetch, commit, push, checkout, or other Git metadata writes. This changes no repository technical gate.')
         if 'generation_id' in value:
             prompt += ('\nExplicit User-approved new Mac generation: the original task ID/revision and legacy issues are provenance only; '
                        'you are not their owner and must not change or resume them. The User approved a new isolated Mac task/branch '
