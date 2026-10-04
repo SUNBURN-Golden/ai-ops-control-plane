@@ -81,6 +81,7 @@ class PreflightClient:
         self.driver=driver;self.path=path;self.calls=[];self.active=None;self.account='chatgpt';self.stopping=False
         raw={'permissions':{driver.name:driver.profile},'default_permissions':driver.name,
             'model_provider':'openai','web_search':'disabled','mcp_servers':{},'notify':[],
+            'shell_environment_policy':driver.values['shell_environment_policy'],
             'features':{key:False for key in native.FEATURES}}
         user={'sandbox_mode':'danger-full-access','mcp_servers':{'fixture':{'command':'must-not-run'}},
             'notify':['must-not-run'],'projects':{driver.request['checkout']:{'trust_level':'trusted'}}}
@@ -118,6 +119,16 @@ class NativePreflightTests(Fixture):
     def test_wrong_profile_or_enabled_external_surface_blocks_before_account(self):
         client=PreflightClient(self.driver,self.config);client.active='apps'
         with self.assertRaises(common.AppError):self.preflight(client)
+    def test_app_PATH_is_pinned_without_changing_filesystem_grants(self):
+        expected='/fixture/runtime/bin:/usr/bin:/bin'
+        with mock.patch.dict(os.environ,PATH=expected):
+            values=native.overrides(self.request,self.driver.name,self.driver.profile,self.driver.runtime)
+        self.assertEqual(values['shell_environment_policy'],{'inherit':'core','set':{'PATH':expected}})
+        self.assertEqual(values['permissions.'+self.driver.name],self.driver.profile)
+        self.assertNotIn('/fixture/runtime/bin',self.driver.profile['filesystem'])
+        client=PreflightClient(self.driver,self.config)
+        client.read['config']['shell_environment_policy']={'set':{'PATH':'/unexpected'}}
+        with self.assertRaisesRegex(common.AppError,'PROFILE_UNVERIFIED'):self.preflight(client)
         self.assertNotIn('account/read',client.calls)
         client=PreflightClient(self.driver,self.config);client.read['config']['default_permissions']=':workspace'
         with self.assertRaises(common.AppError):self.preflight(client)

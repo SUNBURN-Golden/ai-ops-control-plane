@@ -47,6 +47,7 @@ def qualified_cli():
 def overrides(request,name,profile,runtime):
     return {'default_permissions':name,'permissions.'+name:profile,'analytics.enabled':False,
         'model_provider':'openai','web_search':'disabled','mcp_servers':{},'notify':[],
+        'shell_environment_policy':{'inherit':'core','set':{'PATH':agents.environment().get('PATH','/usr/bin:/bin')}},
         'sqlite_home':str(runtime/'state'),'log_dir':str(runtime/'log'),
         'projects.'+json.dumps(str(Path(request['checkout']).resolve()))+'.trust_level':'untrusted',
         **{'features.'+key:False for key in FEATURES}}
@@ -56,7 +57,7 @@ def flags(values):
     return sum((['-c',key+'='+sdk.toml_inline(value)] for key,value in values.items()),[])
 
 
-def bound_profile(read,listed,name,profile):
+def bound_profile(read,listed,name,profile,expected_path=None):
     layers=read.get('layers') or []
     sdk.require(layers and all(v.get('name',{}).get('type') in LAYER_TYPES for v in layers))
     # Official exec excludes user config; project trust is pinned untrusted.
@@ -75,6 +76,8 @@ def bound_profile(read,listed,name,profile):
         'project_layer_disabled':all(v.get('disabledReason') for v in layers if v['name']['type']=='project'),
         'selection_allowed':any(v.get('id')==name and v.get('allowed') is True and
             v.get('description')==profile['description'] for v in listed.get('data',[]))}
+    if expected_path is not None:
+        checks['shell_PATH_matches']=(effective.get('shell_environment_policy') or {}).get('set',{}).get('PATH')==expected_path
     sdk.require(all(checks.values()))
     return checks
 
@@ -145,7 +148,8 @@ class Driver:
             sdk.require(Path(layer['name']['file']).resolve()==self.snapshot.path.resolve(),config.ERROR)
             sdk.require((layer['config'].get('projects') or {}).get(self.proof['checkout'],{}).get('trust_level')=='trusted',config.ERROR)
             listed=protocol.rpc('permissionProfile/list',{'cwd':self.request['checkout']})
-            self.proof['profile_checks']=bound_profile(read,listed,self.name,self.profile)
+            self.proof['profile_checks']=bound_profile(read,listed,self.name,self.profile,
+                self.values['shell_environment_policy']['set']['PATH'])
             features=protocol.rpc('experimentalFeature/list',{'limit':1000})
             self.proof['feature_checks']={key:any(v.get('name')==key and v.get('enabled') is False
                 for v in features['data']) for key in FEATURES};self.save()
@@ -228,7 +232,10 @@ class Driver:
             stdout=subprocess.PIPE,stderr=sys.stderr.buffer)
         self.tree=ProcessTree(self.child.pid)
         # A private file supplies the assignment, never an adapter stdin pipe.
-        assignment=self.request['prompt'].encode();offset=0;buffer=b''
+        runtime_instruction=('AIOPS native runtime: use exec_command with login=false and direct commands. '
+            'Login shells reset the application PATH; do not wrap commands in zsh/bash -l. '
+            'Host-provided tool paths do not grant additional filesystem access.\n')
+        assignment=(runtime_instruction+self.request['prompt']).encode();offset=0;buffer=b''
         os.set_blocking(self.child.stdin.fileno(),False)
         deadline=time.monotonic()+self.request['timeout_seconds']
         eof=False
