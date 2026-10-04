@@ -176,10 +176,34 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(self.loaded)
         self.assertEqual(list(self.app.parent.glob('.aiops-stage-*')), [])
 
-    def test_stopped_owned_install_updates_without_bootout(self):
-        self.install(); self.loaded = False; self.calls.clear()
+    def test_stopped_owned_install_updates_without_restarting_or_changing_records(self):
+        self.install(); self.job()
+        token = self.state / 'desktop-token'; token.write_text('stopped-token-kept'); token.chmod(0o600)
+        database = (self.state / 'app.sqlite3').read_bytes()
+        self.loaded = False; self.calls.clear()
+        # A disabled launchd label rejects bootstrap. The updater must never
+        # invoke it merely because an already-stopped app received new files.
+        self.fail_bootstrap = True
         self.install(update=True)
-        self.assertEqual([x[1] for x in self.calls], ['print', 'print', 'bootstrap'])
+        self.assertEqual([x[1] for x in self.calls], ['print', 'print'])
+        self.assertFalse(self.loaded); self.assertTrue(self.fail_bootstrap)
+        self.assertEqual((self.state / 'app.sqlite3').read_bytes(), database)
+        self.assertEqual(token.read_text(), 'stopped-token-kept')
+        installer.installed_binding(self.app, self.state, self.plist)
+
+    def test_failed_stopped_update_restores_files_without_restarting(self):
+        self.install(); self.job(); self.loaded = False
+        before = installer.file_hashes(self.app); old_plist = self.plist.read_bytes()
+        database = (self.state / 'app.sqlite3').read_bytes(); self.calls.clear()
+        with mock.patch.object(installer, 'VERSION', '99.0.0'), \
+                mock.patch.object(installer.os, 'replace', side_effect=OSError('publication failed')):
+            with self.assertRaisesRegex(OSError, 'publication failed'): self.install(update=True)
+        self.assertEqual(installer.file_hashes(self.app), before)
+        self.assertEqual(self.plist.read_bytes(), old_plist)
+        self.assertEqual((self.state / 'app.sqlite3').read_bytes(), database)
+        self.assertFalse(self.loaded)
+        self.assertNotIn('bootstrap', [x[1] for x in self.calls])
+        self.assertEqual(list(self.app.parent.glob('.aiops-stage-*')), [])
 
     def test_external_destination_is_refused_before_writes(self):
         with self.platform():

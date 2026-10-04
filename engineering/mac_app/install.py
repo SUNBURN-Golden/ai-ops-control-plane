@@ -350,7 +350,12 @@ def install_locked(app, state, agents, plist, *, update):
         # the authoritative no-owner check have completed before releasing it.
         os.close(fd); fd = None
         service_logs(state)
-        launchctl('bootstrap', domain, str(plist))
+        # Updating files must preserve a user's stopped service. In particular,
+        # bootstrap would undo bootout or fail against a disabled launchd label.
+        # A fresh installation still starts normally; a running update resumes
+        # only the service that this transaction stopped.
+        if not update or was_loaded:
+            launchctl('bootstrap', domain, str(plist))
     except BaseException:
         if swapped:
             # A bootstrap may have registered the narrow label before failing.
@@ -387,6 +392,8 @@ def install_locked(app, state, agents, plist, *, update):
         if prior is not None and not app.exists(): os.rename(prior, app)
     if prior is not None: shutil.rmtree(prior)
     print(('업데이트했습니다: ' if update else '설치했습니다: ') + str(app))
+    if update and not was_loaded:
+        print('기존 AIOPS 서비스는 중지 상태로 유지했습니다. 자동 시작 설정은 변경하지 않았습니다.')
     print('GitHub와 선택한 CLI의 로그인을 마친 뒤 AIOPS.app을 여세요. 모델 연결은 앱에서 확인할 수 있습니다.')
     return app
 
