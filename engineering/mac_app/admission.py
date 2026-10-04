@@ -6,6 +6,7 @@ host admission even when closed or terminal; they never grant local execution.
 from __future__ import annotations
 
 import re
+import time
 
 from common import AppError, parse_json
 
@@ -16,8 +17,10 @@ def host_required(reason, **evidence):
     return {'mode': 'host_required', 'reason': reason, 'host_authority': 'unobserved', **evidence}
 
 
-def pages(execute, path):
-    value = parse_json(execute(['gh', 'api', '--method', 'GET', '--paginate', '--slurp', path]))
+def pages(execute, path, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0: raise AppError('ADMISSION_OBSERVATION_UNRESOLVED')
+    value = parse_json(execute(['gh', 'api', '--method', 'GET', '--paginate', '--slurp', path], timeout=remaining))
     if (not isinstance(value, list) or not value or any(not isinstance(page, list) for page in value)
             or sum(len(page) for page in value) > 4096):
         raise AppError('ADMISSION_OBSERVATION_UNRESOLVED', '작업 등록 관측이 불완전합니다. 실행 전에 GitHub 읽기 결과를 확인해야 합니다.')
@@ -32,8 +35,9 @@ def observe(job, managed, execute):
         return host_required('canonical_program', program=scope['program'], blob=scope['blob'])
     if managed: return host_required('registered_project')
     repo = job['repository']
-    registrations, historical, seen = 0, 0, set()
-    for issue in pages(execute, 'repos/' + repo + '/issues?state=all&labels=aiops-task&per_page=100'):
+    registrations, historical, seen, threads = 0, 0, set(), 0
+    deadline = time.monotonic() + 60
+    for issue in pages(execute, 'repos/' + repo + '/issues?state=all&labels=aiops-task&per_page=100', deadline):
         if not isinstance(issue, dict): raise AppError('ADMISSION_OBSERVATION_UNRESOLVED')
         if 'pull_request' in issue: continue
         number, body, count = issue.get('number'), issue.get('body'), issue.get('comments')
@@ -43,7 +47,9 @@ def observe(job, managed, execute):
         seen.add(number)
         texts = [body or '']
         if count:
-            comments = pages(execute, 'repos/' + repo + '/issues/' + str(number) + '/comments?per_page=100')
+            threads += 1
+            if threads > 32: raise AppError('ADMISSION_OBSERVATION_UNRESOLVED')
+            comments = pages(execute, 'repos/' + repo + '/issues/' + str(number) + '/comments?per_page=100', deadline)
             if len(comments) < count: raise AppError('ADMISSION_OBSERVATION_UNRESOLVED')
             comment_ids = set()
             for comment in comments:
@@ -60,6 +66,7 @@ def observe(job, managed, execute):
         registrations += 1
         historical += issue['state'] == 'closed'
     # This is ordinary native work, not evidence that a protected host is idle.
+    if time.monotonic() > deadline: raise AppError('ADMISSION_OBSERVATION_UNRESOLVED')
     return {'mode': 'native', 'registration_count': registrations, 'historical_registration_count': historical}
 
 

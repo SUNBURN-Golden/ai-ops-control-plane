@@ -138,22 +138,12 @@ class Store:
                     self.db.execute('COMMIT'); return job
                 predecessors = [parse_json(row[0], JOB_RECORD_LIMIT) for row in self.db.execute(
                     'SELECT document FROM jobs WHERE lower(repository)=lower(?)', (repo,))]
-                inherited = None
                 for previous in predecessors:
                     if previous.get('attempt') is not None or previous['state'] == 'unknown':
                         raise AppError('LOCAL_EXECUTION_UNRESOLVED', '이 레포의 로컬 실행 결과가 미확정입니다: ' + previous['id'])
                     if previous['state'] not in TERMINAL or previous['id'] in self.execution_busy:
                         raise AppError('REPOSITORY_BUSY', '이 레포의 기존 작업을 먼저 검수하거나 이어서 진행해 주세요: ' + previous['id'])
-                    prior_admission = previous.get('admission') or {}
-                    if prior_admission.get('mode') == 'host_required': inherited = dict(prior_admission)
-                    elif previous.get('program_scope'):
-                        scope = previous['program_scope']
-                        inherited = admission.host_required('canonical_program', program=scope['program'], blob=scope['blob'])
-                if inherited is None:
-                    for row in self.db.execute('SELECT document FROM handoffs'):
-                        record = parse_json(row[0], handoff.LIMIT)
-                        if record['repository'].lower() == repo.lower():
-                            inherited = admission.host_required('prepared_handoff', handoff_id=record['id']); break
+                inherited = self.known_admission(repo)
                 key = uuid.uuid4().hex[:16]; now = time.time()
                 job = {'id': key, 'request_id': rid, 'repository': repo, 'goal': goal,
                        'state': 'queued', 'phase': 'preparing', 'created': now, 'updated': now,
@@ -171,6 +161,22 @@ class Store:
                 self.db.execute('COMMIT'); return job
             except Exception:
                 self.db.execute('ROLLBACK'); raise
+
+    def known_admission(self, repo):
+        """Live local canonical evidence only; terminal state never clears it."""
+        with self.lock:
+            for row in self.db.execute('SELECT document FROM jobs WHERE lower(repository)=lower(?)', (repo,)):
+                previous = parse_json(row[0], JOB_RECORD_LIMIT)
+                prior = previous.get('admission') or {}
+                if prior.get('mode') == 'host_required': return dict(prior)
+                if previous.get('program_scope'):
+                    scope = previous['program_scope']
+                    return admission.host_required('canonical_program', program=scope['program'], blob=scope['blob'])
+            for row in self.db.execute('SELECT document FROM handoffs'):
+                record = parse_json(row[0], handoff.LIMIT)
+                if record['repository'].lower() == repo.lower():
+                    return admission.host_required('prepared_handoff', handoff_id=record['id'])
+        return None
 
     def existing_request(self, value):
         repo, goal, rid = job_request(value)
@@ -515,6 +521,18 @@ class Engine:
             if job['attempt'] or job['state'] not in ACTIVE or job['phase'] != ROLE_STATE[role]: return
             if job['pause_requested']:
                 self.store.update(job['id'], state='paused'); return
+            context = dict(job, admission=self.store.known_admission(job['repository']) or job.get('admission'))
+        # Network reads must not prevent status/pause/cancel. Recheck everything
+        # under the reservation lock afterwards, including a newly prepared handoff.
+        observation = self.repos.execution_admission(context)
+        with self.store.lock:
+            job = self.store.get(job['id'])
+            if job['attempt'] or job['state'] not in ACTIVE or job['phase'] != ROLE_STATE[role]: return
+            if job['pause_requested']:
+                self.store.update(job['id'], state='paused'); return
+            observation = self.store.known_admission(job['repository']) or observation
+            self.store.update(job['id'], admission=observation)
+            admission.require_native(observation)
             self._launch(job, role)
 
     def _launch(self, job, role):
@@ -522,9 +540,6 @@ class Engine:
         if maximum and job['calls'] >= maximum:
             self.store.update(job['id'], state='paused', question='설정한 모델 실행 한도에 도달했습니다.')
             self.store.event(job['id'], 'limit', '설정한 실행 한도에 도달해 멈췄습니다.'); return
-        observation = self.repos.execution_admission(job)
-        self.store.update(job['id'], admission=observation)
-        admission.require_native(observation)
         # Probe command construction before reserving: no model or shell is run.
         folder = private_directory(self.store.directory / 'jobs' / job['id'])
         attempt_id = uuid.uuid4().hex

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -12,6 +13,7 @@ import common
 import core
 import gitops
 import test_control_plane_mac_app as legacy
+import test_control_plane_mac_handoff as handoff_fixture
 
 REPO = 'example/product'
 
@@ -59,6 +61,14 @@ class ObservationTests(unittest.TestCase):
                  [[[issue(), issue()]]], [[[issue(comments=True)]]]]
         for responses in cases:
             with self.subTest(responses=responses), self.assertRaises(common.AppError): self.observe(responses)
+
+    def test_observation_has_a_total_deadline_and_comment_request_bound(self):
+        with mock.patch.object(admission.time, 'monotonic', side_effect=[0, 61]), self.assertRaises(common.AppError):
+            self.observe([])
+        responses = [[[issue(number=n, comments=1) for n in range(1, 34)]]]
+        responses += [[[{'id': 1, 'body': 'Ordinary note'}]]] * 32
+        with self.assertRaises(common.AppError) as caught: self.observe(responses)
+        self.assertEqual(caught.exception.code, 'ADMISSION_OBSERVATION_UNRESOLVED')
 
     def test_managed_repository_and_pinned_program_require_actual_admission_even_without_issues(self):
         with mock.patch.object(gitops, 'execute') as run:
@@ -176,6 +186,65 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(current['calls'], 0); self.assertIsNone(current['attempt'])
                 spawn.assert_not_called()
         self.assertFalse((self.store.directory / 'jobs' / self.job()['id']).exists())
+
+    def test_handoff_saved_during_observation_is_rechecked_before_launch(self):
+        self.new(); self.engine.step(self.job())
+        snapshot = handoff_fixture.snapshot()
+        def observed(_):
+            self.store.create_handoff(handoff_fixture.REQUEST, snapshot)
+            return {'mode': 'native'}
+        with mock.patch.object(self.repos, 'execution_admission', side_effect=observed), \
+                mock.patch.object(core.subprocess, 'Popen') as spawn:
+            self.engine.tick()
+            spawn.assert_not_called()
+        current = self.job()
+        self.assertEqual(current['admission']['reason'], 'prepared_handoff')
+        self.assertEqual(current['blocker']['code'], 'HOST_ADMISSION_REQUIRED')
+        self.assertIsNone(current['attempt']); self.assertEqual(current['calls'], 0)
+
+    def test_pause_and_cancel_remain_responsive_during_remote_observation(self):
+        self.new(); self.engine.step(self.job())
+        for action in ('pause', 'cancel'):
+            self.store.update(self.job()['id'], state='planning', pause_requested=False)
+            entered, release, controlled = threading.Event(), threading.Event(), threading.Event()
+            errors = []
+            def observed(_):
+                entered.set()
+                if not release.wait(5): raise AssertionError('Observation not released')
+                return {'mode': 'native'}
+            def launch():
+                try: self.engine.launch(self.job(), 'planner')
+                except Exception as exc: errors.append(exc)
+            def control():
+                try: self.store.action(self.job()['id'], action); controlled.set()
+                except Exception as exc: errors.append(exc)
+            with mock.patch.object(self.repos, 'execution_admission', side_effect=observed), \
+                    mock.patch.object(core.subprocess, 'Popen') as spawn:
+                runner = threading.Thread(target=launch); runner.start()
+                self.assertTrue(entered.wait(2))
+                controller = threading.Thread(target=control); controller.start()
+                try: self.assertTrue(controlled.wait(2), 'App controls blocked on GitHub read')
+                finally: release.set(); runner.join(5); controller.join(5)
+                spawn.assert_not_called()
+            self.assertEqual(errors, [])
+            self.assertEqual(self.job()['state'], 'paused' if action == 'pause' else 'cancelled')
+            self.assertIsNone(self.job()['attempt'])
+
+    def test_competing_observations_still_reserve_only_one_worker(self):
+        self.new(); self.engine.step(self.job())
+        barrier = threading.Barrier(2); errors = []
+        def observed(_): barrier.wait(3); return {'mode': 'native'}
+        def launch():
+            try: self.engine.launch(self.job(), 'planner')
+            except Exception as exc: errors.append(exc)
+        with mock.patch.object(self.repos, 'execution_admission', side_effect=observed), \
+                mock.patch.object(core.agents, 'command', return_value=['fake']), \
+                mock.patch.object(core.subprocess, 'Popen') as spawn:
+            threads = [threading.Thread(target=launch) for _ in range(2)]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join(5)
+            spawn.assert_called_once()
+        self.assertEqual(errors, []); self.assertEqual(self.job()['calls'], 1)
 
 
 if __name__ == '__main__': unittest.main()

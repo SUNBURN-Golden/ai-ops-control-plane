@@ -463,7 +463,7 @@ class AppTests(unittest.TestCase):
         with self.assertRaisesRegex(common.AppError,'기준 브랜치'):self.engine.validate_acceptance(self.job())
         self.assertEqual(self.job()['state'],'building');self.assertIsNone(self.job()['supervision'])
 
-    def test_program_scope_is_loaded_before_plan_and_cannot_be_omitted(self):
+    def test_program_scope_is_loaded_before_admission_and_cannot_be_bypassed(self):
         import program_scope
         manifest={'schema_version':1,'program':'sample','repository':'example/product',
                   'approval_pointer':'https://github.com/example/product/issues/1','authoritative_doc_pointers':'README.md',
@@ -472,14 +472,12 @@ class AppTests(unittest.TestCase):
         with mock.patch.object(self.repos,'program_scope',return_value=scope):
             self.new(); self.engine.step(self.job())
         self.assertEqual(self.job()['program_scope']['node_ids'],['001'])
-        self.launch(); current=self.finish()
-        self.assertEqual(current['state'],'planning'); self.assertIsNone(current['plan'])
-        self.assertIn('고정된 프로그램',current['feedback'][0])
-        approved={'summary':'Full program','sources':['README.md','.aiops/program.json'],
-                  'tasks':[{'id':'001','title':'Original scope','instructions':manifest['nodes'][0]['spec'],
-                            'acceptance':['Actual evidence'], 'depends_on':[]}]}
-        job=self.launch(); current=self.finish(report(job,'planner',plan=approved))
-        self.assertEqual(current['state'],'building'); self.assertEqual(current['plan']['tasks'][0]['id'],'001')
+        with mock.patch.object(core.subprocess, 'Popen') as spawn:
+            self.engine.tick(); spawn.assert_not_called()
+        current = self.job()
+        self.assertEqual(current['blocker']['code'], 'HOST_ADMISSION_REQUIRED')
+        self.assertEqual(current['program_scope'], scope)
+        self.assertIsNone(current['plan']); self.assertEqual(current['calls'], 0)
 
 
 class ContractTests(unittest.TestCase):
