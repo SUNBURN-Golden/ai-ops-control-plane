@@ -151,6 +151,18 @@ class MacPipelineTests(unittest.TestCase):
         job=self.seed(error='PROVIDER_LOGIN_REQUIRED')
         self.assertEqual(job['state'],'needs_user'); self.assertEqual(job['provider_error'],'PROVIDER_LOGIN_REQUIRED')
         self.assertEqual(self.worker.launched,1)
+    def test_native_sdk_policy_protocol_permission_and_timeout_wait_without_retry(self):
+        job=self.seed(error='MAC_CODEX_PROFILE_UNVERIFIED')
+        for code in ('MAC_CODEX_PROFILE_UNVERIFIED','MAC_CODEX_PROTOCOL_UNVERIFIED',
+                     'MAC_CODEX_PERMISSION_REQUIRED','MAC_CODEX_TURN_TIMEOUT'):
+            self.engine.operational_failure(self.store.get(job['id']),code)
+            current=self.store.get(job['id'])
+            self.assertEqual(current['state'],'needs_user');self.assertEqual(current['provider_error'],code)
+            self.assertIsNone(current['attempt']);self.assertIsNone(current['blocker']['retry_at'])
+        with patch.object(self.engine,'launch') as launch,patch.object(self.engine,'keep_awake'):
+            self.engine.tick();self.engine.tick()
+        launch.assert_not_called();self.assertEqual(self.store.get(job['id'])['calls'],1)
+        self.assertEqual(self.worker.launched,1);self.assertEqual(self.repos.published,0)
     def test_login_recovery_requires_a_real_identified_builder_before_inspection(self):
         job=self.seed(error='PROVIDER_LOGIN_REQUIRED')
         self.assertEqual(job['builder_sessions'],[])

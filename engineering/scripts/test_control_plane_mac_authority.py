@@ -265,7 +265,7 @@ else: raise SystemExit(2)
             state=common.private_directory(Path(root) / 'control')
             folder=common.private_directory(state / 'native' / 'request' / 'attempt')
             checkout=common.private_directory(folder / 'checkout')
-            request={'attempt_id':'fixture-attempt','binding':'fixture-binding','profile':{'provider':'codex','model':''},
+            request={'attempt_id':'fixture-attempt','binding':'fixture-binding','profile':{'provider':'grok_build','model':''},
                      'role':'builder','checkout':str(checkout),'prompt':'fixture','timeout_seconds':30,
                      'host_directory':str(state)}
             common.atomic_json(folder / 'request.json',request)

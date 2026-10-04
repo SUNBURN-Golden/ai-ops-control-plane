@@ -7,11 +7,12 @@ from pathlib import Path
 import signal
 import re
 import subprocess
+import sys
 import time
 
 import agents
 import mac_sandbox
-from common import AppError, WORKER_REQUEST_LIMIT, atomic_json, read_json
+from common import AppError, WORKER_REQUEST_LIMIT, atomic_json, digest, read_json
 
 
 def communicate(child,request,folder,stdin):
@@ -27,7 +28,12 @@ def communicate(child,request,folder,stdin):
                 raise AppError('STOP_REQUEST_BINDING_MISMATCH')
             # Only this wrapper's live child group is signalled. A PID from an
             # old receipt is never used to kill another process after a restart.
-            os.killpg(child.pid,signal.SIGTERM)
+            if request['profile']['provider']=='codex':
+                # The trusted adapter must interrupt/clean the live server
+                # before it closes. Signalling its whole group would terminate
+                # that server before the adapter can obtain shutdown evidence.
+                child.terminate()
+            else:os.killpg(child.pid,signal.SIGTERM)
             try: child.wait(timeout=10)
             except subprocess.TimeoutExpired: raise AppError('STOP_NOT_TERMINAL')
             raise AppError('USER_STOPPED')
@@ -75,12 +81,16 @@ def run(folder):
                'started': time.time(), 'exit_code': None, 'report': None, 'error': None,
                'provider_started': False, 'process_group_quiescent': False}
     atomic_json(folder / 'running.json', {'pid': os.getpid(), 'started': receipt['started']})
-    child = None
+    child = None; native_codex = False; adapter_shutdown = True
     try:
         argv = agents.command(request['profile'], request['role'], folder, checkout=request['checkout'])
         agents.prepare(request['profile'], request['role'], folder, request['checkout'], request['prompt'])
         if 'host_directory' in request:
-            argv = mac_sandbox.command(argv, request['host_directory'], folder, request['checkout'],writing=request['role']=='builder')
+            native_codex = request['profile']['provider']=='codex'
+            if native_codex:
+                argv=[sys.executable,str(Path(__file__).with_name('codex_app_server.py')),'--attempt',str(folder)]
+            else:
+                argv = mac_sandbox.command(argv, request['host_directory'], folder, request['checkout'],writing=request['role']=='builder')
         with open(folder / 'stdout.log', 'wb') as stdout, open(folder / 'stderr.log', 'wb') as stderr:
             child = subprocess.Popen(argv, cwd=request['checkout'], stdin=subprocess.PIPE,
                                      stdout=stdout, stderr=stderr,
@@ -92,14 +102,15 @@ def run(folder):
                 'attempt_id': request['attempt_id'], 'binding': request['binding'],
                 'pid': child.pid, 'pgid': child.pid, 'started': time.time()})
             try:
-                stdin = b'' if request['profile']['provider'] in ('grok_build', 'devin') else request['prompt'].encode()
+                stdin = b'' if native_codex or request['profile']['provider'] in ('grok_build', 'devin') else request['prompt'].encode()
                 communicate(child,request,folder,stdin)
             except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGTERM)
+                if native_codex:child.terminate()
+                else:os.killpg(child.pid, signal.SIGTERM)
                 try: child.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     os.killpg(child.pid, signal.SIGKILL); child.wait(timeout=10)
-                raise AppError('SESSION_TIMEOUT')
+                raise AppError('MAC_CODEX_TURN_TIMEOUT' if native_codex else 'SESSION_TIMEOUT')
             receipt['exit_code'] = child.returncode
             atomic_json(folder / 'provider-exit.json', {
                 'attempt_id': request['attempt_id'], 'binding': request['binding'],
@@ -111,8 +122,25 @@ def run(folder):
             else:
                 os.killpg(child.pid, signal.SIGTERM)
                 raise AppError('CHILD_PROCESS_GROUP_NOT_QUIESCENT')
-            if child.returncode != 0: raise AppError(failure_code(folder, child.returncode))
+            if native_codex:
+                import codex_app_server
+                proof=parse_adapter_json(folder/'codex-policy-evidence.json')
+                adapter_shutdown=proof.get('shutdown_verified') is True
+                if child.returncode != 0:
+                    error=parse_adapter_json(folder/'codex-adapter-error.json')
+                    if (error.get('attempt_id')!=request['attempt_id'] or error.get('binding')!=request['binding'] or
+                            error.get('code') not in codex_app_server.ERRORS):
+                        raise AppError('MAC_CODEX_PROTOCOL_UNVERIFIED')
+                    raise AppError(error['code'])
+                if (proof.get('attempt_id')!=request['attempt_id'] or proof.get('binding')!=request['binding'] or
+                        proof.get('model_turn_requested') is not True or proof.get('active_profile_verified') is not True or
+                        proof.get('loaded_policy_verified') is not True or not adapter_shutdown or proof.get('error')):
+                    raise AppError('MAC_CODEX_PROFILE_UNVERIFIED')
+            elif child.returncode != 0: raise AppError(failure_code(folder, child.returncode))
         completed = agents.completion(request['profile'], folder)
+        if native_codex:
+            completed.update(transport='app-server',profile_id=proof['profile_id'],profile_sha256=proof['profile_sha256'],
+                             policy_evidence_sha256=digest(proof))
         receipt['report'] = completed.pop('report')
         receipt['provider_evidence'] = completed
     except Exception as exc:
@@ -139,8 +167,23 @@ def run(folder):
             if not receipt['process_group_quiescent']:
                 receipt['report'] = None
                 receipt.pop('provider_evidence', None)
+            if native_codex:
+                try:
+                    final_proof=parse_adapter_json(folder/'codex-policy-evidence.json')
+                    adapter_shutdown=(final_proof.get('attempt_id')==request['attempt_id'] and
+                        final_proof.get('binding')==request['binding'] and final_proof.get('shutdown_verified') is True)
+                except AppError:adapter_shutdown=False
+                if not adapter_shutdown:
+                    receipt['process_group_quiescent']=False;receipt['report']=None
+                    receipt.pop('provider_evidence',None)
         receipt['finished'] = time.time()
         atomic_json(folder / 'receipt.json', receipt)
+
+
+def parse_adapter_json(path):
+    from common import parse_json
+    try:return parse_json(agents.read_output(path,1048576),1048576)
+    except (AppError,OSError):raise AppError('MAC_CODEX_PROTOCOL_UNVERIFIED') from None
 
 
 if __name__ == '__main__':
