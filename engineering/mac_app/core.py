@@ -550,7 +550,10 @@ class Engine:
         agents.validate_report(report)
         if report['status'] == 'complete' and (report['findings'] or report['question'].strip() or
                                                 not report['checks'] or any(not check.strip() for check in report['checks'])):
-            report = dict(report, status='fail', findings=report['findings'] or ['완료 보고에 미해결 질문이 있거나 실제 검증 근거가 없습니다. 검사 근거를 남기고 다시 보고하세요.'])
+            report = dict(report, status='fail', findings=[
+                '완료 보고 형식이 모순됩니다: complete는 findings=[], question="", 실제 수행한 검사 근거가 있는 checks가 필요합니다. '
+                '일반 관찰은 summary/checks에 쓰고, 실제 미해결 결함은 findings에 유지하여 해결 전까지 fail로 보고하세요.',
+                *report['findings']])
         self.store.update(job['id'], attempt=None, failures=0, not_before=0, summary=report['summary'],
                           last_provider_evidence=provider_evidence, provider_error=None, blocker=None, failure_fingerprint=None,
                           state=ROLE_STATE[role], last_terminal={'attempt': attempt['id'], 'role': role, 'head': attempt['head'],

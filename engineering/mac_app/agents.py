@@ -52,6 +52,11 @@ required consequential scope/security/contract decisions, or a truly unavailable
 For ordinary code/test/review failures return fail with actionable findings instead.
 Return the provided JSON schema. checks must identify actual evidence and distinguish
 executed tests from suggestions. Empty or missing evidence must not become a PASS.
+For status=complete, findings MUST be [], question MUST be an empty string, and checks
+MUST contain at least one nonblank item describing an actually executed check.
+findings is ONLY for unresolved defects, never general observations or passing notes.
+Put factual observations in summary or checks. Keep real unresolved defects in findings
+and return fail until they are resolved; do not remove them merely to obtain complete.
 Do not include secrets or raw transcripts in your result. Never write a model result file.
 """
 

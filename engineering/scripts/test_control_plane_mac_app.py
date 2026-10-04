@@ -111,6 +111,22 @@ class AppTests(unittest.TestCase):
             self.store.action(job['id'], 'cancel')
         self.assertEqual((self.engine.receipt_path(job).parent / 'worker-errors.log').stat().st_mode & 0o777, 0o600)
 
+    def test_complete_with_notes_supplies_actionable_retry_feedback_then_accepts_corrected_plan(self):
+        self.new(); self.engine.step(self.job()); job = self.launch()
+        note = 'README defines the deliverable.'
+        current = self.finish(report(job, 'planner', findings=[note]))
+        self.assertEqual(current['state'], 'planning'); self.assertIsNone(current['plan'])
+        self.assertEqual(current['last_terminal']['status'], 'fail')
+        self.assertIn('findings=[]', current['feedback'][0])
+        self.assertIn(note, current['feedback'])
+        retry = self.launch()
+        request = common.read_json(self.engine.receipt_path(retry).parent / 'request.json')
+        self.assertIn('findings=[]', request['prompt'])
+        self.assertIn(note, request['prompt'])
+        result = self.finish(report(retry, 'planner', findings=[]))
+        self.assertEqual(result['state'], 'building'); self.assertIsNotNone(result['plan'])
+        self.assertEqual(result['calls'], 2)
+
     def test_one_repository_owner_including_paused_and_ready(self):
         job = self.new(); self.store.update(job['id'], state='paused')
         with self.assertRaises(common.AppError): self.new('Example/Product', 'request-002')
