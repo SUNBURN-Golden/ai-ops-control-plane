@@ -246,5 +246,24 @@ class RuntimeTests(unittest.TestCase):
             spawn.assert_called_once()
         self.assertEqual(errors, []); self.assertEqual(self.job()['calls'], 1)
 
+    def test_cancel_during_observation_keeps_new_canonical_evidence_without_resurrecting_job(self):
+        self.new(); self.engine.step(self.job())
+        proof = admission.host_required('canonical_issue', issue=9)
+        def observed(_):
+            self.store.action(self.job()['id'], 'cancel')
+            return proof
+        with mock.patch.object(self.repos, 'execution_admission', side_effect=observed): self.engine.launch(self.job(), 'planner')
+        self.assertEqual(self.job()['state'], 'cancelled')
+        self.assertEqual(self.next_request()['admission'], proof)
+
+    def test_observation_error_after_pause_does_not_retry_job(self):
+        self.new(); self.engine.step(self.job())
+        def observed(_):
+            self.store.action(self.job()['id'], 'pause')
+            raise common.AppError('COMMAND_TIMEOUT')
+        with mock.patch.object(self.repos, 'execution_admission', side_effect=observed): self.engine.tick()
+        self.assertEqual(self.job()['state'], 'paused')
+        self.assertEqual(self.job()['failures'], 0)
+
 
 if __name__ == '__main__': unittest.main()

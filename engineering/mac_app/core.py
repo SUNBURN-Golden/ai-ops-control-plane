@@ -524,13 +524,25 @@ class Engine:
             context = dict(job, admission=self.store.known_admission(job['repository']) or job.get('admission'))
         # Network reads must not prevent status/pause/cancel. Recheck everything
         # under the reservation lock afterwards, including a newly prepared handoff.
-        observation = self.repos.execution_admission(context)
+        try:
+            observation = self.repos.execution_admission(context)
+        except (AppError, OSError, ValueError):
+            with self.store.lock:
+                current = self.store.get(job['id'])
+                if current['attempt'] or current['state'] not in ACTIVE or current['phase'] != ROLE_STATE[role]: return
+                if current['pause_requested']:
+                    self.store.update(job['id'], state='paused'); return
+            raise
         with self.store.lock:
             job = self.store.get(job['id'])
+            observation = self.store.known_admission(job['repository']) or observation
+            # Cancellation stops execution, not the retention of newly observed
+            # canonical scope. A later request must not forget this observation.
+            if observation.get('mode') == 'host_required':
+                self.store.update(job['id'], admission=observation)
             if job['attempt'] or job['state'] not in ACTIVE or job['phase'] != ROLE_STATE[role]: return
             if job['pause_requested']:
                 self.store.update(job['id'], state='paused'); return
-            observation = self.store.known_admission(job['repository']) or observation
             self.store.update(job['id'], admission=observation)
             admission.require_native(observation)
             self._launch(job, role)
