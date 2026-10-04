@@ -19,7 +19,7 @@ import sys
 import time
 
 import agents
-from common import (AppError, REPORT_LIMIT, WORKER_REQUEST_LIMIT, atomic_json,
+from common import (AppError, VERSION, REPORT_LIMIT, WORKER_REQUEST_LIMIT, atomic_json,
                     digest, parse_json, private_directory, read_json)
 
 FEATURES = ('apps','plugins','remote_plugin','recommended_plugins','plugin_sharing',
@@ -310,7 +310,8 @@ def run(folder):
     name,expected,tmp,runtime=policy(request,folder)
     cli=agents.executable('codex');require(cli,'MISSING_PROVIDER')
     overrides={'default_permissions':name,'permissions.'+name:expected,'analytics.enabled':False,
-        'web_search':'disabled','mcp_servers':{},'sqlite_home':str(runtime/'state'),'log_dir':str(runtime/'log'),
+        'web_search':'disabled','mcp_servers':{},'notify':[],
+        'sqlite_home':str(runtime/'state'),'log_dir':str(runtime/'log'),
         **{'features.'+key:False for key in FEATURES}}
     argv=[cli,*sum((['-c',key+'='+toml_inline(value)] for key,value in overrides.items()),[]),'app-server','--stdio','--strict-config']
     env=agents.environment(request['profile'],request['role']);env.update(TMPDIR=str(tmp),PYTHONDONTWRITEBYTECODE='1')
@@ -321,7 +322,7 @@ def run(folder):
         adapter=Adapter(request,folder,client)
         signal.signal(signal.SIGTERM,lambda *_:setattr(client,'stopping',True))
         signal.signal(signal.SIGINT,lambda *_:setattr(client,'stopping',True))
-        client.rpc('initialize',{'clientInfo':{'name':'aiops_mac','version':'0.3.7'},'capabilities':{'experimentalApi':True}})
+        client.rpc('initialize',{'clientInfo':{'name':'aiops_mac','version':VERSION},'capabilities':{'experimentalApi':True}})
         client.send({'method':'initialized'})
         report=adapter.run()
     except Exception as exc:

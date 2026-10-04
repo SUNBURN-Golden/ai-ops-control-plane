@@ -33,3 +33,7 @@
 정상 중지는 살아 있는 trusted adapter에만 먼저 signal을 보내 App Server의 turn/interrupt와 backgroundTerminals clean/list, server 종료를 확인하게 한다. worker는 실제 소유 process group도 확인한다. 종료 근거가 불완전하면 결과를 완료로 쓰지 않고 UNKNOWN 경계를 유지한다. host만 private policy/command evidence와 last-message를 작성하며 최종 JSON report는 기존 validate_report를 통과해야 한다. exit0만으로 완료하지 않고 needs_user 질문은 추가 호출 없이 보존한다. 권한/정책/프로토콜/세션 제한은 needs_user에서 대기한다.
 
 합성 stdio/실패/중지/timeout 검사와 실제 공식 CLI의 빈 계정 preflight가 통과했다. 그 무인증 검사는 thread/turn/model 0이며 로그인 필요 오류와 실제 group 종료를 확인했다. 인증된 제품 실행의 thread/turn·코드·test 결과는 지원 업데이트와 같은 lineage owner resume 후 별도로 확인한다. 오래된 원본 실패/UNKNOWN 및 별도 실행 세대는 바꾸지 않는다. production source 수리 적용과 실제 제품 구현 성공은 구분한다.
+
+0.3.7 설치 후 같은 job의 owner resume 한 번은 profile 사전 검사에서 차단됐다. named profile 내용과 선택은 일치했으나 실제 loaded config의 legacy sandbox/MCP/notify 존재가 경계와 달랐다. thread/turn/model과 제품 command는 0이며 typed needs_user, 정상 server/group 종료를 확인했다. 0.3.8 소스는 inline notify=[]를 추가해 process별 외부 notify를 차단하고 legacy/MCP guard는 유지한다. 실제 빈 계정/합성 설정 4case와 회귀가 통과했다. 이 후속 소스는 아직 설치하지 않았다.
+
+설치 CLI의 --ignore-user-config는 exec에서만 지원하며 app-server에서는 지원하지 않는다. official native exec의 합성 Responses fixture에서 사용자 config 제외와 explicit named profile을 검증했다. 코드/원장/토큰/Git/agent 설정 경계와 role별 network, 정상 SIGINT 및 command 자식 종료가 확인됐다. 다만 builder는 사용자 CODEX_HOME/config.toml에 project trust를 기록한다. canonical 경로, skip-git-repo-check, read-only 기반 explicit-write profile에서도 재현됐다. 사용자 config 수정 금지 조건 때문에 이 후보는 production에 연결하지 않았다. 모델 없는 합성 SID/결과는 실제 계정 또는 제품 개발 근거가 아니다. 정확한 단일 checkout trust 기록의 사용자 승인과 실제 job 재개 승인은 별도로 필요하다.

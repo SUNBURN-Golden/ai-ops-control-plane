@@ -88,6 +88,13 @@ class AdapterPolicyTests(unittest.TestCase):
         self.client.change=lambda config:config.update(mcp_servers={'unexpected':{'command':'unrelated'}})
         with self.assertRaisesRegex(common.AppError,'PROFILE_UNVERIFIED'):self.start()
         self.assertFalse(any(m in ('mcpServerStatus/list','thread/start') for m,_ in self.client.calls))
+    def test_external_notification_is_rejected_before_account_or_model(self):
+        self.client.change=lambda config:config.update(notify=['untrusted-external-callback'])
+        with self.assertRaisesRegex(common.AppError,'PROFILE_UNVERIFIED'):self.start()
+        checks=common.read_json(self.folder/'codex-policy-evidence.json')['profile_checks']
+        self.assertFalse(checks['notify_empty'])
+        self.assertNotIn('untrusted-external-callback',json.dumps(checks))
+        self.assertFalse(any(m in ('account/read','thread/start','turn/start') for m,_ in self.client.calls))
     def test_feature_enablement_blocks_before_model(self):
         original=self.client.rpc
         def response(method,params,timeout=20):
@@ -182,7 +189,7 @@ for i,arg in enumerate(sys.argv):
   key,text=sys.argv[i+1].split('=',1);values[key]=fixture_inline(text)
 name=values['default_permissions'];profile=values['permissions.'+name]
 config={'permissions':{name:profile},'default_permissions':name,'model_provider':'openai',
- 'web_search':'disabled','mcp_servers':{},'notify':[],'hooks':{}}
+ 'web_search':'disabled','mcp_servers':{},'notify':values.get('notify',['fixture-external-callback']),'hooks':{}}
 if MODE=='legacy':config['sandbox_mode']='workspace-write'
 def emit(value):print(json.dumps(value),flush=True)
 for line in sys.stdin:
