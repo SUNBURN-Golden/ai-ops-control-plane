@@ -70,7 +70,9 @@ def policy(request,folder):
         str(root):'deny',str(Path(__file__).resolve().parent):'deny',
         str(Path.home()/'Library/Application Support/AIOPS Development'):'deny',
         str(Path.home()/'Library/LaunchAgents/local.aiops.mac.plist'):'deny',
-        '/Library/Frameworks/Python.framework':'read',str(checkout):'write' if writing else 'read',
+        '/Library/Frameworks/Python.framework':'read',
+        '/Library/Developer/CommandLineTools':'read','/usr/local/bin/node':'read',
+        '/System/Library/OpenSSL/openssl.cnf':'read',str(checkout):'write' if writing else 'read',
         **{str(checkout/name):'read' for name in ('.git','.agents','.codex','.aws')}}
     if writing:filesystem[str(tmp)]='write'
     value={'extends':':workspace' if writing else ':read-only','workspace_roots':{str(checkout):True},
