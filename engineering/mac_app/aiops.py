@@ -21,6 +21,8 @@ if __name__ == '__main__':
     sys.dont_write_bytecode = True
 
 import agents
+import handoff
+import host_observation
 from provider_catalog import public_catalog
 from common import AppError, VERSION, atomic_json, encoded, parse_json, private_directory, read_json
 from core import Engine, Store, service_lock
@@ -89,6 +91,23 @@ class Application:
             result = self.store.action(key, action, value)
         self.engine.wake.set(); return result
 
+    def inspect_handoff(self, value):
+        value = handoff.request(value, inspect=True)
+        snapshot = handoff.inspect_repository(value['repository'])
+        with self.store.lock:
+            refs, blockers = handoff.local_references(self.store, value['repository'])
+        snapshot.update(source_jobs=refs, blockers=[*snapshot['blockers'], *blockers])
+        return handoff.summary(snapshot)
+
+    def prepare_handoff(self, value):
+        value = handoff.request(value)
+        prior = self.store.existing_handoff(value)
+        if prior: return handoff.summary(prior)
+        with self.store.lock:
+            handoff.local_references(self.store, value['repository'], value['source_job_id'])
+        snapshot = handoff.inspect_repository(value['repository'])
+        return handoff.summary(self.store.create_handoff(value, snapshot))
+
 
 def handler(app, origin):
     class Handler(BaseHTTPRequestHandler):
@@ -135,6 +154,13 @@ def handler(app, origin):
                     return self.send(200, (ASSETS / path).read_bytes(), mime)
                 self.principal()
                 if self.path == '/api/state': return self.send(200, app.state())
+                if self.path == '/api/handoffs': return self.send(200, [handoff.summary(x) for x in app.store.handoffs()])
+                if self.path.startswith('/api/handoffs/'):
+                    parts = self.path.split('/')
+                    if len(parts) == 5 and parts[4] == 'host-plan':
+                        return self.send(200, host_observation.query_plan(app.store.get_handoff(parts[3])))
+                if self.path.startswith('/api/handoffs/') and len(self.path.split('/')) == 4:
+                    return self.send(200, handoff.summary(app.store.get_handoff(self.path.split('/')[3])))
                 if self.path == '/api/jobs': return self.send(200, [app.engine.describe(j, compact=True) for j in app.store.jobs()])
                 if self.path.startswith('/api/jobs/'):
                     parts = self.path.split('/')
@@ -156,6 +182,8 @@ def handler(app, origin):
                     if principal != 'owner': raise AppError('OWNER_REQUIRED')
                     return self.send(200, {'ok': True}, cookie='aiops_session=' + app.session + '; HttpOnly; SameSite=Strict; Path=/')
                 if self.path == '/api/jobs': return self.send(201, app.engine.describe(app.start(value), compact=True))
+                if self.path == '/api/handoffs/inspect': return self.send(200, app.inspect_handoff(value))
+                if self.path == '/api/handoffs': return self.send(201, app.prepare_handoff(value))
                 if self.path == '/api/settings':
                     if principal != 'owner': raise AppError('OWNER_REQUIRED')
                     return self.send(200, app.store.set_settings(value))
@@ -231,7 +259,9 @@ def client(directory, path, value=None, owner=False):
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *args): raise AppError('REDIRECT_REFUSED')
     try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(req, timeout=20) as response:
+        # Handoff observation can need four bounded GitHub reads, including pagination.
+        timeout = 600 if value is not None and path in ('/api/handoffs', '/api/handoffs/inspect') else 20
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(req, timeout=timeout) as response:
             return parse_json(response.read(16777217).decode(), 16777216)
     except urllib.error.HTTPError as exc:
         data = parse_json(exc.read(65537).decode(), 65536)
@@ -239,6 +269,16 @@ def client(directory, path, value=None, owner=False):
 
 
 MCP_TOOLS = [
+    {'name': 'aiops_handoff_host_plan', 'description': '인계 준비 기록에 묶인 보호 호스트 읽기 전용 조회 목록을 만듭니다. 호스트에 접속하거나 실행을 승인하지 않습니다.',
+     'inputSchema': {'type': 'object', 'properties': {'handoff_id': {'type': 'string'}}, 'required': ['handoff_id'], 'additionalProperties': False}},
+    {'name': 'aiops_handoff_inspect', 'description': '기존 프로그램과 작업 등록을 읽어 인계 장애물을 확인합니다. 실행 권한을 만들지 않습니다.',
+     'inputSchema': {'type': 'object', 'properties': {'repository': {'type': 'string'}}, 'required': ['repository'], 'additionalProperties': False}},
+    {'name': 'aiops_handoff_prepare', 'description': '원래 프로그램과 로컬 작업 기록의 참조를 인계 준비 기록으로 보관합니다. 실행하거나 소유권을 변경하지 않습니다. 같은 request_id로 재조회할 수 있습니다.',
+     'inputSchema': {'type': 'object', 'properties': {'repository': {'type': 'string'}, 'request_id': {'type': 'string'}, 'source_job_id': {'type': 'string'}}, 'required': ['repository', 'request_id'], 'additionalProperties': False}},
+    {'name': 'aiops_handoff_list', 'description': '보관된 인계 준비 기록을 조회합니다.',
+     'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+    {'name': 'aiops_handoff_status', 'description': '특정 인계 준비 시점의 기록을 조회합니다. 현재 실행 권한을 증명하지 않습니다.',
+     'inputSchema': {'type': 'object', 'properties': {'handoff_id': {'type': 'string'}}, 'required': ['handoff_id'], 'additionalProperties': False}},
     {'name': 'aiops_start', 'description': '사용자가 지정한 GitHub 레포와 목표로 계획·개발·감사·감리 작업을 시작합니다. 재시도 시 같은 request_id를 사용하세요. 결과는 최종 사용자 검수를 기다리며 자동 병합하지 않습니다.',
      'inputSchema': {'type': 'object', 'properties': {'repository': {'type': 'string'}, 'goal': {'type': 'string'}, 'request_id': {'type': 'string'}}, 'required': ['repository', 'request_id'], 'additionalProperties': False}},
     {'name': 'aiops_list', 'description': '로컬 작업 상태를 한 번 조회합니다.', 'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
@@ -267,6 +307,16 @@ def mcp(directory, source=sys.stdin, output=sys.stdout):
                 params = request.get('params') or {}; name = params.get('name'); args = params.get('arguments') or {}
                 if not isinstance(args, dict): raise AppError('INVALID_TOOL_ARGUMENTS')
                 if name == 'aiops_start': data = client(directory, '/api/jobs', args)
+                elif name in ('aiops_handoff_inspect', 'aiops_handoff_prepare'):
+                    inspecting = name == 'aiops_handoff_inspect'
+                    value = handoff.request(args, inspect=inspecting)
+                    data = client(directory, '/api/handoffs' + ('/inspect' if inspecting else ''), value)
+                elif name == 'aiops_handoff_list':
+                    if args: raise AppError('INVALID_HANDOFF_REQUEST')
+                    data = client(directory, '/api/handoffs')
+                elif name in ('aiops_handoff_status', 'aiops_handoff_host_plan'):
+                    if set(args) != {'handoff_id'}: raise AppError('INVALID_HANDOFF_REQUEST')
+                    data = client(directory, '/api/handoffs/' + handoff.handoff_id(args['handoff_id']) + ('/host-plan' if name == 'aiops_handoff_host_plan' else ''))
                 elif name == 'aiops_list': data = client(directory, '/api/jobs')
                 elif name in ('aiops_status', 'aiops_pause'):
                     import re
@@ -291,6 +341,18 @@ def main(argv=None):
     start = sub.add_parser('start'); start.add_argument('--repo', required=True); start.add_argument('--goal', default=''); start.add_argument('--request-id', default=None)
     for name in ('status', 'pause'):
         one = sub.add_parser(name); one.add_argument('job_id')
+    transfer = sub.add_parser('handoff', help='기존 계획과 기록의 인계 준비; 실행 권한 변경 없음')
+    actions = transfer.add_subparsers(dest='handoff_command', required=True)
+    probe = actions.add_parser('inspect'); probe.add_argument('--repo', required=True)
+    prepare = actions.add_parser('prepare'); prepare.add_argument('--repo', required=True)
+    prepare.add_argument('--request-id', required=True); prepare.add_argument('--source-job', default=None)
+    actions.add_parser('list')
+    status = actions.add_parser('status'); status.add_argument('handoff_id')
+    plan = actions.add_parser('host-plan'); plan.add_argument('handoff_id')
+    check = actions.add_parser('check-fixture'); check.add_argument('handoff_id'); check.add_argument('--fixture', type=Path, required=True)
+    preview = actions.add_parser('preview-start'); preview.add_argument('handoff_id')
+    preview.add_argument('--fixture', type=Path, required=True); preview.add_argument('--node', required=True)
+    preview.add_argument('--request-id', required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == 'serve':
@@ -305,6 +367,22 @@ def main(argv=None):
         elif args.command == 'start':
             result = client(args.data_dir, '/api/jobs', {'repository': args.repo, 'goal': args.goal, 'request_id': args.request_id or uuid.uuid4().hex})
         elif args.command == 'list': result = client(args.data_dir, '/api/jobs')
+        elif args.command == 'handoff':
+            if args.handoff_command == 'inspect':
+                result = client(args.data_dir, '/api/handoffs/inspect', handoff.request({'repository': args.repo}, inspect=True))
+            elif args.handoff_command == 'prepare':
+                result = client(args.data_dir, '/api/handoffs', handoff.request(
+                    {'repository': args.repo, 'request_id': args.request_id, 'source_job_id': args.source_job}))
+            elif args.handoff_command == 'list': result = client(args.data_dir, '/api/handoffs')
+            elif args.handoff_command == 'host-plan':
+                result = client(args.data_dir, '/api/handoffs/' + handoff.handoff_id(args.handoff_id) + '/host-plan')
+            elif args.handoff_command in ('check-fixture', 'preview-start'):
+                record = client(args.data_dir, '/api/handoffs/' + handoff.handoff_id(args.handoff_id))
+                with args.fixture.open('rb') as source: raw = source.read(host_observation.LIMIT + 1)
+                evidence = parse_json(raw.decode('utf-8'), host_observation.LIMIT)
+                result = (host_observation.assess(record, evidence) if args.handoff_command == 'check-fixture' else
+                          host_observation.preview_start(record, evidence, args.node, args.request_id))
+            else: result = client(args.data_dir, '/api/handoffs/' + handoff.handoff_id(args.handoff_id))
         else:
             import re
             if not re.fullmatch(r'[0-9a-f]{16}', args.job_id): raise AppError('INVALID_JOB_ID')

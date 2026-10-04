@@ -219,8 +219,28 @@ class ProviderContracts(unittest.TestCase):
             data = agents.availability()
         self.assertTrue(all(data[key]['installed'] for key in MODELS))
         for call in run.call_args_list:
-            self.assertTrue(call.args[0][1:] in (['--version'], ['auth', 'status', '--hostname', 'github.com']))
+            self.assertTrue(call.args[0][1:] in (['--version'], ['auth', 'status', '--active', '--hostname', 'github.com']))
         self.assertTrue(all(data[key]['authentication'] == 'not_checked' for key in MODELS))
+
+    def test_github_probe_uses_active_account_with_other_expired_accounts_saved(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); binary = root / 'gh'
+            source = '#!' + sys.executable + '\nimport sys\nfrom pathlib import Path\n'
+            source += "assert sys.argv[1:3] == ['auth', 'status']\n"
+            source += "assert sys.argv[sys.argv.index('--hostname') + 1] == 'github.com'\n"
+            source += "active_valid = (Path(__file__).parent / 'active-valid').exists()\n"
+            source += "print('saved inactive account expired; secret-marker', file=sys.stderr)\n"
+            source += "sys.exit(0 if '--active' in sys.argv and active_valid else 1)\n"
+            binary.write_text(source); binary.chmod(0o755)
+            for active_valid in (True, False):
+                marker = root / 'active-valid'
+                if active_valid: marker.touch()
+                else: marker.unlink()
+                with self.subTest(active_valid=active_valid), mock.patch.dict(os.environ, {'PATH': str(root)}):
+                    data = agents.availability(providers=set(), versions=False)
+                self.assertEqual(data['github_authenticated'], active_valid)
+                self.assertEqual(data['github_authentication'], 'authenticated' if active_valid else 'required')
+                self.assertNotIn('secret-marker', json.dumps(data))
 
     def test_real_worker_runs_all_four_new_harnesses_once_and_records_identity(self):
         for provider in ('cursor', 'glm', 'grok_build', 'devin'):
