@@ -63,6 +63,8 @@ def inspect_repository(value):
     if (not isinstance(metadata, dict) or not isinstance(metadata.get('full_name'), str) or
             metadata['full_name'].lower() != repo.lower()):
         raise AppError('HANDOFF_REPOSITORY_MISMATCH')
+    repo = repository(metadata['full_name'])
+    root = 'repos/' + repo
     if metadata.get('archived') is not False: raise AppError('ARCHIVED_REPOSITORY')
     branch = metadata.get('default_branch')
     if not isinstance(branch, str) or not branch: raise AppError('EMPTY_REPOSITORY')
@@ -82,44 +84,45 @@ def inspect_repository(value):
     blob = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
     if content.get('sha') != blob: raise AppError('HANDOFF_PROGRAM_BLOB_MISMATCH')
     scope = load_scope(program, repo, blob)
-    pages = api(root + '/issues?state=open&labels=aiops-task&per_page=100', paginate=True)
+    pages = api(root + '/issues?state=all&labels=aiops-task&per_page=100', paginate=True)
     if not isinstance(pages, list) or not pages or any(not isinstance(page, list) for page in pages):
         raise AppError('HANDOFF_TASKS_UNRESOLVED')
     if sum(len(page) for page in pages) > 4096: raise AppError('HANDOFF_TOO_MANY_TASKS')
-    tasks, blockers, numbers, keys = [], [], set(), set()
+    tasks, blockers, historical_notes, numbers, keys = [], [], [], set(), set()
     for page in pages:
         for issue in page:
             if not isinstance(issue, dict): raise AppError('HANDOFF_TASKS_UNRESOLVED')
             if 'pull_request' in issue: continue
             number, body = issue.get('number'), issue.get('body')
             if (type(number) is not int or number < 1 or number in numbers or
-                    issue.get('state') != 'open' or not isinstance(body, str)):
+                    issue.get('state') not in ('open', 'closed') or not isinstance(body, str)):
                 raise AppError('HANDOFF_TASKS_UNRESOLVED')
             numbers.add(number)
-            task = {'number': number, 'url': 'https://github.com/' + repo + '/issues/' + str(number),
+            task = {'number': number, 'state': issue['state'], 'url': 'https://github.com/' + repo + '/issues/' + str(number),
                     'body_sha256': hashlib.sha256(body.encode()).hexdigest(), 'classification': 'unresolved_projection'}
+            holds = blockers if issue['state'] == 'open' else historical_notes
             matches = TASK_KEY.findall(body)
             if len(matches) != 1:
-                blockers.append({'code': 'LEGACY_TASK_KEY_UNRESOLVED', 'issue': number})
+                holds.append({'code': 'LEGACY_TASK_KEY_UNRESOLVED', 'issue': number})
             else:
                 program_id, node, rid = matches[0]
                 task.update(program=program_id, node=node, materialization_request_id=rid)
                 key = (program_id, node)
-                if key in keys:
+                if issue['state'] == 'open' and key in keys:
                     blockers.append({'code': 'LEGACY_DUPLICATE_TASK', 'issue': number})
-                keys.add(key)
+                if issue['state'] == 'open': keys.add(key)
                 if program_id != scope['program'] or node not in scope['node_ids']:
-                    blockers.append({'code': 'LEGACY_PLAN_BINDING_MISMATCH', 'issue': number})
+                    holds.append({'code': 'LEGACY_PLAN_BINDING_MISMATCH', 'issue': number})
                 else:
                     task['classification'] = 'registered_plan_projection'
             # Text declarations add conservative holds, never positive authority.
             owners = re.findall(r'^BUILDER_ID:[ \t]*([A-Z_]+)[ \t]*$', body, re.MULTILINE)
             if owners:
                 task.update(classification='declared_owner_projection', declared_owners=sorted(set(owners)))
-                blockers.append({'code': 'LEGACY_OWNER_DECLARED', 'issue': number})
+                holds.append({'code': 'LEGACY_OWNER_DECLARED', 'issue': number})
             states = re.findall(r'^LAUNCH_STATE:[ \t]*([A-Z_]+)[ \t]*$', body, re.MULTILINE)
             if set(states) & UNRESOLVED:
-                blockers.append({'code': 'LEGACY_LAUNCH_UNRESOLVED', 'issue': number})
+                holds.append({'code': 'LEGACY_LAUNCH_UNRESOLVED', 'issue': number})
             tasks.append(task)
     # This adapter has no protected-host reconciliation/admission capability.
     # Even an empty issue list or RELEASED declaration cannot remove these holds.
@@ -128,7 +131,8 @@ def inspect_repository(value):
             'source': {'head': head, 'branch': branch, 'path': PATH, 'blob': blob,
                        'program': scope['program'], 'node_ids': scope['node_ids'],
                        'node_count': scope['count'], 'raw_program': program},
-            'tasks': tasks, 'task_count': len(tasks), 'blockers': blockers,
+            'tasks': tasks, 'task_scope': 'all', 'task_count': len(tasks), 'blockers': blockers,
+            'historical_notes': historical_notes,
             'host_authority': 'unobserved', 'execution_allowed': False,
             'next_step': 'COMPARE_PROTECTED_HOST_RECORDS'}
 

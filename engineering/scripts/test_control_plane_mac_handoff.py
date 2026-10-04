@@ -76,6 +76,8 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(call.args[0][:4], ['gh', 'api', '--method', 'GET'])
         self.assertIn('?ref=' + 'b' * 40, command.call_args_list[2].args[0][-1])
         self.assertEqual(command.call_args_list[3].args[0][4:6], ['--paginate', '--slurp'])
+        self.assertIn('state=all', command.call_args_list[3].args[0][-1])
+        self.assertEqual(result['task_scope'], 'all')
 
     def test_pagination_observes_owner_on_second_page(self):
         first = [issue(i + 1, 'node-' + str(i)) for i in range(100)]
@@ -115,11 +117,28 @@ class RepositoryTests(unittest.TestCase):
         value = responses(); value[1]['sha'] = 'main'; variants.append(value)
         for changes in ({'sha': 'c' * 40}, {'encoding': 'none'}, {'content': 'not base64'}):
             value = responses(); value[2].update(changes); variants.append(value)
-        for pages in ([], {}, [None], [[issue(), issue()]], [[{'number': True, 'body': '', 'state': 'open'}]], [[dict(issue(), state='closed')]]):
+        for pages in ([], {}, [None], [[issue(), issue()]], [[{'number': True, 'body': '', 'state': 'open'}]], [[dict(issue(), state='unknown')]]):
             variants.append(responses(pages))
         for value in variants:
             with self.subTest(value=value):
                 with self.assertRaises(common.AppError): self.inspect(value)
+
+    def test_closed_history_is_preserved_without_open_duplicate_or_legacy_holds(self):
+        old = dict(issue(110, suffix='BUILDER_ID: DEVIN\nLAUNCH_STATE: CONFIRMED\n'), state='closed')
+        legacy_closed = dict(issue(109), state='closed', body='Old completed registration.')
+        result, _ = self.inspect(responses([[old, legacy_closed, issue()]]))
+        self.assertEqual([t['state'] for t in result['tasks']], ['closed', 'closed', 'open'])
+        self.assertEqual({b['code'] for b in result['blockers']},
+                         {'HOST_AUTHORITY_UNOBSERVED', 'HANDOFF_ADMISSION_NOT_AVAILABLE'})
+        self.assertEqual({b['code'] for b in result['historical_notes']},
+                         {'LEGACY_OWNER_DECLARED', 'LEGACY_LAUNCH_UNRESOLVED', 'LEGACY_TASK_KEY_UNRESOLVED'})
+
+    def test_github_canonical_repository_is_used_after_metadata_verification(self):
+        with mock.patch.object(handoff, 'execute', side_effect=[json.dumps(x) for x in responses()]) as command:
+            result = handoff.inspect_repository(REPO.upper())
+        self.assertEqual(result['repository'], REPO)
+        self.assertEqual(command.call_args_list[0].args[0][-1], 'repos/' + REPO.upper())
+        self.assertTrue(all(c.args[0][-1].startswith('repos/' + REPO + '/') for c in command.call_args_list[1:]))
 
     def test_unsupported_or_pending_program_is_not_silently_rewritten(self):
         for field, value in (('schema_version', 2), ('approval_pointer', 'PENDING')):
@@ -168,6 +187,12 @@ class StoreTests(unittest.TestCase):
             self.app.prepare_handoff(dict(REQUEST, repository='example/other'))
         with self.assertRaisesRegex(common.AppError, 'REQUEST_ID_CONFLICT'):
             self.app.prepare_handoff(dict(REQUEST, source_job_id='a' * 16))
+
+    def test_new_record_uses_canonical_repository_and_retries_keep_original_record(self):
+        first = self.prepare(dict(REQUEST, repository=REPO.upper()))
+        self.assertEqual(first['repository'], REPO)
+        self.assertEqual(first['snapshot']['repository'], REPO)
+        self.assertEqual(first, self.prepare(REQUEST))
 
     def test_prepare_preserves_jobs_failures_settings_and_every_event(self):
         job = self.store.create({'repository': REPO, 'request_id': 'existing-job-001'})

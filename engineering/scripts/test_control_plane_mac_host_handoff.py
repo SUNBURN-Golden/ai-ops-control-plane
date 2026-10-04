@@ -27,15 +27,17 @@ class HostHandoffTests(unittest.TestCase):
         self.addCleanup(self.f.doCleanups); self.f.setUp()
         self.issue = self.f.materialized()
 
-    def record(self):
-        body = self.f.gh.issues[self.issue]['body']
+    def record(self, nodes=('n1',), head=program_fixture.PLAN1):
         import re
-        owners = re.findall(r'^BUILDER_ID: ([A-Z_]+)$', body, re.MULTILINE)
-        status = self.f.host.ledger.materialize_status('zari', 'n1')
-        snap = {'repository': program_fixture.REPO, 'source': {'program': 'zari', 'head': program_fixture.PLAN1,
-                'blob': 'b' * 40, 'node_ids': ['n1'], 'node_count': 1}, 'tasks': [
-                {'program': 'zari', 'node': 'n1', 'number': self.issue,
-                 'materialization_request_id': status['request'], 'declared_owners': owners}]}
+        tasks = []
+        for node in nodes:
+            status = self.f.host.ledger.materialize_status('zari', node)
+            issue = self.f.gh.issues[status['issue']]
+            owners = re.findall(r'^BUILDER_ID: ([A-Z_]+)$', issue['body'], re.MULTILINE)
+            tasks.append({'program': 'zari', 'node': node, 'number': issue['number'], 'state': issue['state'],
+                          'materialization_request_id': status['request'], 'declared_owners': owners})
+        snap = {'repository': program_fixture.REPO, 'source': {'program': 'zari', 'head': head,
+                'blob': 'b' * 40, 'node_ids': list(nodes), 'node_count': len(nodes)}, 'tasks': tasks, 'task_scope': 'all'}
         return {'id': 'a' * 16, 'kind': 'legacy_plan_handoff', 'repository': program_fixture.REPO,
                 'snapshot': snap, 'snapshot_sha256': common.digest(snap), 'blockers':
                 [{'code': 'HOST_AUTHORITY_UNOBSERVED'}, {'code': 'HANDOFF_ADMISSION_NOT_AVAILABLE'}]}
@@ -91,6 +93,69 @@ class HostHandoffTests(unittest.TestCase):
         self.assertFalse(result['execution_allowed']); self.assertEqual(result['source'], 'fixture')
         self.assertEqual(result['native_mac_admission'], 'UNSUPPORTED')
         self.assertIsNone(result['owners']['n1'])
+
+    def test_descendant_plan_is_previewed_then_validated_by_existing_runtime(self):
+        self.f.gh.contents[program_fixture.PLAN2] = program_fixture.plan()
+        self.f.gh.compare[(program_fixture.PLAN1, program_fixture.PLAN2)] = 'ahead'
+        record = self.record(head=program_fixture.PLAN2)
+        preview = observation.preview_start(record, self.evidence(record), 'n1', 'plan-advance-001', now=100)
+        self.assertFalse(preview['execution_allowed'])
+        self.assertEqual(preview['assessment']['required_plan_advances']['n1'], {
+            'recorded': program_fixture.PLAN1, 'requested': program_fixture.PLAN2,
+            'validation': 'REQUIRED_BY_EXISTING_PROGRAM_START'})
+        self.assertEqual(self.f.host.ledger.materialize_status('zari', 'n1')['plan_commit'], program_fixture.PLAN1)
+        api = self.workflow_api(); relay.submit(preview['request'], self.journal('advance'), api)
+        self.assertEqual(api.results[0]['status'], 'PREPARED')
+        self.assertEqual(self.f.host.ledger.materialize_status('zari', 'n1')['plan_commit'], program_fixture.PLAN2)
+
+    def test_preview_cannot_authorize_non_descendant_plan(self):
+        self.f.gh.contents[program_fixture.PLAN2] = program_fixture.plan()
+        self.f.gh.compare[(program_fixture.PLAN1, program_fixture.PLAN2)] = 'behind'
+        record = self.record(head=program_fixture.PLAN2)
+        preview = observation.preview_start(record, self.evidence(record), 'n1', 'stale-plan-001', now=100)
+        request = preview['request']
+        with self.assertRaisesRegex(program_fixture.cp.ControlPlaneError, 'STALE_PLAN'):
+            self.f.launch_writer(request['issue_number'], request['args']['node'], request['args']['plan_commit'])
+        self.assertEqual(self.f.rows(), [])
+
+    def test_closed_previous_node_does_not_block_open_node_but_cannot_be_started(self):
+        self.f.gh.contents[program_fixture.PLAN1] = program_fixture.plan([
+            program_fixture.node('n1'), program_fixture.node('n2')])
+        second = self.f.materialized('n2')
+        self.f.gh.issues[self.issue]['state'] = 'closed'
+        record = self.record(('n1', 'n2')); evidence = self.evidence(record)
+        preview = observation.preview_start(record, evidence, 'n2', 'next-node-001', now=100)
+        self.assertEqual(preview['request']['issue_number'], second)
+        with self.assertRaisesRegex(common.AppError, 'HOST_CANONICAL_ISSUE_NOT_OPEN'):
+            observation.preview_start(record, evidence, 'n1', 'closed-node-001', now=100)
+        self.assertEqual(self.f.launch_writer(second, 'n2')['status'], 'PREPARED')
+
+    def test_historical_attempt_cannot_replace_canonical_issue_or_owner(self):
+        record = self.record()
+        old = dict(record['snapshot']['tasks'][0], number=29, state='closed',
+                   materialization_request_id='e' * 24, declared_owners=['CURSOR'])
+        for tasks in ([old, record['snapshot']['tasks'][0]], [record['snapshot']['tasks'][0], old]):
+            record['snapshot']['tasks'] = tasks; record['snapshot_sha256'] = common.digest(record['snapshot'])
+            preview = observation.preview_start(record, self.evidence(record), 'n1', 'history-001', now=100)
+            self.assertEqual(preview['request']['issue_number'], self.issue)
+            self.assertIsNone(preview['owner_lane'])
+
+    def test_old_open_only_snapshot_requires_new_preparation(self):
+        record = self.record(); record['snapshot'].pop('task_scope')
+        with self.assertRaisesRegex(common.AppError, 'HANDOFF_TASK_HISTORY_INCOMPLETE'):
+            self.assess(record=record)
+
+    def test_case_alias_collection_reaches_exact_protected_host_repository(self):
+        import test_control_plane_mac_handoff as collection_fixture
+        values = collection_fixture.responses(data=program_fixture.plan())
+        values[0]['full_name'] = program_fixture.REPO
+        values[1]['sha'] = program_fixture.PLAN1
+        values[3] = [[self.f.gh.issues[self.issue]]]
+        with mock.patch.object(handoff, 'execute', side_effect=[json.dumps(x) for x in values]):
+            snap = handoff.inspect_repository(program_fixture.REPO.lower())
+        record = self.record(); record.update(repository=snap['repository'], snapshot=snap,
+                                              snapshot_sha256=common.digest(snap), blockers=snap['blockers'])
+        self.assertEqual(self.assess(record=record)['observations_consistent'], True)
 
     def test_first_writer_owner_is_retained_after_verified_release(self):
         self.f.released_writer(self.issue)

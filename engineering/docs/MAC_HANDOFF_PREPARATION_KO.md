@@ -31,8 +31,11 @@ python3 aiops.py handoff status HANDOFF_ID
   바이트로 blob을 검증한 뒤 기존 schema-v1 판독기를 적용한다. 원본 UTF-8 JSON
   전체를 그대로 저장하며 노드, 명세, 의존성, 감사·릴리스 조건을 변경하지 않는다.
   지원되지 않는 스키마는 오류로 종료한다.
-- 열린 `aiops-task` 이슈의 모든 페이지에서 등록 포인터, 작업 키, 본문 해시와
-  보수적인 차단 사유를 보관한다. GitHub 이슈 본문은 실행 권한이 아니다.
+- 열린 이슈와 닫힌 `aiops-task` 이슈의 모든 페이지에서 상태, 등록 포인터, 작업 키,
+  본문 해시를 보관한다. 열린 등록의 중복·미확정 선언은 차단 사유이며 닫힌 과거
+  등록의 선언은 `historical_notes`에 남긴다. GitHub 이슈 본문은 실행 권한이 아니다.
+- 검증한 GitHub `full_name`의 대소문자를 저장하고 호스트 조회에도 사용한다.
+  같은 요청 ID의 레포 비교는 대소문자를 구분하지 않으며 기존 기록을 변경하지 않는다.
 - 같은 레포의 기존 Mac 작업 ID·상태·문서 해시, 전체 이벤트의 개수·해시를 기록한다.
   기존 작업·설정·계획·실패·시도·이벤트는 변경하지 않는다. 이 참조는 원래 DB 기록을
   대체하거나 별도 로그 백업을 생성하지 않는다.
@@ -115,15 +118,24 @@ python3 aiops.py handoff preview-start HANDOFF_ID --fixture host-observation.jso
 연결이 없으면 `HOST_TRANSPORT_NOT_CONFIGURED`로 끝난다. 결과 envelope는 항상
 `source: fixture`다. `check-fixture`는 로컬 파일을 판독하며 서비스 DB에 저장하지 않는다.
 타입·조회 누락·중복·예상하지 않은 명령, 레포·program/node·issue·materialization
-request·plan commit 불일치, 60초를 넘는 조회 구간/관측 노후화를 거부한다.
+request 불일치와 호스트 조회 사이의 plan commit 불일치,
+60초를 넘는 조회 구간/관측 노후화를 거부한다.
 task 조회와 개별 launch·lane 조회가 달라졌으면 새 권한으로 간주하지 않고 보류한다.
+각 노드의 이슈·materialization request가 호스트의 canonical 등록과 정확히 일치해야 한다.
+닫힌 과거 이슈는 다른 열린 노드의 미리보기를 막지 않지만 선택해서 시작할 수 없다.
+이슈 상태와 전체 이력 범위가 없는 이전 준비 기록은 `HANDOFF_TASK_HISTORY_INCOMPLETE`로
+거부하며 새 요청 ID로 준비해야 한다. 저장된 원본 기록을 소급 수정하지 않는다.
+
+호스트의 기록된 계획과 요청 계획이 다르면 두 커밋을 `required_plan_advances`에 표시한다.
+미리보기는 계획 발전을 승인하지 않는다. 기존 `program.start`가 최신 계획 여부,
+커밋 계보와 승인 조건을 검사하고 통과한 경우에만 호스트 등록을 갱신한다.
 
 첫 writer의 lane은 종료 후에도 owner다. owner 변경 이력, 활성 writer/reviewer,
 SUBMITTING·UNKNOWN, 확인되지 않은 종료, 로컬 미확정 상태는 보류한다.
 `observations_consistent: true`도 실행 승인이나 보호 호스트 인증을 뜻하지 않는다.
 모든 fixture 결과는 `execution_allowed: false`다.
 
-`preview-start`는 일치하는 CREATED 노드에 한해 **기존 호스트에서 이어가기 위한**
+`preview-start`는 일치하는 CREATED 노드와 열린 canonical 이슈에 한해 **기존 호스트에서 이어가기 위한**
 relay 요청을 만든다. 직접 lane·모델·worker·launch packet을 지정하지 않는다.
 이 요청의 `execution_host: current`는 기존 root workflow가 이미 지원하는 라우팅이다.
 `engineering/mac_host/relay.py prepare`로 해당 요청을 추가 검증할 수 있다.

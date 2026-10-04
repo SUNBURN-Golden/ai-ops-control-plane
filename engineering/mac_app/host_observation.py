@@ -109,6 +109,9 @@ def capture_fixture(record, read, *, clock=time.time):
 
 def assess(record, evidence, *, now=None):
     repo, program, nodes, head = identity(record); plan = query_plan(record)
+    require(record['snapshot'].get('task_scope') == 'all' and
+            all(one_of(t.get('state'), ('open', 'closed')) for t in record['snapshot']['tasks']),
+            'HANDOFF_TASK_HISTORY_INCOMPLETE')
     require(isinstance(evidence, dict) and set(evidence) == {
         'schema_version', 'source', 'handoff_id', 'snapshot_sha256', 'started_at', 'observed_at', 'responses'})
     require(type(evidence['schema_version']) is int and evidence['schema_version'] == 1 and evidence['source'] == 'fixture')
@@ -139,14 +142,18 @@ def assess(record, evidence, *, now=None):
         require(row['node'] not in canonical)
         canonical[row['node']] = row
         if row['node'] not in nodes: hold('HOST_UNPROJECTED_NODE', node=row['node'])
-    projections = {x.get('node'): x for x in record['snapshot']['tasks'] if x.get('program') == program}
+    projections = [x for x in record['snapshot']['tasks'] if x.get('program') == program]
     statuses, owners, history, dynamic, active = {}, {}, {}, [], {}
+    bindings, recorded_plans, plan_advances = {}, {}, {}
     for node in nodes:
+        node_projections = [x for x in projections if x.get('node') == node]
+        projection = None
         status = get(['materialize-status', '--program', program, '--node', node])
         require(isinstance(status, dict) and status.get('program') == program and status.get('node') == node)
         state = status.get('status'); require(state in ('NOT_FOUND', 'CREATED', 'SUBMITTING', 'UNKNOWN', 'ABANDONED'))
         if state == 'NOT_FOUND':
-            if node in canonical or node in projections: hold('HOST_MATERIALIZATION_MISSING', node=node)
+            if node in canonical or any(x['state'] == 'open' for x in node_projections):
+                hold('HOST_MATERIALIZATION_MISSING', node=node)
         else:
             require(status.get('repository') == repo and matches(status.get('request'), r'[0-9a-f]{24}') and
                     matches(status.get('plan_commit'), r'[0-9a-f]{40}'))
@@ -156,17 +163,25 @@ def assess(record, evidence, *, now=None):
             if state != 'CREATED': hold('HOST_MATERIALIZATION_UNRESOLVED', node=node)
             else:
                 require(type(status.get('issue')) is int and status['issue'] > 0)
-                projection = projections.get(node)
-                if not projection or (projection.get('number'), projection.get('materialization_request_id')) != (status['issue'], status['request']):
+                matching = [x for x in node_projections if
+                            (x.get('number'), x.get('materialization_request_id')) == (status['issue'], status['request'])]
+                if len(matching) != 1:
                     hold('HOST_CANONICAL_BINDING_MISMATCH', node=node)
-            if status['plan_commit'] != head: hold('HOST_PLAN_COMMIT_MISMATCH', node=node)
+                else:
+                    projection = matching[0]
+                    bindings[node] = {'issue': projection['number'], 'state': projection['state'],
+                                      'materialization_request_id': status['request']}
+            recorded_plans[node] = status['plan_commit']
+            if status['plan_commit'] != head:
+                plan_advances[node] = {'recorded': status['plan_commit'], 'requested': head,
+                                       'validation': 'REQUIRED_BY_EXISTING_PROGRAM_START'}
         statuses[node] = state
         rows = _rows(get(['task-status', '--repository', repo, '--task', task_id(program, node)]), repo, task_id(program, node))
         history[node] = rows
         writers = [r for r in rows if r['role'] == 'WRITER' and r['state'] != 'FAILED_PRESTART']
         owners[node] = writers[0]['lane'] if writers else None
         if len({r['lane'] for r in writers}) > 1: hold('HOST_OWNER_HISTORY_CONFLICT', node=node)
-        declared = projections.get(node, {}).get('declared_owners', [])
+        declared = (projection or {}).get('declared_owners', [])
         if declared and declared != [owners[node]]: hold('HOST_OWNER_PROJECTION_MISMATCH', node=node)
         for row in rows:
             rid = row['launch_request_id']; args = ['status', '--launch-request-id', rid]; dynamic.append(args)
@@ -200,7 +215,9 @@ def assess(record, evidence, *, now=None):
     return {'schema_version': 1, 'handoff_id': record['id'], 'snapshot_sha256': record['snapshot_sha256'],
             'evidence_sha256': digest(evidence), 'source': 'fixture', 'execution_allowed': False,
             'observations_consistent': not blockers, 'blockers': blockers, 'owners': owners,
-            'materializations': statuses, 'launch_count': sum(len(r) for r in history.values()),
+            'materializations': statuses, 'canonical_bindings': bindings,
+            'recorded_plan_commits': recorded_plans, 'required_plan_advances': plan_advances,
+            'launch_count': sum(len(r) for r in history.values()),
             'native_mac_admission': 'UNSUPPORTED', 'required_operations':
             ['QUALIFY_AUTHENTICATED_HOST_READ_TRANSPORT', 'USE_EXISTING_PROGRAM_START_AND_HOST_ADMISSION']}
 
@@ -211,7 +228,9 @@ def preview_start(record, evidence, node, request_id, *, now=None):
     require(isinstance(node, str) and node in nodes and assessment['materializations'][node] == 'CREATED', 'HOST_CANONICAL_NODE_REQUIRED')
     require(assessment['observations_consistent'], 'HOST_OBSERVATION_BLOCKED')
     require(matches(request_id, r'[A-Za-z0-9][A-Za-z0-9_.-]{0,95}'), 'REQUEST_ID_REQUIRED')
-    issue = next(x['number'] for x in record['snapshot']['tasks'] if x.get('program') == program and x.get('node') == node)
+    binding = assessment['canonical_bindings'].get(node)
+    require(binding is not None and binding['state'] == 'open', 'HOST_CANONICAL_ISSUE_NOT_OPEN')
+    issue = binding['issue']
     return {'scope': 'HANDOFF_PREVIEW_ONLY', 'execution_allowed': False, 'source': 'fixture',
             'assessment': assessment, 'owner_lane': assessment['owners'][node],
             'request': {'schema_version': 1, 'request_id': request_id, 'execution_host': 'current',

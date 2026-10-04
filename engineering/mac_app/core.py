@@ -187,7 +187,7 @@ class Store:
                     raise AppError('INVALID_HANDOFF_SNAPSHOT')
                 refs, blockers = handoff.local_references(self, value['repository'], value['source_job_id'])
                 key = uuid.uuid4().hex[:16]; now = time.time()
-                record = {**value, 'id': key, 'kind': 'legacy_plan_handoff', 'state': 'prepared',
+                record = {**value, 'repository': snapshot['repository'], 'id': key, 'kind': 'legacy_plan_handoff', 'state': 'prepared',
                           'created': now, 'execution_allowed': False, 'snapshot': copy.deepcopy(snapshot),
                           'snapshot_sha256': digest(snapshot), 'source_jobs': refs,
                           'blockers': [*snapshot['blockers'], *blockers]}
