@@ -7,7 +7,8 @@ import re
 import subprocess
 
 import agents
-from common import AppError, encoded, parse_json
+import admission
+from common import AppError, encoded, parse_json, read_json
 from program_scope import load_scope
 
 
@@ -62,17 +63,27 @@ class Repositories:
         if metadata.get('isArchived'): raise AppError('ARCHIVED_REPOSITORY')
         branch = (metadata.get('defaultBranchRef') or {}).get('name')
         if not branch: raise AppError('EMPTY_REPOSITORY')
-        # Existing legacy task owners require host migration, not a second admission ledger.
-        active = parse_json(gh(job['repository'], 'issue', 'list', '--state', 'open', '--label', 'aiops-task',
-                               '--limit', '1', '--json', 'number,url'))
-        if active:
-            raise AppError('EXISTING_AIOPS_OWNER', '이 레포에 기존 AIOPS 작업 등록이 있습니다. handoff inspect/prepare로 원래 계획과 기록을 가져올 수 있습니다. 실행은 보호 호스트의 소유권 확인 전까지 보류합니다: ' + active[0]['url'])
+        # Cloning and pinning a dedicated branch does not admit a provider.
+        # Execution admission is checked on every launch, including resumed jobs.
         git(None, 'clone', '--no-local', '--single-branch', '--branch', branch,
             'https://github.com/' + job['repository'] + '.git', str(checkout), timeout=600)
         git(checkout, 'config', 'user.name', 'AIOPS Mac')
         git(checkout, 'config', 'user.email', 'aiops-mac@users.noreply.github.com')
         git(checkout, 'checkout', '-b', job['branch'])
         return {'base_sha': self.head(job), 'base_branch': branch, 'head': self.head(job)}
+
+    def execution_admission(self, job):
+        registry = Path(__file__).with_name('projects.json')
+        if not registry.exists(): registry = Path(__file__).parent.parent / '.github/control-plane/projects.json'
+        if not registry.is_file(): raise AppError('ADMISSION_REGISTRY_UNAVAILABLE')
+        projects = read_json(registry)
+        if not isinstance(projects, dict): raise AppError('ADMISSION_REGISTRY_UNAVAILABLE')
+        managed = any(name.lower() == job['repository'].lower() for name in projects)
+        # Older prepared jobs may predate persisted program_scope. Re-read the
+        # pinned manifest rather than inferring authority from a missing field.
+        if not job.get('program_scope') and job.get('base_sha'):
+            job = dict(job, program_scope=self.program_scope(job))
+        return admission.observe(job, managed, execute)
 
     def head(self, job):
         return git(self.path(job), 'rev-parse', 'HEAD')

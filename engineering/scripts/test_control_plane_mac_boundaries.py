@@ -39,6 +39,7 @@ def large_valid_fields():
 
 
 class LocalRepos:
+    def execution_admission(self, job): return {'mode': 'native'}
     def __init__(self, path): self.directory = Path(path)
     def path(self, job): return self.directory
     def assert_binding(self, job): pass

@@ -49,6 +49,7 @@ class FakeRepos:
     def assert_binding(self, job): pass
     def program_scope(self, job): return None
     def assert_scope(self, job): pass
+    def execution_admission(self, job): return {'mode': 'native'}
     def source_pins(self, job, value): return {'README.md': '1' * 40}
     def checkpoint(self, job): self.sha = 'b' * 40; self.dirty = False; return self.sha
     def synchronize_base(self, job): return self.sync

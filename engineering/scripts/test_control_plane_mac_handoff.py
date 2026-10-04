@@ -272,13 +272,19 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(common.AppError, 'INVALID_HANDOFF_SNAPSHOT'): self.store.create_handoff(REQUEST, bad)
         self.assertEqual(self.store.handoffs(), []); self.prepare()
 
-    def test_existing_repository_guard_cannot_be_bypassed_by_prepared_record(self):
-        self.prepare(); job = {'id': 'a' * 16, 'repository': REPO, 'branch': 'aiops/test'}
-        with mock.patch.object(gitops, 'gh', side_effect=[json.dumps({'defaultBranchRef': {'name': 'main'}}),
-                json.dumps([{'number': 111, 'url': 'https://github.com/' + REPO + '/issues/111'}])]), \
-                mock.patch.object(gitops, 'git') as git:
-            with self.assertRaises(common.AppError) as raised: self.app.engine.repos.prepare(job)
-        self.assertEqual(raised.exception.code, 'EXISTING_AIOPS_OWNER'); git.assert_not_called()
+    def test_prepared_record_allows_isolated_preparation_but_never_grants_execution(self):
+        record = self.prepare()
+        job = self.store.create({'repository': REPO, 'request_id': 'prepared-job-001'})
+        self.assertEqual(job['admission']['handoff_id'], record['id'])
+        with mock.patch.object(gitops, 'gh', return_value=json.dumps({'defaultBranchRef': {'name': 'main'}})), \
+                mock.patch.object(gitops, 'git', return_value='a' * 40):
+            self.app.engine.repos.prepare(job)
+        import admission
+        with mock.patch.object(gitops, 'execute') as run:
+            result = self.app.engine.repos.execution_admission(job)
+            with self.assertRaises(common.AppError) as raised: admission.require_native(result)
+            run.assert_not_called()
+        self.assertEqual(raised.exception.code, 'HOST_ADMISSION_REQUIRED')
 
 
 class HandoffHttpTests(unittest.TestCase):

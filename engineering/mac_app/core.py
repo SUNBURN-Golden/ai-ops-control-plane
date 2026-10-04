@@ -20,6 +20,7 @@ import time
 import uuid
 
 import agents
+import admission
 import handoff
 from common import (AppError, DEFAULTS, TERMINAL, EVENT_RECORD_LIMIT, JOB_RECORD_LIMIT,
                     JOB_CONTROL_RESERVE, WORKER_REQUEST_LIMIT, atomic_json, digest, encoded,
@@ -135,8 +136,24 @@ class Store:
                     job = parse_json(prior[0], JOB_RECORD_LIMIT)
                     if (job['repository'].lower(), job['goal']) != (repo.lower(), goal): raise AppError('REQUEST_ID_CONFLICT')
                     self.db.execute('COMMIT'); return job
-                busy = self.db.execute("SELECT id FROM jobs WHERE lower(repository)=lower(?) AND state NOT IN ('accepted','cancelled')", (repo,)).fetchone()
-                if busy: raise AppError('REPOSITORY_BUSY', '이 레포의 기존 작업을 먼저 검수하거나 이어서 진행해 주세요.')
+                predecessors = [parse_json(row[0], JOB_RECORD_LIMIT) for row in self.db.execute(
+                    'SELECT document FROM jobs WHERE lower(repository)=lower(?)', (repo,))]
+                inherited = None
+                for previous in predecessors:
+                    if previous.get('attempt') is not None or previous['state'] == 'unknown':
+                        raise AppError('LOCAL_EXECUTION_UNRESOLVED', '이 레포의 로컬 실행 결과가 미확정입니다: ' + previous['id'])
+                    if previous['state'] not in TERMINAL or previous['id'] in self.execution_busy:
+                        raise AppError('REPOSITORY_BUSY', '이 레포의 기존 작업을 먼저 검수하거나 이어서 진행해 주세요: ' + previous['id'])
+                    prior_admission = previous.get('admission') or {}
+                    if prior_admission.get('mode') == 'host_required': inherited = dict(prior_admission)
+                    elif previous.get('program_scope'):
+                        scope = previous['program_scope']
+                        inherited = admission.host_required('canonical_program', program=scope['program'], blob=scope['blob'])
+                if inherited is None:
+                    for row in self.db.execute('SELECT document FROM handoffs'):
+                        record = parse_json(row[0], handoff.LIMIT)
+                        if record['repository'].lower() == repo.lower():
+                            inherited = admission.host_required('prepared_handoff', handoff_id=record['id']); break
                 key = uuid.uuid4().hex[:16]; now = time.time()
                 job = {'id': key, 'request_id': rid, 'repository': repo, 'goal': goal,
                        'state': 'queued', 'phase': 'preparing', 'created': now, 'updated': now,
@@ -147,7 +164,7 @@ class Store:
                        'not_before': 0, 'failures': 0, 'pr_url': None, 'summary': '', 'question': None,
                        'review': None, 'supervision': None, 'ci': None, 'provider_error': None,
                        'program_scope': None, 'blocker': None, 'failure_fingerprint': None,
-                       'last_terminal': None}
+                       'last_terminal': None, 'admission': inherited}
                 document = self.document(job)
                 self.db.execute('INSERT INTO jobs VALUES (?,?,?,?,?,?)', (key, rid, repo, job['state'], document, now))
                 self.event(key, 'created', '작업을 맡았습니다. 레포를 읽고 계획부터 세웁니다.')
@@ -505,6 +522,9 @@ class Engine:
         if maximum and job['calls'] >= maximum:
             self.store.update(job['id'], state='paused', question='설정한 모델 실행 한도에 도달했습니다.')
             self.store.event(job['id'], 'limit', '설정한 실행 한도에 도달해 멈췄습니다.'); return
+        observation = self.repos.execution_admission(job)
+        self.store.update(job['id'], admission=observation)
+        admission.require_native(observation)
         # Probe command construction before reserving: no model or shell is run.
         folder = private_directory(self.store.directory / 'jobs' / job['id'])
         attempt_id = uuid.uuid4().hex
