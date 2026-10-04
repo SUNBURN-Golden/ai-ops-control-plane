@@ -365,7 +365,9 @@ def availability(providers=None, versions=True, authenticate=True):
     data['github_authentication'] = 'not_checked'
     if authenticate and data['gh']['installed']:
         try:
-            run = subprocess.run(['gh', 'auth', 'status', '--hostname', 'github.com'],
+            # Other saved accounts may be expired; GitHub operations use only
+            # the active account. Do not require logging into unrelated ones.
+            run = subprocess.run(['gh', 'auth', 'status', '--active', '--hostname', 'github.com'],
                                  capture_output=True, timeout=8, env=environment())
             data['github_authenticated'] = run.returncode == 0
             data['github_authentication'] = 'authenticated' if run.returncode == 0 else 'required'
