@@ -95,6 +95,7 @@ class InstallTests(unittest.TestCase):
         manifest = common.read_json(self.app / 'Contents/Resources/install-manifest.json')
         self.assertEqual(manifest['version'], common.VERSION)
         self.assertIn('Contents/Resources/core.py', manifest['files'])
+        self.assertIn('Contents/Resources/handoff.py', manifest['files'])
         self.assertFalse((self.state / 'app.sqlite3').exists())
         self.assertFalse((self.state / 'desktop-token').exists())
         self.assertEqual(config['EnvironmentVariables']['PYTHONDONTWRITEBYTECODE'], '1')

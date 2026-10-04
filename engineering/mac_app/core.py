@@ -20,6 +20,7 @@ import time
 import uuid
 
 import agents
+import handoff
 from common import (AppError, DEFAULTS, TERMINAL, EVENT_RECORD_LIMIT, JOB_RECORD_LIMIT,
                     JOB_CONTROL_RESERVE, WORKER_REQUEST_LIMIT, atomic_json, digest, encoded,
                     parse_json, private_directory, read_json, repository, text,
@@ -64,6 +65,8 @@ class Store:
                 repository TEXT NOT NULL, state TEXT NOT NULL, document TEXT NOT NULL, created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id TEXT NOT NULL, created REAL NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS handoffs (id TEXT PRIMARY KEY, request_id TEXT UNIQUE NOT NULL,
+                request TEXT NOT NULL, document TEXT NOT NULL, created REAL NOT NULL);
         ''')
         self.db.execute('INSERT OR IGNORE INTO settings VALUES (1,?)', (encoded(DEFAULTS),))
 
@@ -160,6 +163,53 @@ class Store:
         job = parse_json(row[0], JOB_RECORD_LIMIT)
         if (job['repository'].lower(), job['goal']) != (repo.lower(), goal): raise AppError('REQUEST_ID_CONFLICT')
         return job
+
+    def existing_handoff(self, value):
+        value = handoff.request(value)
+        with self.lock:
+            row = self.db.execute('SELECT request,document FROM handoffs WHERE request_id=?',
+                                  (value['request_id'],)).fetchone()
+        if not row: return None
+        original = parse_json(row['request'])
+        if (original['repository'].lower(), original['source_job_id']) != (value['repository'].lower(), value['source_job_id']):
+            raise AppError('REQUEST_ID_CONFLICT')
+        return parse_json(row['document'], handoff.LIMIT)
+
+    def create_handoff(self, value, snapshot):
+        value = handoff.request(value)
+        with self.lock:
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                prior = self.existing_handoff(value)
+                if prior:
+                    self.db.execute('COMMIT'); return prior
+                if snapshot['repository'].lower() != value['repository'].lower() or snapshot['execution_allowed'] is not False:
+                    raise AppError('INVALID_HANDOFF_SNAPSHOT')
+                refs, blockers = handoff.local_references(self, value['repository'], value['source_job_id'])
+                key = uuid.uuid4().hex[:16]; now = time.time()
+                record = {**value, 'id': key, 'kind': 'legacy_plan_handoff', 'state': 'prepared',
+                          'created': now, 'execution_allowed': False, 'snapshot': copy.deepcopy(snapshot),
+                          'snapshot_sha256': digest(snapshot), 'source_jobs': refs,
+                          'blockers': [*snapshot['blockers'], *blockers]}
+                document = encoded(record)
+                if len(document.encode()) > handoff.LIMIT: raise AppError('HANDOFF_RECORD_TOO_LARGE')
+                self.db.execute('INSERT INTO handoffs VALUES (?,?,?,?,?)',
+                                (key, value['request_id'], encoded(value), document, now))
+                self.db.execute('COMMIT'); return record
+            except Exception:
+                self.db.execute('ROLLBACK'); raise
+
+    def handoffs(self):
+        with self.lock:
+            return [parse_json(row[0], handoff.LIMIT) for row in
+                    self.db.execute('SELECT document FROM handoffs ORDER BY created DESC')]
+
+    def get_handoff(self, key):
+        key = handoff.handoff_id(key)
+        with self.lock:
+            row = self.db.execute('SELECT document FROM handoffs WHERE id=?', (key,)).fetchone()
+        if not row: raise AppError('HANDOFF_NOT_FOUND')
+        return parse_json(row[0], handoff.LIMIT)
 
     def action(self, key, action, value=None):
         with self.lock:
