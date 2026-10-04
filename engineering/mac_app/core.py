@@ -23,6 +23,7 @@ import agents
 import admission
 import handoff
 import transport_guard
+import native_transfer
 from common import (AppError, DEFAULTS, TERMINAL, EVENT_RECORD_LIMIT, JOB_RECORD_LIMIT,
                     JOB_CONTROL_RESERVE, WORKER_REQUEST_LIMIT, atomic_json, digest, encoded,
                     parse_json, private_directory, read_json, repository, text,
@@ -140,6 +141,7 @@ class Store:
                     if (job['repository'].lower(), job['goal']) != (repo.lower(), goal): raise AppError('REQUEST_ID_CONFLICT')
                     self.db.execute('COMMIT'); return job
                 transport_guard.require_clear(self.directory)
+                if native_transfer.local_fenced(self.db): raise AppError('NATIVE_LOCAL_TRANSFER_UNRESOLVED')
                 predecessors = [parse_json(row[0], JOB_RECORD_LIMIT) for row in self.db.execute(
                     'SELECT document FROM jobs WHERE lower(repository)=lower(?)', (repo,))]
                 for previous in predecessors:
@@ -296,12 +298,15 @@ class Store:
 
 
 class Engine:
-    def __init__(self, store, repos=None):
+    def __init__(self, store, repos=None, canonical=None):
         self.store = store; self.repos = repos or Repositories(store.directory / 'workspaces')
         self.stopping = threading.Event(); self.wake = threading.Event(); self.children = {}
         self.awake = None
+        self.canonical = canonical if canonical is not None else native_transfer.Controller(store)
 
     def tick(self):
+        if self.canonical.pending():
+            return self.canonical.tick()
         for process in list(self.children.values()): process.poll()
         jobs = sorted(self.store.jobs(), key=lambda x: x['created'])
         inflight = [j for j in jobs if j['attempt']]
@@ -555,6 +560,7 @@ class Engine:
             self.store.update(job['id'], admission=observation)
             admission.require_native(observation)
             transport_guard.require_clear(self.store.directory)
+            if native_transfer.local_fenced(self.store.db): raise AppError('NATIVE_LOCAL_TRANSFER_UNRESOLVED')
             self._launch(job, role)
 
     def _launch(self, job, role):

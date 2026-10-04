@@ -23,6 +23,7 @@ if __name__ == '__main__':
 import agents
 import handoff
 import host_observation
+import native_transfer
 from provider_catalog import public_catalog
 from common import AppError, VERSION, atomic_json, encoded, parse_json, private_directory, read_json
 from core import Engine, Store, service_lock
@@ -56,6 +57,7 @@ class Application:
         self.store = Store(directory)
         try:
             self.engine = engine or Engine(self.store)
+            self.canonical = getattr(self.engine, 'canonical', None) or native_transfer.Controller(self.store)
             self.owner_token = token(self.store.directory / 'desktop-token')
             self.relay_token = token(self.store.directory / 'relay-token')
             self.session = secrets.token_urlsafe(32)
@@ -71,6 +73,11 @@ class Application:
                 'providers': public_catalog(),
                 'connections': self.doctor, 'data_directory': str(self.store.directory),
                 'cli_path': str(Path(__file__).resolve()), 'python_path': sys.executable}
+
+    def canonical_start(self, value):
+        record = self.canonical.start(value)
+        self.engine.wake.set()
+        return self.canonical.public(record)
 
     def start(self, value):
         existing = self.store.existing_request(value)
@@ -154,6 +161,9 @@ def handler(app, origin):
                     return self.send(200, (ASSETS / path).read_bytes(), mime)
                 self.principal()
                 if self.path == '/api/state': return self.send(200, app.state())
+                if self.path == '/api/canonical/capability': return self.send(200, app.canonical.capability())
+                if self.path.startswith('/api/canonical/') and len(self.path.split('/')) == 4:
+                    return self.send(200, app.canonical.public(app.canonical.get(self.path.split('/')[3])))
                 if self.path == '/api/handoffs': return self.send(200, [handoff.summary(x) for x in app.store.handoffs()])
                 if self.path.startswith('/api/handoffs/'):
                     parts = self.path.split('/')
@@ -181,6 +191,13 @@ def handler(app, origin):
                 if self.path == '/api/session':
                     if principal != 'owner': raise AppError('OWNER_REQUIRED')
                     return self.send(200, {'ok': True}, cookie='aiops_session=' + app.session + '; HttpOnly; SameSite=Strict; Path=/')
+                if self.path == '/api/canonical/start':
+                    if principal != 'owner': raise AppError('OWNER_REQUIRED')
+                    return self.send(201, app.canonical_start(value))
+                if self.path == '/api/canonical/reconcile':
+                    if principal != 'owner': raise AppError('OWNER_REQUIRED')
+                    if set(value) != {'request_id'}: raise AppError('NATIVE_START_INVALID')
+                    return self.send(200, app.canonical.public(app.canonical.reconcile(value['request_id'])))
                 if self.path == '/api/jobs': return self.send(201, app.engine.describe(app.start(value), compact=True))
                 if self.path == '/api/handoffs/inspect': return self.send(200, app.inspect_handoff(value))
                 if self.path == '/api/handoffs': return self.send(201, app.prepare_handoff(value))
@@ -260,7 +277,7 @@ def client(directory, path, value=None, owner=False):
         def redirect_request(self, *args): raise AppError('REDIRECT_REFUSED')
     try:
         # Handoff observation can need four bounded GitHub reads, including pagination.
-        timeout = 600 if value is not None and path in ('/api/handoffs', '/api/handoffs/inspect') else 20
+        timeout = 600 if value is not None and path in ('/api/handoffs', '/api/handoffs/inspect', '/api/canonical/start') else 20
         with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(req, timeout=timeout) as response:
             return parse_json(response.read(16777217).decode(), 16777216)
     except urllib.error.HTTPError as exc:
@@ -341,6 +358,14 @@ def main(argv=None):
     start = sub.add_parser('start'); start.add_argument('--repo', required=True); start.add_argument('--goal', default=''); start.add_argument('--request-id', default=None)
     for name in ('status', 'pause'):
         one = sub.add_parser(name); one.add_argument('job_id')
+    canonical = sub.add_parser('canonical', help='canonical Mac 이관 후보; 인증 source 미지원 시 실행 차단')
+    native_actions = canonical.add_subparsers(dest='canonical_command', required=True)
+    native_actions.add_parser('capability')
+    for name in ('status', 'reconcile'):
+        native_actions.add_parser(name).add_argument('request_id')
+    native_start = native_actions.add_parser('start')
+    native_start.add_argument('--binding', type=Path, required=True)
+    native_start.add_argument('--request-id', required=True)
     transfer = sub.add_parser('handoff', help='기존 계획과 기록의 인계 준비; 실행 권한 변경 없음')
     actions = transfer.add_subparsers(dest='handoff_command', required=True)
     probe = actions.add_parser('inspect'); probe.add_argument('--repo', required=True)
@@ -367,6 +392,15 @@ def main(argv=None):
         elif args.command == 'start':
             result = client(args.data_dir, '/api/jobs', {'repository': args.repo, 'goal': args.goal, 'request_id': args.request_id or uuid.uuid4().hex})
         elif args.command == 'list': result = client(args.data_dir, '/api/jobs')
+        elif args.command == 'canonical':
+            operation = args.canonical_command
+            if operation == 'capability': result = client(args.data_dir, '/api/canonical/capability', owner=True)
+            elif operation == 'start':
+                value = {'request_id': args.request_id, 'binding': native_transfer.binding(read_json(args.binding, 65536))}
+                result = client(args.data_dir, '/api/canonical/start', value, owner=True)
+            elif operation == 'reconcile':
+                result = client(args.data_dir, '/api/canonical/reconcile', {'request_id': args.request_id}, owner=True)
+            else: result = client(args.data_dir, '/api/canonical/' + args.request_id, owner=True)
         elif args.command == 'handoff':
             if args.handoff_command == 'inspect':
                 result = client(args.data_dir, '/api/handoffs/inspect', handoff.request({'repository': args.repo}, inspect=True))
