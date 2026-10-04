@@ -169,15 +169,22 @@ class Repositories:
         return {'changed': True, 'conflicts': False, 'base': remote}
 
     def publish(self, job):
+        generation = 'generation_id' in (job.get('native_lineage') or {}).get('binding',{})
+        if generation:
+            from mac_generation import POLICY
+            if job.get('generation_policy') != POLICY: raise AppError('MAC_GENERATION_PUBLICATION_POLICY_REQUIRED')
         self.assert_binding(job)
         if self.head(job) != job['head'] or not self.clean(job): raise AppError('STALE_PUBLISH_HEAD')
         checkout = self.path(job)
         git(checkout, 'push', '--porcelain', 'origin', 'HEAD:refs/heads/' + job['branch'], timeout=180)
+        fields='url,state,headRefOid'+(',isDraft,autoMergeRequest' if generation else '')
         prior = parse_json(gh(job['repository'], 'pr', 'list', '--head', job['branch'], '--state', 'all',
-                              '--json', 'url,state,headRefOid', '--limit', '10'))
+                              '--json', fields, '--limit', '10'))
         if prior:
             if len(prior) != 1 or prior[0]['state'] != 'OPEN' or prior[0]['headRefOid'] != job['head']:
                 raise AppError('PR_BINDING_MISMATCH')
+            if generation and (prior[0].get('isDraft') is not True or prior[0].get('autoMergeRequest') is not None):
+                raise AppError('MAC_GENERATION_PUBLICATION_POLICY_REQUIRED')
             return prior[0]['url']
         body = '\n'.join([
             '## 요청과 결과', job['goal'], '', job.get('summary', ''), '',
@@ -187,6 +194,13 @@ class Repositories:
             '## 계획', *[f"- {task['title']}: {'; '.join(task['acceptance'])}" for task in job['plan']['tasks']], '',
             '## 모델 구성', *[f"- {role}: {config['provider']} / {config['model'] or 'CLI configured default'}" for role, config in job['settings']['roles'].items()],
         ])
+        if generation:
+            bound=job['native_lineage']['binding']
+            body += ('\n\n## Mac 새 실행 세대\n' +
+                     f"- generation: `{bound['generation_id']}`\n- canonical task: `{bound['task_id']}` / `{bound['task_revision']}`\n" +
+                     f"- original scope: `{bound['program']}` / `{bound['node']}` at `{bound['plan_commit']}`\n" +
+                     '- 기존 작업의 소유권·종료·UNKNOWN 상태는 변경하지 않았습니다. 새 Mac 작업의 원문 기술 명세를 고정했습니다.\n' +
+                     '- 자동 병합은 금지되어 있습니다. Draft 상태·사용자 병합 승인 규칙을 유지합니다.')
         path = self.directory.parent / 'jobs' / job['id'] / 'pr-body.md'
         path.write_text(body, encoding='utf-8')
         url = gh(job['repository'], 'pr', 'create', '--draft', '--base', job['base_branch'],

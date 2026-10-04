@@ -27,6 +27,7 @@ def command(argv, directory, folder, checkout, *, platform=None, writing=True):
     # control-directory denials. Metadata/receipts are deliberately not excepted.
     rules = ['(version 1)', '(allow default)',
              '(deny file-read* file-write* ' + ' '.join('(subpath '+quote(p)+')' for p in denied) + ')',
+             '(deny file-write* (subpath '+quote(Path.home() / 'Documents/Codex')+'))',
              '(allow file-read* '+('file-write* ' if writing else '')+'(subpath '+quote(workspace)+'))']
     rules.append('(deny file-write* (subpath '+quote(workspace / '.git')+'))')
     for name in ('prompt.txt', 'schema.json', 'devin-config.json'):

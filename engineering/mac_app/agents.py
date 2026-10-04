@@ -72,7 +72,7 @@ def prompt(job, role, head):
         'reviewer': 'You are a fresh, independent, non-author reviewer. Do not modify any file. Independently inspect the actual source and diff from base_sha to the exact head below, applicable contracts, acceptance criteria and available test evidence. Do not trust the writer summary as proof. Return fail for unresolved defects or insufficient evidence, needs_user for a consequential required decision, and complete only for a passing review of this exact head. covered_tasks must list every planned task id. plan must be null.',
         'supervisor': 'You are the independent final inspector, not the planner or writer. Do not modify any file. Read the original repository deliverable specifications yourself. Check the entire current diff, every planned task, cross-task integration, tests and user-visible usability. Find omissions in the plan as well as implementation defects. Return complete only if ALL source-defined deliverables and the user goal are satisfied at this exact head. covered_tasks must list every task id. Missing live credentials/evidence is not a passing result. plan must be null.',
     }[role]
-    context = {key: job.get(key) for key in ('id', 'repository', 'goal', 'base_sha', 'plan', 'source_pins', 'program_scope', 'feedback', 'user_answers')}
+    context = {key: job.get(key) for key in ('id', 'repository', 'goal', 'base_sha', 'plan', 'source_pins', 'program_scope', 'feedback', 'user_answers', 'generation_policy', 'generation_decision')}
     context.update(role=role, exact_head=head, current_task=task)
     if job.get('program_scope'):
         instruction += ((' Preserve the admitted node and its exact canonical program dependencies. ' if job.get('native_lineage') else
@@ -94,6 +94,10 @@ def prompt(job, role, head):
         instruction += (' This delivery is exactly one admitted original program node. The full original program is context, '
                         'not authority to implement or claim completion of other nodes. Its canonical dependencies are separately gated by the Mac host. '
                         'Retain the original node spec and do not replan. Review only this node and its integration with admitted dependencies.')
+        if 'generation_id' in job['native_lineage']['binding']:
+            instruction += (' The User explicitly authorized a new isolated Mac generation, not legacy task ownership or completion. '
+                            'Original task metadata and auto-merge flags are provenance only. Keep the host-created isolated branch, '
+                            'preserve technical gates, and never touch legacy scope, enable auto-merge, mark a draft ready, or merge.')
     return (RULES + '\nROLE ASSIGNMENT\n' + instruction + '\nTRUSTED JOB CONTEXT\n' + encoded(context)
             + '\nOUTPUT CONTRACT\nReturn exactly one JSON object matching this schema as your final answer. '
               'No prose outside the JSON, no Markdown fences, and no result file written by a tool.\n' + encoded(SCHEMA))

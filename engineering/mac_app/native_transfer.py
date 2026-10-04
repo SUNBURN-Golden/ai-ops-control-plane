@@ -33,7 +33,10 @@ def require(test, code='NATIVE_RECEIPT_INVALID'):
 
 
 def binding(value):
-    require(isinstance(value, dict) and set(value) in (FIELDS, FIELDS | {'authority_kind', 'canonical_task_pointer'}), 'NATIVE_BINDING_INVALID')
+    require(isinstance(value, dict) and set(value) in (FIELDS, FIELDS | {'authority_kind', 'canonical_task_pointer'},
+            FIELDS | {'authority_kind', 'canonical_task_pointer', 'generation_id'}), 'NATIVE_BINDING_INVALID')
+    if 'generation_id' in value:
+        require(isinstance(value['generation_id'],str) and re.fullmatch(r'[0-9a-f]{32}',value['generation_id']), 'NATIVE_BINDING_INVALID')
     if 'authority_kind' in value:
         require(value['authority_kind'] == 'MAC_LOCAL' and isinstance(value['canonical_task_pointer'], str) and
                 value['canonical_task_pointer'].startswith('mac-host:'), 'NATIVE_BINDING_INVALID')
@@ -111,6 +114,12 @@ class NativeWorker:
                   'Implement only the frozen authorized task scope below. Do not replan, create another writer, run a VM, '
                   'merge or deploy. Return the AIOPS structured completion schema. Source gates and ownership are not '
                   'granted by your report.\nCanonical binding:\n' + encoded(value) + '\nFrozen scope:\n' + encoded(work) + '\n' + encoded(agents.SCHEMA))
+        if 'generation_id' in value:
+            prompt += ('\nExplicit User-approved new Mac generation: the original task ID/revision and legacy issues are provenance only; '
+                       'you are not their owner and must not change or resume them. The User approved a new isolated Mac task/branch '
+                       'with automatic merge forbidden. This checkout uses the host-created aiops/native branch rather than any legacy '
+                       'astra branch. Preserve the exact original technical spec and gates. Do not modify legacy scope or any other checkout, '
+                       'create legacy task markers/issues, enable auto-merge, mark a draft ready, merge, deploy, or claim legacy termination.')
         request = {'attempt_id': attempt_id, 'binding': attempt['binding'], 'profile': profile, 'role': 'builder',
                    'checkout': str(checkout), 'prompt': prompt, 'timeout_seconds': self.settings()['session_minutes'] * 60}
         if value.get('authority_kind') == 'MAC_LOCAL':
@@ -173,10 +182,12 @@ class Controller:
     @staticmethod
     def public(record):
         require(record is not None, 'NATIVE_REQUEST_NOT_FOUND')
-        return {key: record[key] for key in ('request_id', 'state', 'updated', 'error')} | {
+        result = {key: record[key] for key in ('request_id', 'state', 'updated', 'error')} | {
             'canonical': {key:record['binding'][key] for key in ('repository','task_id','task_revision','plan_commit','owner_lane','source_host','target_host')},
             'worker_started': record.get('worker_started'), 'stop_requested':record.get('stop_requested',False),
             'provider_started':record.get('provider_started')}
+        if 'generation_id' in record['binding']: result['canonical']['generation_id']=record['binding']['generation_id']
+        return result
 
     def get(self, request):
         require(isinstance(request, str) and re.fullmatch(r'[0-9a-f]{32}', request), 'NATIVE_REQUEST_INVALID')

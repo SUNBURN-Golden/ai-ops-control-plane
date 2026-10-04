@@ -84,6 +84,7 @@ class Application:
         source=self.canonical.source
         if not isinstance(source,mac_authority.LocalSource): raise AppError('MAC_HOST_ADAPTER_REQUIRED')
         if operation=='initialize': return source.initialize(value)
+        if operation=='generation': return source.generation(value)
         if operation=='receipt-scope': return source.annotate_receipt(value)
         if operation=='advance-base': return source.advance_base(value)
         if operation=='stop':
@@ -322,7 +323,7 @@ def client(directory, path, value=None, owner=False):
         def redirect_request(self, *args): raise AppError('REDIRECT_REFUSED')
     try:
         # Handoff observation can need four bounded GitHub reads, including pagination.
-        timeout = 600 if value is not None and path in ('/api/handoffs', '/api/handoffs/inspect', '/api/canonical/start','/api/host/register','/api/host/start') else 20
+        timeout = 600 if value is not None and path in ('/api/handoffs', '/api/handoffs/inspect', '/api/canonical/start','/api/host/register','/api/host/generation','/api/host/start') else 20
         with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(req, timeout=timeout) as response:
             return parse_json(response.read(16777217).decode(), 16777216)
     except urllib.error.HTTPError as exc:
@@ -416,6 +417,10 @@ def main(argv=None):
     host_actions.add_parser('status')
     host_init=host_actions.add_parser('initialize'); host_init.add_argument('--mode',choices=['MAC'],required=True)
     host_init.add_argument('--decision',required=True)
+    host_gen=host_actions.add_parser('generation',help='사용자 승인으로 원래 단일 root 범위를 새 Mac task/revision으로 격리; 기존 실행 종료를 선언하지 않음')
+    host_gen.add_argument('--repo',required=True); host_gen.add_argument('--node',required=True)
+    host_gen.add_argument('--generation-id',required=True); host_gen.add_argument('--decision',required=True)
+    host_gen.add_argument('--plan-commit',required=True); host_gen.add_argument('--plan-blob',required=True)
     for name in ('register','tasks'):
         host_actions.add_parser(name).add_argument('--repo',required=True)
     host_start=host_actions.add_parser('start'); host_start.add_argument('--repo',required=True)
@@ -468,6 +473,8 @@ def main(argv=None):
             if operation=='status': result=client(args.data_dir,'/api/host/status',owner=True)
             else:
                 if operation=='initialize': value={'mode':args.mode,'decision':args.decision}
+                elif operation=='generation': value={'repository':args.repo,'node':args.node,'generation_id':args.generation_id,
+                    'decision':args.decision,'plan_commit':args.plan_commit,'plan_blob':args.plan_blob}
                 elif operation=='receipt-scope': value=read_json(args.association,65536)
                 elif operation=='start': value={'repository':args.repo,'task_id':args.task,'request_id':args.request_id}
                 elif operation=='stop': value={'request_id':args.request_id}

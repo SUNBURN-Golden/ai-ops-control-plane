@@ -42,6 +42,7 @@ class LocalSource:
                     task TEXT NOT NULL,state TEXT NOT NULL,document TEXT NOT NULL,terminal TEXT);
                 CREATE TABLE IF NOT EXISTS mac_host_deliveries(request TEXT PRIMARY KEY,job TEXT UNIQUE NOT NULL,
                     state TEXT NOT NULL,document TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS mac_host_generations(id TEXT PRIMARY KEY,repository TEXT NOT NULL,document TEXT NOT NULL);
                 CREATE UNIQUE INDEX IF NOT EXISTS mac_host_one_active ON mac_host_attempts((1)) WHERE state!='TERMINAL';
             ''')
 
@@ -164,9 +165,7 @@ class LocalSource:
         snapshot=handoff.inspect_repository(bound['repository'])
         with self.store.lock:
             self._task(self.store.db,bound)
-            old=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',
-                                      (bound['repository'].lower(),)).fetchone()
-            record=parse_json(old[0])
+            record=self.program(bound)
             require(snapshot.get('task_scope')=='all' and isinstance(snapshot.get('tasks'),list) and
                     (allow_base_advance or snapshot['source']['head']==record['head']) and snapshot['source']['blob']==record['scope']['blob'],
                     'MAC_HOST_PROGRAM_REVISION_CHANGED')
@@ -194,11 +193,30 @@ class LocalSource:
                 (bound.get('source_host'),bound.get('target_host'))==(self.source_host,self.target_host),'MAC_HOST_AUTHORITY_BINDING_MISMATCH')
         row=db.execute('SELECT * FROM mac_host_tasks WHERE repository=? AND task=?',(bound['repository'].lower(),bound['task_id'])).fetchone()
         require(row is not None and parse_json(row['binding'])==bound,'MAC_HOST_CANONICAL_BINDING_MISMATCH')
+        if 'generation_id' in bound:
+            import mac_generation
+            mac_generation.record(self,bound)
         return row
+
+    def generation(self,value):
+        import mac_generation
+        return mac_generation.adopt(self,value)
+
+    def program(self,bound):
+        if 'generation_id' in bound:
+            import mac_generation
+            return mac_generation.record(self,bound)['program']
+        row=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',
+                                  (bound['repository'].lower(),)).fetchone()
+        require(row is not None,'MAC_HOST_PROGRAM_NOT_FOUND')
+        return parse_json(row[0])
 
     def check_external(self,bound):
         with self.store.lock:
             self._task(self.store.db,bound)
+            if 'generation_id' in bound:
+                import mac_generation
+                return mac_generation.check_external(self,bound)
             conflict=self.store.db.execute("SELECT 1 FROM mac_host_external WHERE repository=? AND task IN (?, '*')",(bound['repository'].lower(),bound['task_id'])).fetchone()
             require(not conflict,'MAC_HOST_EXTERNAL_EXECUTION_UNRESOLVED')
             for fence in transport_guard.unresolved(self.store.directory,include_digest=True):
@@ -219,7 +237,8 @@ class LocalSource:
             require(dependency is not None and dependency['state']=='ACCEPTED','MAC_HOST_DEPENDENCY_GATE_REQUIRED')
             deps.append({'task_id':key,'state':'ACCEPTED','binding_sha256':digest(parse_json(dependency['binding']))})
         require(work['task'].get('astra_gate','NONE')=='NONE' and work['task'].get('audit_floor','A1')!='A3','MAC_HOST_ASTRA_GATE_REQUIRED')
-        return {'binding':bound,'work':work,'gate_evidence':'mac-host:'+self.source_host+'#explicit-owner-mode', 'history':[],'dependencies':deps}
+        return {'binding':bound,'work':work,'gate_evidence':'mac-host:'+self.source_host+'#'+
+                ('generation-'+bound['generation_id'] if 'generation_id' in bound else 'explicit-owner-mode'), 'history':[],'dependencies':deps}
 
     @staticmethod
     def _private_json(path):
@@ -272,7 +291,8 @@ class LocalSource:
         with self.store.lock:
             repositories=[r[0] for r in self.store.db.execute('SELECT repository FROM mac_host_programs ORDER BY repository')]
             active=self.store.db.execute("SELECT request,repository,task,state FROM mac_host_attempts WHERE state!='TERMINAL'").fetchall()
-        return {'mode':self.meta(),'repositories':repositories,'active':[dict(r) for r in active],
+            generations=[{'generation_id':r['id'],'repository':r['repository']} for r in self.store.db.execute('SELECT id,repository FROM mac_host_generations ORDER BY rowid')]
+        return {'mode':self.meta(),'repositories':repositories,'generations':generations,'active':[dict(r) for r in active],
                 'automatic_execution_enabled':False,'legacy_termination':'UNVERIFIED'}
 
     def select(self,repo,task):
@@ -366,11 +386,14 @@ class LocalSource:
                         require(row['state'] in ('CLAIMED','TERMINAL') and terminal.get('attempt_id')==attempt['id'] and
                                 terminal.get('binding')==attempt['binding'] and terminal.get('head')==attempt['head'] and
                                 terminal.get('process_group_quiescent') is True,'MAC_HOST_TERMINAL_BINDING_MISMATCH')
-                        if row['state']=='TERMINAL': require(parse_json(row['terminal'])==terminal,'MAC_HOST_TERMINAL_IMMUTABLE')
-                        receipt=self._terminal(request,terminal)
-                        db.execute("UPDATE mac_host_attempts SET state='TERMINAL',terminal=? WHERE request=?",(encoded(terminal),row['request']))
-                        state='READY' if receipt['provider_started'] is False else 'REVIEW_REQUIRED' if (receipt.get('report') or {}).get('status')=='complete' else 'REWORK_REQUIRED'
-                        db.execute("UPDATE mac_host_tasks SET state=? WHERE repository=? AND task=?",(state,row['repository'],row['task']))
+                        if row['state']=='TERMINAL':
+                            require(parse_json(row['terminal'])==terminal,'MAC_HOST_TERMINAL_IMMUTABLE')
+                            self._terminal(request,terminal)
+                        else:
+                            receipt=self._terminal(request,terminal)
+                            db.execute("UPDATE mac_host_attempts SET state='TERMINAL',terminal=? WHERE request=?",(encoded(terminal),row['request']))
+                            state='READY' if receipt['provider_started'] is False else 'REVIEW_REQUIRED' if (receipt.get('report') or {}).get('status')=='complete' else 'REWORK_REQUIRED'
+                            db.execute("UPDATE mac_host_tasks SET state=? WHERE repository=? AND task=?",(state,row['repository'],row['task']))
                     view=self._view(db.execute('SELECT * FROM mac_host_attempts WHERE request=?',(row['request'],)).fetchone())
                 db.execute('COMMIT')
             except Exception:

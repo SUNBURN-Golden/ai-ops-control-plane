@@ -33,6 +33,10 @@ class Pipeline:
             require(row and row['job']==job['id'] and document['lineage']==lineage and
                     task['state'] in ('DELIVERING','INSPECTED','ACCEPTED'),'MAC_HOST_DELIVERY_BINDING_MISMATCH')
             work=parse_json(task['work'],1024*1024)
+            if 'generation_id' in bound:
+                import mac_generation
+                require(job.get('generation_policy')==work['generation_policy']==mac_generation.POLICY and
+                        job.get('generation_decision')==work['generation_decision'], 'MAC_GENERATION_PUBLICATION_POLICY_REQUIRED')
             require(job['settings']['roles']['builder']==work['profile'] and job['base_sha']==bound['plan_commit'] and
                     job['program_scope']['blob']==bound['plan_blob'] and job['settings']['publish_pr'] is True and
                     job['branch']=='aiops/native-'+lineage['request_id'][:16] and
@@ -73,8 +77,7 @@ class Pipeline:
                 require(receipt['provider_started'] is True,'MAC_HOST_DELIVERY_RECEIPT_REQUIRED')
                 task=self.source._task(self.store.db,bound)
                 work=parse_json(task['work'],1024*1024)
-                program=parse_json(self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',
-                                    (bound['repository'].lower(),)).fetchone()[0])
+                program=self.source.program(bound)
             job=self.store.new_document(key,'native-delivery-'+rid,bound['repository'],work['task']['spec'])
             node=work['task']
             item={'id':node['id'],'title':node['title'],'instructions':node['spec'],
@@ -89,6 +92,9 @@ class Pipeline:
                 current_task=item,builder_sessions=[] if receipt.get('error')=='PROVIDER_LOGIN_REQUIRED' else
                     [(receipt.get('provider_evidence') or {}).get('session_id')],
                 feedback=[],correcting=False,admission={'mode':'mac_local','binding':bound})
+            if 'generation_id' in bound:
+                job['generation_policy']=copy.deepcopy(work['generation_policy'])
+                job['generation_decision']=work['generation_decision']
             # The existing host checkpoint validates remote/branch/history and
             # authority-file changes before staging or creating a local commit.
             head=self.repos.checkpoint(job); job['head']=head
