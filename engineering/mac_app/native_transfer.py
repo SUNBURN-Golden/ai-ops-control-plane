@@ -100,6 +100,8 @@ class NativeWorker:
         require(not checkout.exists(), 'NATIVE_CHECKOUT_EXISTS')
         git(None, 'clone', '--no-local', '--no-checkout', 'https://github.com/' + value['repository'] + '.git', str(checkout), timeout=600)
         git(checkout, 'checkout', '-b', 'aiops/native-' + request_id[:16], value['plan_commit'])
+        git(checkout, 'config', 'user.name', 'AIOPS Mac')
+        git(checkout, 'config', 'user.email', 'aiops-mac@users.noreply.github.com')
         head = git(checkout, 'rev-parse', 'HEAD').strip()
         require(head == value['plan_commit'], 'NATIVE_CHECKOUT_BINDING_MISMATCH')
         attempt = {'id': attempt_id, 'head': head, 'profile': profile}

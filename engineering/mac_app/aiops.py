@@ -85,9 +85,17 @@ class Application:
         if not isinstance(source,mac_authority.LocalSource): raise AppError('MAC_HOST_ADAPTER_REQUIRED')
         if operation=='initialize': return source.initialize(value)
         if operation=='receipt-scope': return source.annotate_receipt(value)
+        if operation=='advance-base': return source.advance_base(value)
         if operation=='stop':
             if set(value)!={'request_id'}: raise AppError('MAC_HOST_REQUEST_INVALID')
             return self.canonical.public(self.canonical.stop(value['request_id']))
+        if operation=='reconcile-accepted':
+            if set(value)!={'repository','task_id'}: raise AppError('MAC_HOST_REQUEST_INVALID')
+            return self.engine.pipeline.reconcile_accepted(value['repository'],value['task_id'])
+        if operation=='retry-delivery':
+            if set(value)!={'repository','task_id'}: raise AppError('MAC_HOST_REQUEST_INVALID')
+            result=self.engine.pipeline.retry_delivery(value['repository'],value['task_id'])
+            self.engine.wake.set(); return result
         if operation in ('register','tasks'):
             if set(value)!={'repository'}: raise AppError('MAC_HOST_REQUEST_INVALID')
             if operation=='register':
@@ -117,7 +125,15 @@ class Application:
     def action(self, key, action, value):
         with self.store.lock:
             if action == 'accept': self.engine.validate_acceptance(self.store.get(key))
-            result = self.store.action(key, action, value)
+            if action=='accept' and self.store.get(key).get('native_lineage'):
+                self.store.db.execute('BEGIN IMMEDIATE')
+                try:
+                    result = self.store.action(key, action, value)
+                    self.engine.pipeline.record_inspection(result)
+                    self.store.db.execute('COMMIT')
+                except Exception:
+                    self.store.db.execute('ROLLBACK'); raise
+            else: result = self.store.action(key, action, value)
         self.engine.wake.set(); return result
 
     def inspect_handoff(self, value):
@@ -405,6 +421,12 @@ def main(argv=None):
     host_start=host_actions.add_parser('start'); host_start.add_argument('--repo',required=True)
     host_start.add_argument('--task',required=True); host_start.add_argument('--request-id',required=True)
     host_actions.add_parser('stop').add_argument('request_id')
+    host_accept=host_actions.add_parser('reconcile-accepted'); host_accept.add_argument('--repo',required=True)
+    host_accept.add_argument('--task',required=True)
+    host_retry=host_actions.add_parser('retry-delivery'); host_retry.add_argument('--repo',required=True)
+    host_retry.add_argument('--task',required=True)
+    host_base=host_actions.add_parser('advance-base'); host_base.add_argument('--repo',required=True)
+    host_base.add_argument('--decision',required=True)
     host_scope=host_actions.add_parser('receipt-scope'); host_scope.add_argument('--association',type=Path,required=True)
     transfer = sub.add_parser('handoff', help='기존 계획과 기록의 인계 준비; 실행 권한 변경 없음')
     actions = transfer.add_subparsers(dest='handoff_command', required=True)
@@ -449,6 +471,8 @@ def main(argv=None):
                 elif operation=='receipt-scope': value=read_json(args.association,65536)
                 elif operation=='start': value={'repository':args.repo,'task_id':args.task,'request_id':args.request_id}
                 elif operation=='stop': value={'request_id':args.request_id}
+                elif operation in ('reconcile-accepted','retry-delivery'): value={'repository':args.repo,'task_id':args.task}
+                elif operation=='advance-base': value={'repository':args.repo,'decision':args.decision}
                 else: value={'repository':args.repo}
                 result=client(args.data_dir,'/api/host/'+operation,value,owner=True)
         elif args.command == 'handoff':

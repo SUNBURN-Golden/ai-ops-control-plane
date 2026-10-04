@@ -80,7 +80,7 @@ def run(folder):
         argv = agents.command(request['profile'], request['role'], folder, checkout=request['checkout'])
         agents.prepare(request['profile'], request['role'], folder, request['checkout'], request['prompt'])
         if 'host_directory' in request:
-            argv = mac_sandbox.command(argv, request['host_directory'], folder, request['checkout'])
+            argv = mac_sandbox.command(argv, request['host_directory'], folder, request['checkout'],writing=request['role']=='builder')
         with open(folder / 'stdout.log', 'wb') as stdout, open(folder / 'stderr.log', 'wb') as stderr:
             child = subprocess.Popen(argv, cwd=request['checkout'], stdin=subprocess.PIPE,
                                      stdout=stdout, stderr=stderr,

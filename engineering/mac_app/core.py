@@ -53,6 +53,19 @@ def job_request(value):
 
 
 class Store:
+    def new_document(self,key,rid,repo,goal):
+        now=time.time()
+        return {'id': key, 'request_id': rid, 'repository': repo, 'goal': goal,
+                'state': 'queued', 'phase': 'preparing', 'created': now, 'updated': now,
+                'settings': self.settings(), 'branch': 'aiops/mac-' + key,
+                'base_sha': None, 'head': None, 'plan': None, 'source_pins': {},
+                'task_index': 0, 'built_tasks': [], 'feedback': [], 'user_answers': [],
+                'attempt': None, 'calls': 0, 'pause_requested': False, 'correcting': False,
+                'not_before': 0, 'failures': 0, 'pr_url': None, 'summary': '', 'question': None,
+                'review': None, 'supervision': None, 'ci': None, 'provider_error': None,
+                'program_scope': None, 'blocker': None, 'failure_fingerprint': None,
+                'last_terminal': None, 'admission': None}
+
     def __init__(self, directory):
         self.directory = private_directory(directory)
         self.lock = threading.RLock()
@@ -151,16 +164,8 @@ class Store:
                         raise AppError('REPOSITORY_BUSY', '이 레포의 기존 작업을 먼저 검수하거나 이어서 진행해 주세요: ' + previous['id'])
                 inherited = self.known_admission(repo)
                 key = uuid.uuid4().hex[:16]; now = time.time()
-                job = {'id': key, 'request_id': rid, 'repository': repo, 'goal': goal,
-                       'state': 'queued', 'phase': 'preparing', 'created': now, 'updated': now,
-                       'settings': self.settings(), 'branch': 'aiops/mac-' + key,
-                       'base_sha': None, 'head': None, 'plan': None, 'source_pins': {},
-                       'task_index': 0, 'built_tasks': [], 'feedback': [], 'user_answers': [],
-                       'attempt': None, 'calls': 0, 'pause_requested': False, 'correcting': False,
-                       'not_before': 0, 'failures': 0, 'pr_url': None, 'summary': '', 'question': None,
-                       'review': None, 'supervision': None, 'ci': None, 'provider_error': None,
-                       'program_scope': None, 'blocker': None, 'failure_fingerprint': None,
-                       'last_terminal': None, 'admission': inherited}
+                job = self.new_document(key,rid,repo,goal)
+                job.update(created=now,updated=now,admission=inherited)
                 document = self.document(job)
                 self.db.execute('INSERT INTO jobs VALUES (?,?,?,?,?,?)', (key, rid, repo, job['state'], document, now))
                 self.event(key, 'created', '작업을 맡았습니다. 레포를 읽고 계획부터 세웁니다.')
@@ -271,6 +276,8 @@ class Store:
                 if job['state'] not in ('paused', 'needs_user', 'waiting_provider') or job['attempt']:
                     raise AppError('PAUSE_BEFORE_MODEL_CHANGE')
                 settings = self.settings()
+                if job.get('native_lineage') and settings['roles']['builder']!=job['settings']['roles']['builder']:
+                    raise AppError('MAC_HOST_OWNER_PROFILE_IMMUTABLE')
                 phase = 'reviewing' if job['phase'] in ('reviewing', 'supervising', 'publishing', 'verifying') else job['phase']
                 fields = {'settings': settings, 'review': None, 'supervision': None, 'ci': None, 'phase': phase}
                 if job.get('provider_error') in PROVIDER_SETUP:
@@ -303,10 +310,14 @@ class Engine:
         self.stopping = threading.Event(); self.wake = threading.Event(); self.children = {}
         self.awake = None
         self.canonical = canonical if canonical is not None else native_transfer.Controller(store)
+        from mac_pipeline import Pipeline
+        self.pipeline=Pipeline(self.store,self.canonical.source,self.repos,failure=self.operational_failure) if getattr(self.canonical.source,'mode',None)=='MAC' else None
 
     def tick(self):
         if self.canonical.pending():
+            self.keep_awake(self.store.settings()['keep_awake'])
             return self.canonical.tick()
+        if self.pipeline and self.pipeline.deliver(): return True
         for process in list(self.children.values()): process.poll()
         jobs = sorted(self.store.jobs(), key=lambda x: x['created'])
         inflight = [j for j in jobs if j['attempt']]
@@ -480,6 +491,7 @@ class Engine:
         if job['attempt']: return self.observe(job)
         if job['pause_requested']:
             self.store.update(job['id'], state='paused'); return
+        if job.get('native_lineage'): self.pipeline.assert_job(job,refresh=True)
         phase = job['phase']
         if phase == 'preparing':
             self.store.update(job['id'], state='preparing')
@@ -499,6 +511,7 @@ class Engine:
                 self.store.update(job['id'], verified_base=sync['base'], head=self.repos.head(job))
                 return self.rework(job, ['기준 브랜치가 변경되었습니다. 최신 변경을 통합하고 충돌을 해결한 뒤 전체 테스트를 다시 실행하세요.'])
             if not job['settings']['publish_pr'] or job['head'] == job['base_sha']:
+                if job.get('native_lineage'): raise AppError('MAC_HOST_DELIVERABLE_REQUIRED')
                 self.store.update(job['id'], state='ready', ci={'state': 'not_published', 'checks': []})
                 self.store.event(job['id'], 'ready', '로컬 결과가 최종 검수를 기다립니다. GitHub CI는 확인하지 않았습니다.')
                 self.notify(job, ready=True)
@@ -538,8 +551,12 @@ class Engine:
         # Network reads must not prevent status/pause/cancel. Recheck everything
         # under the reservation lock afterwards, including a newly prepared handoff.
         try:
-            transport_guard.require_clear(self.store.directory)
-            observation = self.repos.execution_admission(context)
+            if job.get('native_lineage'):
+                self.pipeline.assert_job(context,refresh=True)
+                observation={'mode':'mac_local','binding':job['native_lineage']['binding']}
+            else:
+                transport_guard.require_clear(self.store.directory)
+                observation = self.repos.execution_admission(context)
         except (AppError, OSError, ValueError):
             with self.store.lock:
                 current = self.store.get(job['id'])
@@ -549,7 +566,7 @@ class Engine:
             raise
         with self.store.lock:
             job = self.store.get(job['id'])
-            observation = self.store.known_admission(job['repository']) or observation
+            observation = observation if job.get('native_lineage') else self.store.known_admission(job['repository']) or observation
             # Cancellation stops execution, not the retention of newly observed
             # canonical scope. A later request must not forget this observation.
             if observation.get('mode') == 'host_required':
@@ -558,8 +575,10 @@ class Engine:
             if job['pause_requested']:
                 self.store.update(job['id'], state='paused'); return
             self.store.update(job['id'], admission=observation)
-            admission.require_native(observation)
-            transport_guard.require_clear(self.store.directory)
+            if job.get('native_lineage'): self.pipeline.assert_job(job,refresh=False)
+            else:
+                admission.require_native(observation)
+                transport_guard.require_clear(self.store.directory)
             if native_transfer.local_fenced(self.store.db): raise AppError('NATIVE_LOCAL_TRANSFER_UNRESOLVED')
             self._launch(job, role)
 
@@ -583,12 +602,16 @@ class Engine:
             task = {'id': 'integration-rework', 'title': '검토 의견과 통합 문제 수정',
                     'instructions': '모든 피드백을 해결하고 전체 산출물을 유지하세요.',
                     'acceptance': ['모든 피드백 해결', '전체 회귀 검증 통과'], 'depends_on': []} if job['correcting'] else job['plan']['tasks'][job['task_index']]
+            if job.get('native_lineage') and job['correcting']:
+                task=copy.deepcopy(job['plan']['tasks'][0])
+                task['instructions'] += '\n\nResolve all supplied findings and re-run the original node verification. Preserve this node identity and complete original spec.'
         context = dict(job, current_task=task)
         binding = digest({'job': job['id'], 'attempt': attempt_id, 'head': head, 'role': role,
                           'profile': profile, 'plan': job['plan'], 'task': task})
         request = {'attempt_id': attempt_id, 'binding': binding, 'role': role,
                    'profile': profile, 'checkout': str(self.repos.path(job).resolve()),
                    'prompt': agents.prompt(context, role, head), 'timeout_seconds': job['settings']['session_minutes'] * 60}
+        if job.get('native_lineage'): request['host_directory']=str(self.store.directory.resolve())
         if len((encoded(request) + '\n').encode()) > WORKER_REQUEST_LIMIT:
             raise AppError('WORKER_REQUEST_TOO_LARGE',
                            '실행 입력이 한도를 넘었습니다. 원래 계획을 줄이지 않고 전달할 실행 기록의 크기를 확인해야 합니다.')
@@ -661,6 +684,8 @@ class Engine:
                 provider_evidence.get('model_requested') != profile['model']):
             raise AppError('PROVIDER_PROFILE_MISMATCH')
         agents.validate_report(report)
+        if role=='builder' and job.get('native_lineage'):
+            self.store.update(job['id'],builder_sessions=[*job.get('builder_sessions',[]),provider_evidence.get('session_id')])
         if report['status'] == 'complete' and (report['findings'] or report['question'].strip() or
                                                 not report['checks'] or any(not check.strip() for check in report['checks'])):
             report = dict(report, status='fail', findings=[
@@ -744,6 +769,7 @@ class Engine:
             elif ci['state'] == 'pending': self.store.update(job['id'], state='verifying', phase='verifying', not_before=time.time()+60)
             if ci['state'] in ('failed', 'pending'):
                 raise AppError('INSPECTION_CHANGED', '최신 CI 결과를 다시 확인합니다.')
+        if job.get('native_lineage'): self.pipeline.validate_inspection(self.store.get(job['id']))
 
 
 def service_lock(directory):

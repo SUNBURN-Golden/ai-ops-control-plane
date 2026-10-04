@@ -33,7 +33,7 @@ def snapshot(repo='owner/kix', tasks=None, nodes=None):
                                {'id':'NEXT','title':'Next','spec':'Original dependent scope','depends_on':['P-SDK-0']}]}
     raw=common.encoded(program); data=raw.encode()
     return {'repository':repo,'task_scope':'all','tasks':tasks or [],'observed_at':1,
-            'source':{'head':'a'*40,'blob':hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest(),
+            'source':{'head':'a'*40,'branch':'main','blob':hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest(),
                       'raw_program':raw}}
 
 
@@ -219,6 +219,7 @@ class MacSandboxTests(unittest.TestCase):
             secret=state / 'desktop-token'; secret.write_text('FIXTURE_OWNER_TOKEN')
             receipt=folder / 'receipt.json'; receipt.write_text('FIXTURE_CONTROL_RECEIPT')
             (checkout / 'linked-token').symlink_to(secret)
+            metadata=checkout / '.git'; metadata.mkdir(); (metadata / 'config').write_text('FIXTURE_GIT_CONFIG')
             script='''import pathlib,sys
 secret,receipt,checkout=map(pathlib.Path,sys.argv[1:])
 for p in (secret,receipt,checkout / "linked-token"):
@@ -229,6 +230,9 @@ for p in (secret,receipt,checkout / "linked-token"):
     except PermissionError: pass
     else: raise SystemExit(3)
 (checkout / "allowed.txt").write_text("checkout only")
+try: (checkout / ".git/config").write_text("forged git authority")
+except PermissionError: pass
+else: raise SystemExit(4)
 '''
             argv=mac_sandbox.command([sys.executable,'-c',script,str(secret),str(receipt),str(checkout)],state,folder,checkout)
             result=subprocess.run(argv,capture_output=True,timeout=15)
@@ -236,6 +240,25 @@ for p in (secret,receipt,checkout / "linked-token"):
             self.assertEqual(secret.read_text(),'FIXTURE_OWNER_TOKEN')
             self.assertEqual(receipt.read_text(),'FIXTURE_CONTROL_RECEIPT')
             self.assertEqual((checkout / 'allowed.txt').read_text(),'checkout only')
+            self.assertEqual((metadata / 'config').read_text(),'FIXTURE_GIT_CONFIG')
+    @unittest.skipUnless(sys.platform=='darwin','actual Mac read-only reviewer fence')
+    def test_reviewer_can_read_but_cannot_edit_the_canonical_checkout(self):
+        with tempfile.TemporaryDirectory() as root:
+            state=common.private_directory(Path(root) / 'control')
+            folder=common.private_directory(state / 'jobs' / 'fixture' / 'review')
+            checkout=common.private_directory(state / 'native' / 'fixture' / 'builder' / 'checkout')
+            source=checkout / 'code.py'; source.write_text('original fixture source')
+            script='''from pathlib import Path
+import sys
+p=Path(sys.argv[1]); assert p.read_text()=="original fixture source"
+try: p.write_text("modified by reviewer")
+except PermissionError: pass
+else: raise SystemExit(2)
+'''
+            argv=mac_sandbox.command([sys.executable,'-c',script,str(source)],state,folder,checkout,writing=False)
+            result=subprocess.run(argv,capture_output=True,timeout=15)
+            self.assertEqual(result.returncode,0,result.stderr.decode()[-1000:])
+            self.assertEqual(source.read_text(),'original fixture source')
     @unittest.skipUnless(sys.platform=='darwin','actual Mac native worker cancellation')
     def test_stop_is_handled_by_the_live_wrapper_and_persists_real_child_exit(self):
         with tempfile.TemporaryDirectory() as root:

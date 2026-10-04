@@ -48,6 +48,14 @@ class Repositories:
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def path(self, job):
+        if job.get('native_lineage'):
+            lineage=job['native_lineage']
+            if any(not isinstance(lineage.get(k),str) or not re.fullmatch(r'[0-9a-f]{32}',lineage[k]) for k in ('request_id','attempt_id')):
+                raise AppError('MAC_HOST_DELIVERY_BINDING_MISMATCH')
+            path=self.directory.parent / 'native' / lineage['request_id'] / lineage['attempt_id'] / 'checkout'
+            if path.is_symlink() or not path.resolve().is_relative_to(self.directory.parent.resolve()):
+                raise AppError('MAC_HOST_DELIVERY_BINDING_MISMATCH')
+            return path
         return self.directory / job['id']
 
     def prepare(self, job):
@@ -191,6 +199,7 @@ class Repositories:
         data = parse_json(gh(job['repository'], 'pr', 'view', job['branch'], '--json', 'headRefOid,statusCheckRollup,url,state'))
         if data['headRefOid'] != job['head'] or data['state'] != 'OPEN':
             raise AppError('STALE_REMOTE_HEAD')
+        if job.get('native_lineage'): return self.hosted_checks(job,job['head'])
         checks = []
         for row in data.get('statusCheckRollup') or []:
             status = row.get('conclusion') if row.get('status') == 'COMPLETED' else row.get('status') or row.get('state')
@@ -214,3 +223,53 @@ class Repositories:
                 return {'state': 'pending', 'checks': [{'name': 'repository workflows', 'status': 'EXPECTED', 'url': None}]}
         return {'state': 'failed' if failed else 'pending' if pending else 'passed' if checks else 'not_configured',
                 'checks': checks}
+
+    def hosted_checks(self,job,head):
+        """Mac node CI comes from real GitHub Actions checks/runs, not status text."""
+        from handoff import api
+        repo=job['repository']; data=api('repos/'+repo+'/commits/'+head+'/check-runs?per_page=100')
+        if (not isinstance(data,dict) or type(data.get('total_count')) is not int or not 0<=data['total_count']<=100 or
+                not isinstance(data.get('check_runs'),list) or len(data['check_runs'])!=data['total_count']):
+            raise AppError('MAC_HOST_CI_OBSERVATION_UNVERIFIED')
+        checks=[]; runs={}
+        for check in data['check_runs']:
+            if check.get('head_sha')!=head: raise AppError('MAC_HOST_CI_OBSERVATION_UNVERIFIED')
+            if (check.get('app') or {}).get('slug')!='github-actions': continue
+            match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/actions/runs/([0-9]+)(?:/job/[0-9]+)?',check.get('details_url') or '')
+            if not match: raise AppError('MAC_HOST_CI_OBSERVATION_UNVERIFIED')
+            run_id=match.group(1)
+            if run_id not in runs: runs[run_id]=api('repos/'+repo+'/actions/runs/'+run_id)
+            run=runs[run_id]
+            if run.get('head_sha')!=head or (run.get('repository') or {}).get('full_name','').lower()!=repo.lower():
+                raise AppError('MAC_HOST_CI_OBSERVATION_UNVERIFIED')
+            status=check.get('conclusion') if check.get('status')=='completed' else check.get('status')
+            checks.append({'name':check.get('name'),'status':str(status).upper(),'url':check['details_url'],
+                           'head':head,'run_id':int(run_id)})
+        registry=Path(__file__).with_name('projects.json')
+        if not registry.exists(): registry=Path(__file__).parent.parent / '.github/control-plane/projects.json'
+        config=read_json(registry).get(repo,{}) if registry.exists() else {}
+        for required in config.get('program_required_checks',[]):
+            matches=[c for c in checks if c['name']==required]
+            if not matches: checks.append({'name':required,'status':'EXPECTED','url':None,'head':head})
+            elif any(c['status'] in ('SKIPPED','NEUTRAL') for c in matches):
+                checks.append({'name':required,'status':'FAILURE','url':None,'head':head})
+        failed=any(c['status'] in ('FAILURE','ERROR','TIMED_OUT','CANCELLED','ACTION_REQUIRED','STARTUP_FAILURE') for c in checks)
+        pending=not any(c['status']=='SUCCESS' for c in checks) or any(c['status'] not in ('SUCCESS','SKIPPED','NEUTRAL') for c in checks)
+        return {'state':'failed' if failed else 'pending' if pending else 'passed','checks':checks,'head':head,
+                'source':'GITHUB_ACTIONS_API'}
+
+    def merged(self,job):
+        from handoff import api
+        repo=job['repository']; match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/pull/([0-9]+)',job['pr_url'] or '')
+        if not match: raise AppError('MAC_HOST_MERGE_BINDING_UNVERIFIED')
+        pull=api('repos/'+repo+'/pulls/'+match.group(1)); merge=pull.get('merge_commit_sha')
+        if not (pull.get('merged') is True and pull.get('state')=='closed' and pull.get('head',{}).get('sha')==job['head'] and
+                pull.get('base',{}).get('ref')==job['base_branch'] and isinstance(merge,str) and re.fullmatch(r'[0-9a-f]{40}',merge)):
+            raise AppError('MAC_HOST_MERGE_BINDING_UNVERIFIED')
+        git(self.path(job),'fetch','origin',job['base_branch'])
+        latest=git(self.path(job),'rev-parse','FETCH_HEAD')
+        if git(self.path(job),'merge-base',merge,latest)!=merge: raise AppError('MAC_HOST_MERGE_BINDING_UNVERIFIED')
+        ci=self.hosted_checks(job,merge)
+        if ci['state']!='passed': raise AppError('MAC_HOST_POST_MERGE_CI_REQUIRED')
+        return {'pr_url':job['pr_url'],'reviewed_head':job['head'],'merge_head':merge,'default_head':latest,
+                'post_merge_ci':ci,'source':'AUTHENTICATED_GITHUB_READ'}

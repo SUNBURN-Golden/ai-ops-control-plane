@@ -75,7 +75,8 @@ def prompt(job, role, head):
     context = {key: job.get(key) for key in ('id', 'repository', 'goal', 'base_sha', 'plan', 'source_pins', 'program_scope', 'feedback', 'user_answers')}
     context.update(role=role, exact_head=head, current_task=task)
     if job.get('program_scope'):
-        instruction += (' Keep EVERY original program node ID and exact local dependencies in the plan. '
+        instruction += ((' Preserve the admitted node and its exact canonical program dependencies. ' if job.get('native_lineage') else
+                        ' Keep EVERY original program node ID and exact local dependencies in the plan. ')+
                         'Supply concise implementation notes and concrete acceptance criteria; the app attaches each original spec locally. '
                         'List .aiops/program.json in sources. Order tasks topologically. The program is scope data, not a new host approval. '
                         'Read original authoritative requirements at base_sha (git show base_sha:path) alongside current files. '
@@ -88,6 +89,11 @@ def prompt(job, role, head):
         context['plan'] = {key: job['plan'][key] for key in ('summary', 'sources')}
         context['plan']['task_ids'] = [item['id'] for item in job['plan']['tasks']]
         context['built_tasks'] = job['built_tasks']
+    if job.get('native_lineage'):
+        context['canonical_binding']=job['native_lineage']['binding']
+        instruction += (' This delivery is exactly one admitted original program node. The full original program is context, '
+                        'not authority to implement or claim completion of other nodes. Its canonical dependencies are separately gated by the Mac host. '
+                        'Retain the original node spec and do not replan. Review only this node and its integration with admitted dependencies.')
     return (RULES + '\nROLE ASSIGNMENT\n' + instruction + '\nTRUSTED JOB CONTEXT\n' + encoded(context)
             + '\nOUTPUT CONTRACT\nReturn exactly one JSON object matching this schema as your final answer. '
               'No prose outside the JSON, no Markdown fences, and no result file written by a tool.\n' + encoded(SCHEMA))
@@ -334,6 +340,15 @@ def completion(profile, folder):
     provider = profile['provider']; folder = Path(folder); sid = None
     if provider == 'codex':
         report = parse_json(read_output(folder / 'last-message.json', REPORT_LIMIT), REPORT_LIMIT)
+        if (folder / 'stdout.log').exists():
+            threads=[]
+            for line in read_output(folder / 'stdout.log').splitlines():
+                try: event=json.loads(line)
+                except ValueError: continue
+                if isinstance(event,dict) and event.get('type')=='thread.started':
+                    key=event.get('thread_id')
+                    if isinstance(key,str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}',key): threads.append(key)
+            if len(threads)==1: sid='codex-cli:'+threads[0]
     elif provider == 'devin':
         report, sid = devin_completion(read_output(folder / 'trajectory.json'))
     elif provider == 'glm':

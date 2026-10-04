@@ -40,6 +40,8 @@ class LocalSource:
                 CREATE TABLE IF NOT EXISTS mac_host_receipt_scopes(request TEXT PRIMARY KEY,document TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS mac_host_attempts(request TEXT PRIMARY KEY,repository TEXT NOT NULL,
                     task TEXT NOT NULL,state TEXT NOT NULL,document TEXT NOT NULL,terminal TEXT);
+                CREATE TABLE IF NOT EXISTS mac_host_deliveries(request TEXT PRIMARY KEY,job TEXT UNIQUE NOT NULL,
+                    state TEXT NOT NULL,document TEXT NOT NULL);
                 CREATE UNIQUE INDEX IF NOT EXISTS mac_host_one_active ON mac_host_attempts((1)) WHERE state!='TERMINAL';
             ''')
 
@@ -110,7 +112,11 @@ class LocalSource:
         require(profile['provider'] in lanes,'MAC_HOST_PROFILE_UNSUPPORTED')
         # Observation timestamps can change on a read-only refresh. Authority,
         # original plan, profile and the full legacy projection cannot.
-        record={'scope':scope,'head':source['head'],'profile':profile,'tasks':copy.deepcopy(snapshot['tasks'])}
+        require(isinstance(source.get('branch'),str) and source['branch'] and '\n' not in source['branch'],
+                'MAC_HOST_BASE_BRANCH_REQUIRED')
+        settings=self.store.settings()
+        record={'scope':scope,'head':source['head'],'branch':source['branch'],'profile':profile,
+                'settings':settings,'tasks':copy.deepcopy(snapshot['tasks'])}
         with self.store.lock:
             self.store.db.execute('BEGIN IMMEDIATE')
             try:
@@ -125,7 +131,8 @@ class LocalSource:
                             'MAC_HOST_TASK_IDENTIFIER_UNSUPPORTED')
                     revision=digest({'plan_blob':scope['blob'],'node':node})
                     work={'task_id':task,'task_revision':revision,'plan_commit':source['head'],'profile':profile,
-                          'task':copy.deepcopy(node),'original_plan':copy.deepcopy(source['raw_program'])}
+                          'task':copy.deepcopy(node),'original_plan':copy.deepcopy(source['raw_program']),
+                          'settings':settings}
                     require(len(encoded(work).encode())<=300000,'MAC_HOST_SCOPE_TOO_LARGE')
                     cursor=self.store.db.execute('INSERT INTO mac_host_tasks(repository,task,binding,work,state) VALUES (?,?,?, ?,?)',
                         (repo,task,'{}',encoded(work),'READY'))
@@ -151,7 +158,7 @@ class LocalSource:
                 self.store.db.execute('ROLLBACK'); raise
         return self.tasks(repo)
 
-    def preflight(self,bound):
+    def preflight(self,bound,*,allow_base_advance=False):
         # Fresh read-only projections add barriers only. They never release an
         # external owner, infer terminal execution or advance the pinned plan.
         snapshot=handoff.inspect_repository(bound['repository'])
@@ -161,7 +168,7 @@ class LocalSource:
                                       (bound['repository'].lower(),)).fetchone()
             record=parse_json(old[0])
             require(snapshot.get('task_scope')=='all' and isinstance(snapshot.get('tasks'),list) and
-                    snapshot['source']['head']==record['head'] and snapshot['source']['blob']==record['scope']['blob'],
+                    (allow_base_advance or snapshot['source']['head']==record['head']) and snapshot['source']['blob']==record['scope']['blob'],
                     'MAC_HOST_PROGRAM_REVISION_CHANGED')
             self.store.db.execute('BEGIN IMMEDIATE')
             try:
@@ -205,6 +212,7 @@ class LocalSource:
         row=self._task(db,bound); self.check_external(bound)
         require(row['state']=='READY','MAC_HOST_TASK_COMPLETION_GATE_REQUIRED')
         work=parse_json(row['work'],1024*1024); deps=[]
+        require(work['settings']['publish_pr'] is True,'MAC_HOST_PR_PUBLICATION_REQUIRED')
         for node in bound['dependencies']:
             key=(bound['program']+'-'+node).upper()
             dependency=db.execute('SELECT task,state,binding FROM mac_host_tasks WHERE repository=? AND task=?',(bound['repository'].lower(),key)).fetchone()
@@ -216,23 +224,32 @@ class LocalSource:
     @staticmethod
     def _private_json(path):
         path=Path(path)
-        fd=os.open(path,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd,'r') as stream:
-            info=os.fstat(stream.fileno())
-            require(stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and not(info.st_mode & 0o077)
-                    and info.st_nlink==1 and info.st_size<=4*1024*1024,'MAC_HOST_PRIVATE_RECEIPT_REQUIRED')
-            return parse_json(stream.read(4*1024*1024+1))
+        try:
+            fd=os.open(path,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd,'r') as stream:
+                info=os.fstat(stream.fileno())
+                require(stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and not(info.st_mode & 0o077)
+                        and info.st_nlink==1 and info.st_size<=4*1024*1024,'MAC_HOST_PRIVATE_RECEIPT_REQUIRED')
+                return parse_json(stream.read(4*1024*1024+1))
+        except (OSError,UnicodeError):
+            raise AppError('MAC_HOST_PRIVATE_RECEIPT_REQUIRED') from None
 
     def _terminal(self,request,terminal):
         attempt=request['attempt']
         folder=self.store.directory / 'native' / request['request_id'] / attempt['id']
+        return self.private_receipt(folder,attempt,terminal['result_sha256'])
+
+    def private_receipt(self,folder,attempt,result_sha256=None):
+        folder=Path(folder)
         for path in (folder.parent,folder):
-            info=path.lstat()
+            try: info=path.lstat()
+            except OSError: raise AppError('MAC_HOST_PRIVATE_RECEIPT_REQUIRED') from None
             require(stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid() and not(info.st_mode & 0o077),
                     'MAC_HOST_PRIVATE_RECEIPT_REQUIRED')
         receipt=self._private_json(folder / 'receipt.json')
         require(receipt.get('attempt_id')==attempt['id'] and receipt.get('binding')==attempt['binding'] and
-                receipt.get('process_group_quiescent') is True and digest(receipt)==terminal['result_sha256'],
+                receipt.get('process_group_quiescent') is True and
+                (result_sha256 is None or digest(receipt)==result_sha256),
                 'MAC_HOST_TERMINAL_RECEIPT_UNPROVEN')
         if receipt.get('provider_started') is True:
             process=self._private_json(folder / 'provider-process.json')
@@ -262,6 +279,48 @@ class LocalSource:
         matches=[r['binding'] for r in self.tasks(repo) if r['task_id']==task.upper()]
         require(len(matches)==1,'MAC_HOST_TASK_NOT_FOUND')
         return matches[0]
+
+    def advance_base(self,value):
+        require(isinstance(value,dict) and set(value)=={'repository','decision'} and
+                isinstance(value['decision'],str) and 1<=len(value['decision'])<=2000,'MAC_HOST_REQUEST_INVALID')
+        repo=repository(value['repository']).lower()
+        snapshot=handoff.inspect_repository(repo)
+        with self.store.lock:
+            previous=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',(repo,)).fetchone()
+            require(previous is not None,'MAC_HOST_PROGRAM_NOT_FOUND')
+            program=parse_json(previous[0])
+            require(snapshot['source']['blob']==program['scope']['blob'] and snapshot['source']['branch']==program['branch'],
+                    'MAC_HOST_PROGRAM_REVISION_CHANGED')
+            require(not any(j['attempt'] or j['state'] not in TERMINAL for j in self.store.jobs()) and not self.store.execution_busy,
+                    'MAC_HOST_LOCAL_WORK_BUSY')
+            require(not self.store.db.execute("SELECT 1 FROM native_local WHERE state!='TERMINAL'").fetchone() and
+                    not self.store.db.execute("SELECT 1 FROM mac_host_attempts WHERE state!='TERMINAL'").fetchone() and
+                    not self.store.db.execute("SELECT 1 FROM mac_host_tasks WHERE repository=? AND state NOT IN ('READY','ACCEPTED')",(repo,)).fetchone(),
+                    'MAC_HOST_BASE_ADVANCE_BUSY')
+            head=snapshot['source']['head']
+            if head==program['head']: return self.tasks(repo)
+            self.store.db.execute('BEGIN IMMEDIATE')
+            try:
+                program['base_advances']=[*program.get('base_advances',[]),{'from':program['head'],'to':head,
+                     'decision':value['decision'],'at':time.time()}]
+                require(len(program['base_advances'])<=256,'MAC_HOST_BASE_ADVANCE_HISTORY_LIMIT')
+                program['head']=head
+                for row in self.store.db.execute("SELECT * FROM mac_host_tasks WHERE repository=? AND state='READY'",(repo,)).fetchall():
+                    bound=parse_json(row['binding']); work=parse_json(row['work'],1024*1024)
+                    # Only never-active/terminal-prestart work can have its base
+                    # advanced. Task, original spec, revision and owner stay pinned.
+                    bound['plan_commit']=head; work['plan_commit']=head; bound['work_sha256']=digest(work)
+                    self.store.db.execute('UPDATE mac_host_tasks SET binding=?,work=? WHERE id=?',
+                                         (encoded(bound),encoded(work),row['id']))
+                self.store.db.execute('UPDATE mac_host_programs SET document=? WHERE repository=?',(encoded(program),repo))
+                for task in snapshot['tasks']:
+                    key=(task.get('program','')+'-'+task.get('node','')).upper() if task.get('node') else '*'
+                    claim={'origin':'GITHUB_PROJECTION','state':'UNRESOLVED','task':copy.deepcopy(task),'repository':repo,'task_key':key}
+                    self.store.db.execute('INSERT OR IGNORE INTO mac_host_external VALUES (?,?,?,?)',(digest(claim),repo,key,encoded(claim)))
+                self.store.db.execute('COMMIT')
+            except Exception:
+                self.store.db.execute('ROLLBACK'); raise
+        return self.tasks(repo)
 
     @staticmethod
     def _view(row):

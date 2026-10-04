@@ -173,6 +173,12 @@ def idle_database(state):
                     raise AppError('INSTALLATION_STATE_UNVERIFIED')
                 if state_name not in ('accepted', 'cancelled') or job.get('attempt') is not None:
                     raise AppError('UPDATE_BUSY', '작업을 완료·검수하거나 안전하게 취소한 뒤 업데이트해 주세요. 대기·일시정지·실행 불명 작업은 유지합니다.')
+            for table,allowed in (('native_local',('TERMINAL',)),('mac_host_attempts',('TERMINAL',)),
+                                  ('mac_host_tasks',('READY','ACCEPTED'))):
+                if table in tables:
+                    marks=','.join('?' for _ in allowed)
+                    if db.execute('SELECT 1 FROM '+table+' WHERE state NOT IN ('+marks+') LIMIT 1',allowed).fetchone():
+                        raise AppError('UPDATE_BUSY','Mac canonical 작업의 실행·검토·병합 근거가 미완료입니다. 원장과 산출물을 보존합니다.')
     except sqlite3.Error as exc:
         raise AppError('INSTALLATION_STATE_UNVERIFIED') from exc
 
