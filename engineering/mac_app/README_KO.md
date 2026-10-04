@@ -16,6 +16,7 @@ GitHub 레포와 목표를 한 번 주면 계획 → 개발·테스트 → 독�
 - 결과 준비 및 필수 질문에 대한 Mac 알림. 알림 표시는 macOS 알림 설정을 따릅니다.
 - GitHub 검수용 draft PR 생성과 CI 확인. 앱의 검수 완료는 자동 병합·배포 명령이 아닙니다.
 - 어떤 봇에서도 호출할 수 있는 로컬 CLI와 stdio MCP.
+- 기존 프로그램의 `handoff inspect/prepare/list/status` 인계 준비 경로. 원래 계획과 기록을 보존하며 실행 권한을 변경하지 않습니다. [사용과 한계](../docs/MAC_HANDOFF_PREPARATION_KO.md)를 확인하세요.
 
 복구 페이지나 복구 설치 패키지를 추가하지 않습니다. SQLite 작업 기록과 미확정 실행의 중복 방지는 정상 실행 기능입니다.
 

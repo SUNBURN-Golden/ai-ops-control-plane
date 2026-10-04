@@ -66,7 +66,7 @@ class Repositories:
         active = parse_json(gh(job['repository'], 'issue', 'list', '--state', 'open', '--label', 'aiops-task',
                                '--limit', '1', '--json', 'number,url'))
         if active:
-            raise AppError('EXISTING_AIOPS_OWNER', '이 레포에 기존 AIOPS 작업이 있습니다. 기존 실행 소유권을 먼저 이관해야 합니다: ' + active[0]['url'])
+            raise AppError('EXISTING_AIOPS_OWNER', '이 레포에 기존 AIOPS 작업 등록이 있습니다. handoff inspect/prepare로 원래 계획과 기록을 가져올 수 있습니다. 실행은 보호 호스트의 소유권 확인 전까지 보류합니다: ' + active[0]['url'])
         git(None, 'clone', '--no-local', '--single-branch', '--branch', branch,
             'https://github.com/' + job['repository'] + '.git', str(checkout), timeout=600)
         git(checkout, 'config', 'user.name', 'AIOPS Mac')
