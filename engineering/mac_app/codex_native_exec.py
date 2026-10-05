@@ -47,7 +47,9 @@ def qualified_cli():
 def overrides(request,name,profile,runtime):
     return {'default_permissions':name,'permissions.'+name:profile,'analytics.enabled':False,
         'model_provider':'openai','web_search':'disabled','mcp_servers':{},'notify':[],
-        'shell_environment_policy':{'inherit':'core','set':{'PATH':agents.environment().get('PATH','/usr/bin:/bin')}},
+        'shell_environment_policy':{'inherit':'core','set':{
+            'PATH':agents.environment().get('PATH','/usr/bin:/bin'),
+            'TMPDIR':str(runtime.parent/'provider-tmp'),'GIT_CONFIG_GLOBAL':os.devnull}},
         'sqlite_home':str(runtime/'state'),'log_dir':str(runtime/'log'),
         'projects.'+json.dumps(str(Path(request['checkout']).resolve()))+'.trust_level':'untrusted',
         **{'features.'+key:False for key in FEATURES}}
@@ -57,7 +59,7 @@ def flags(values):
     return sum((['-c',key+'='+sdk.toml_inline(value)] for key,value in values.items()),[])
 
 
-def bound_profile(read,listed,name,profile,expected_path=None):
+def bound_profile(read,listed,name,profile,expected_path=None,expected_environment=None):
     layers=read.get('layers') or []
     sdk.require(layers and all(v.get('name',{}).get('type') in LAYER_TYPES for v in layers))
     # Official exec excludes user config; project trust is pinned untrusted.
@@ -78,6 +80,8 @@ def bound_profile(read,listed,name,profile,expected_path=None):
             v.get('description')==profile['description'] for v in listed.get('data',[]))}
     if expected_path is not None:
         checks['shell_PATH_matches']=(effective.get('shell_environment_policy') or {}).get('set',{}).get('PATH')==expected_path
+    if expected_environment is not None:
+        checks['shell_environment_matches']=(effective.get('shell_environment_policy') or {}).get('set',{})==expected_environment
     sdk.require(all(checks.values()))
     return checks
 
@@ -149,7 +153,8 @@ class Driver:
             sdk.require((layer['config'].get('projects') or {}).get(self.proof['checkout'],{}).get('trust_level')=='trusted',config.ERROR)
             listed=protocol.rpc('permissionProfile/list',{'cwd':self.request['checkout']})
             self.proof['profile_checks']=bound_profile(read,listed,self.name,self.profile,
-                self.values['shell_environment_policy']['set']['PATH'])
+                self.values['shell_environment_policy']['set']['PATH'],
+                self.values['shell_environment_policy']['set'])
             features=protocol.rpc('experimentalFeature/list',{'limit':1000})
             self.proof['feature_checks']={key:any(v.get('name')==key and v.get('enabled') is False
                 for v in features['data']) for key in FEATURES};self.save()

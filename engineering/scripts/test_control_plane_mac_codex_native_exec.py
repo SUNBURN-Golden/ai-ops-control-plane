@@ -123,11 +123,17 @@ class NativePreflightTests(Fixture):
         expected='/fixture/runtime/bin:/usr/bin:/bin'
         with mock.patch.dict(os.environ,PATH=expected):
             values=native.overrides(self.request,self.driver.name,self.driver.profile,self.driver.runtime)
-        self.assertEqual(values['shell_environment_policy'],{'inherit':'core','set':{'PATH':expected}})
+        self.assertEqual(values['shell_environment_policy'],{'inherit':'core','set':{
+            'PATH':expected,'TMPDIR':str(self.driver.tmp),'GIT_CONFIG_GLOBAL':os.devnull}})
         self.assertEqual(values['permissions.'+self.driver.name],self.driver.profile)
         self.assertNotIn('/fixture/runtime/bin',self.driver.profile['filesystem'])
         client=PreflightClient(self.driver,self.config)
         client.read['config']['shell_environment_policy']={'set':{'PATH':'/unexpected'}}
+        with self.assertRaisesRegex(common.AppError,'PROFILE_UNVERIFIED'):self.preflight(client)
+        self.assertNotIn('account/read',client.calls)
+        client=PreflightClient(self.driver,self.config)
+        client.read['config']['shell_environment_policy']=copy.deepcopy(self.driver.values['shell_environment_policy'])
+        client.read['config']['shell_environment_policy']['set']['GIT_CONFIG_GLOBAL']='/unexpected'
         with self.assertRaisesRegex(common.AppError,'PROFILE_UNVERIFIED'):self.preflight(client)
         self.assertNotIn('account/read',client.calls)
         client=PreflightClient(self.driver,self.config);client.read['config']['default_permissions']=':workspace'
