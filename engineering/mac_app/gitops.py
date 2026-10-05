@@ -386,7 +386,7 @@ class Repositories:
         git(self.path(job),'fetch','origin',job['base_branch'])
         latest=git(self.path(job),'rev-parse','FETCH_HEAD')
         if git(self.path(job),'merge-base',merge,latest)!=merge: raise AppError('MAC_HOST_MERGE_BINDING_UNVERIFIED')
-        if job.get('user_merge') and git(self.path(job),'rev-parse',merge+'^2')!=job['head']:
+        if git(self.path(job),'rev-parse',merge+'^2')!=job['head']:
             raise AppError('MAC_HOST_MERGE_BINDING_UNVERIFIED')
         registry=Path(__file__).with_name('projects.json')
         if not registry.exists(): registry=Path(__file__).parent.parent/'.github/control-plane/projects.json'

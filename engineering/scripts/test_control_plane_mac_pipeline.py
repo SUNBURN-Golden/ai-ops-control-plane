@@ -263,6 +263,59 @@ class MacPipelineTests(unittest.TestCase):
         self.assertEqual(accepted['state'],'accepted'); self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'INSPECTED')
         with self.assertRaisesRegex(common.AppError,'DEPENDENCY_GATE_REQUIRED'):
             self.source.call('read',self.source.select('owner/kix','KIX-NEXT'))
+    def test_explicit_owner_inspection_after_external_merge_keeps_original_head_and_reviews(self):
+        job=self.ready();self.repos.remote_merged=True;self.latest['source']['head']='d'*40
+        approval={'head':job['head'],'approval':'Actual scoped User approval of the delegated fixture review.'}
+        with patch.object(self.repos,'synchronize_base',side_effect=AssertionError('must not change checkout')):
+            accepted=self.app.action(job['id'],'accept',approval)
+        self.assertEqual(accepted['head'],job['head']);self.assertEqual(self.repos.current,job['head'])
+        self.assertEqual(accepted['review'],job['review']);self.assertEqual(accepted['supervision'],job['supervision'])
+        self.assertEqual(accepted['post_merge_owner_approval'],approval)
+        self.assertEqual(accepted['inspection_merge_proof']['merge_head'],'d'*40)
+        self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'INSPECTED')
+        outcome=self.engine.pipeline.reconcile_accepted('owner/kix','KIX-P-SDK-0')
+        self.assertEqual(outcome['state'],'ACCEPTED')
+        self.assertEqual(self.repos.merge_count,0);self.assertEqual(self.repos.readied,0)
+        self.assertEqual(self.worker.launched,1)
+    def test_external_merge_does_not_supply_user_approval_or_accept_a_different_head(self):
+        job=self.ready();self.repos.remote_merged=True
+        for value in ({},{'head':job['head'],'approval':''},{'head':'e'*40,'approval':'fixture User approval'}):
+            with patch.object(self.repos,'synchronize_base') as sync:
+                with self.assertRaises(common.AppError):self.app.action(job['id'],'accept',value)
+                sync.assert_not_called()
+            self.assertEqual(self.store.get(job['id'])['state'],'ready')
+            self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'DELIVERING')
+    def test_changed_checkout_after_external_merge_holds_without_starting_another_writer(self):
+        job=self.ready();self.repos.remote_merged=True;self.repos.current='e'*40
+        with self.assertRaisesRegex(common.AppError,'INSPECTION_CHANGED'):
+            self.app.action(job['id'],'accept',{'head':job['head'],'approval':'fixture actual User approval'})
+        current=self.store.get(job['id']);self.assertEqual(current['state'],'ready')
+        self.assertEqual(current['review'],job['review']);self.assertEqual(current['supervision'],job['supervision'])
+        self.assertEqual(current['head'],job['head']);self.assertEqual(self.worker.launched,1)
+    def test_post_merge_owner_inspection_preserves_private_review_and_audit_gates(self):
+        job=self.ready();self.repos.remote_merged=True
+        value={'head':job['head'],'approval':'fixture explicit User approval'}
+        with patch.object(self.engine.pipeline,'audit_requirement',return_value={'required':True}):
+            with self.assertRaisesRegex(common.AppError,'ASTRA_AUDIT_REQUIRED'):
+                self.app.action(job['id'],'accept',value)
+        receipt=self.store.directory/'jobs'/job['id']/job['review']['attempt']/'receipt.json'
+        receipt.unlink()
+        with self.assertRaisesRegex(common.AppError,'PRIVATE_RECEIPT_REQUIRED'):
+            self.app.action(job['id'],'accept',value)
+        self.assertEqual(self.store.get(job['id'])['state'],'ready')
+        self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'DELIVERING')
+    def test_post_merge_inspection_waits_for_both_exact_head_and_post_merge_ci_without_rework(self):
+        job=self.ready();self.repos.remote_merged=True
+        value={'head':job['head'],'approval':'fixture explicit User approval'}
+        for state,merge_ready in [('pending',True),('failed',True),('passed',False)]:
+            self.repos.ci_state=state;self.repos.merge_ready=merge_ready
+            with patch.object(self.repos,'synchronize_base') as sync:
+                with self.assertRaises(common.AppError):self.app.action(job['id'],'accept',value)
+                sync.assert_not_called()
+            current=self.store.get(job['id'])
+            self.assertEqual(current['state'],'ready');self.assertEqual(current['head'],job['head'])
+            self.assertEqual(current['review'],job['review']);self.assertEqual(current['supervision'],job['supervision'])
+            self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'DELIVERING')
     def test_same_actual_reviewer_session_or_builder_session_is_not_independent(self):
         job=self.ready()
         evidence=self.review_evidence(job,'supervisor','4'*32,'fixture-builder')
@@ -489,6 +542,48 @@ class CandidateDispatchTests(unittest.TestCase):
             with patch('handoff.api',return_value=self.pull),patch('gitops.execute') as execute:
                 with self.assertRaises(common.AppError):self.repos.user_ready(self.job)
                 execute.assert_not_called()
+
+
+class ExternalMergeProofTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);self.checkout=self.root/'product';self.checkout.mkdir()
+        self.env=agents.environment();self.env.update(GIT_CONFIG_GLOBAL='/dev/null',GIT_CONFIG_SYSTEM='/dev/null')
+        self.git('init','-b','main')
+        (self.checkout/'LOCK').write_text('immutable fixture boundary\n')
+        self.git('add','LOCK');self.git('commit','-m','fixture base')
+        self.base=self.git('rev-parse','HEAD');self.lock=self.git('rev-parse','HEAD:LOCK')
+        self.git('switch','-c','feature');(self.checkout/'review.md').write_text('fixture reviewed document\n')
+        self.git('add','review.md');self.git('commit','-m','fixture reviewed head')
+        self.reviewed=self.git('rev-parse','HEAD')
+        self.git('switch','main');self.git('merge','--no-ff','feature','-m','fixture ordinary merge')
+        self.merge=self.git('rev-parse','HEAD');self.git('remote','add','origin',str(self.checkout))
+        self.git('switch','feature')
+        self.repos=gitops.Repositories(self.root/'workspaces')
+        self.job={'repository':'owner/kix','head':self.reviewed,'base_branch':'main',
+                  'pr_url':'https://github.com/owner/kix/pull/2'}
+        self.pull={'merged':True,'state':'closed','head':{'sha':self.reviewed},
+                   'base':{'ref':'main'},'merge_commit_sha':self.merge}
+    def git(self,*args):
+        result=subprocess.run(['git','-c','core.hooksPath=/dev/null','-c','user.name=Fixture',
+            '-c','user.email=fixture@example.invalid',*args],cwd=self.checkout,env=self.env,
+            capture_output=True,text=True,check=True,timeout=10)
+        return result.stdout.strip()
+    def prove(self):
+        config={'owner/kix':{'program_post_merge_locked_blobs':{'LOCK':self.lock}}}
+        with patch.object(self.repos,'path',return_value=self.checkout),\
+             patch('handoff.api',return_value=self.pull),patch('gitops.read_json',return_value=config),\
+             patch.object(self.repos,'hosted_checks',return_value={'state':'passed','head':self.merge}):
+            return self.repos.merged(self.job)
+    def test_actual_external_merge_requires_reviewed_second_parent_without_app_merge_intent(self):
+        proof=self.prove();self.assertEqual(proof['merge_head'],self.merge)
+        self.assertEqual(self.git('rev-parse','HEAD'),self.reviewed)
+        self.assertNotIn('user_merge',self.job)
+        self.job['head']=self.base;self.pull['head']['sha']=self.base
+        with self.assertRaisesRegex(common.AppError,'MERGE_BINDING_UNVERIFIED'):self.prove()
+    def test_actual_external_merge_retains_kernel_blob_gate(self):
+        self.lock='0'*40
+        with self.assertRaisesRegex(common.AppError,'POST_MERGE_LOCK_CHANGED'):self.prove()
 
 
 class HostedCITests(unittest.TestCase):

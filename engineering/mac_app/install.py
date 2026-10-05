@@ -148,7 +148,7 @@ def quiescent_generation_delivery(db,state,job,tables):
     import native_transfer
     from mac_authority import LocalSource, require
     inspected=job['state']=='accepted'
-    require(job['state'] in ('needs_user','paused','accepted') and job.get('attempt') is None,'UPDATE_BUSY')
+    require(job['state'] in ('needs_user','paused','ready','accepted') and job.get('attempt') is None,'UPDATE_BUSY')
     require({'mac_host_generations','mac_host_tasks','mac_host_attempts','native_local','mac_host_deliveries'} <= tables,
             'UPDATE_BUSY')
     lineage=job.get('native_lineage'); require(isinstance(lineage,dict),'UPDATE_BUSY')
@@ -229,6 +229,32 @@ def quiescent_generation_delivery(db,state,job,tables):
                     receipt.get('provider_evidence')==evidence['provider_evidence'] and
                     receipt['report']['status']=='complete' and actor and actor not in actors,'UPDATE_BUSY')
             actors.add(actor)
+    if job['state']=='ready':
+        # A finished new-generation delivery can receive an app repair without
+        # accepting it or starting a second writer. Validate the private exact-
+        # head review chain, but never construct a Store or migrate this ledger.
+        import agents
+        import gitops
+        import mac_pipeline
+        import threading
+        from types import SimpleNamespace
+        require(job['ci']['state']=='passed' and job['ci']['head']==job['head'] and
+                job['ci']['source']=='GITHUB_ACTIONS_API' and job['ci']['checks'] and
+                job.get('candidate_published_head')==job['head'],'UPDATE_BUSY')
+        previous_factory=db.row_factory
+        try:
+            db.row_factory=sqlite3.Row
+            reader.store=SimpleNamespace(db=db,directory=root,lock=threading.RLock())
+            repos=object.__new__(gitops.Repositories);repos.directory=root/'workspaces'
+            mac_pipeline.Pipeline(reader.store,reader,repos).validate_reviews(job,('review','supervision'))
+        finally:
+            db.row_factory=previous_factory
+        env=agents.environment()
+        env.update(GIT_OPTIONAL_LOCKS='0',GIT_CONFIG_GLOBAL='/dev/null',GIT_CONFIG_SYSTEM='/dev/null')
+        for args,expected in ((['rev-parse','HEAD'],job['head']),(['status','--porcelain'],'')):
+            result=subprocess.run(['git','-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false',*args],
+                cwd=checkout,env=env,capture_output=True,text=True,check=False,timeout=10)
+            require(result.returncode==0 and result.stdout.strip()==expected,'UPDATE_BUSY')
     return (bound['repository'].lower(),bound['task_id'])
 
 

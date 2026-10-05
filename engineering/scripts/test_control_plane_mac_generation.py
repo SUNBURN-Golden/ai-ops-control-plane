@@ -186,7 +186,7 @@ class MacGenerationTests(unittest.TestCase):
         path.write_bytes(original);path.chmod(0o600)
         self.store.update(job['id'],generation_policy={**mac_generation.POLICY,'auto_merge':True})
         with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
-    def inspected_delivery(self):
+    def inspected_delivery(self,*,accept=True):
         job,_=self.blocked_delivery();repos=delivery.FixtureRepositories(self.store.directory/'workspaces')
         engine=core.Engine(self.store,repos,self.controller)
         with patch.object(engine,'notify'):
@@ -205,8 +205,27 @@ class MacGenerationTests(unittest.TestCase):
                 engine.observe(current)
             engine.step(self.store.get(job['id']))
             app=object.__new__(aiops.Application);app.store=self.store;app.engine=engine;app.canonical=self.controller
-            app.action(job['id'],'accept',{})
+            if accept:app.action(job['id'],'accept',{})
         return self.store.get(job['id'])
+    def ready_git_result(self,args,**kwargs):
+        if args[-2:]==['rev-parse','HEAD']:return subprocess.CompletedProcess(args,0,'c'*40+'\n','')
+        if args[-2:]==['status','--porcelain']:return subprocess.CompletedProcess(args,0,'','')
+        raise AssertionError('Unexpected updater command')
+    def test_ready_generation_update_proves_reviews_and_quiescence_without_accepting(self):
+        job=self.inspected_delivery(accept=False);before=list(self.store.db.iterdump())
+        self.assertEqual(job['state'],'ready')
+        with patch('install.subprocess.run',side_effect=self.ready_git_result):install.idle_database(self.store.directory)
+        self.assertEqual(list(self.store.db.iterdump()),before)
+        self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'DELIVERING')
+        self.assertEqual(self.store.get(job['id'])['state'],'ready')
+    def test_ready_label_without_original_private_review_or_clean_head_cannot_enable_update(self):
+        job=self.inspected_delivery(accept=False)
+        with patch('install.subprocess.run',return_value=subprocess.CompletedProcess([],0,'e'*40,'')):
+            with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
+        folder=self.store.directory/'jobs'/job['id']/job['review']['attempt']
+        (folder/'receipt.json').unlink()
+        with patch('install.subprocess.run',side_effect=self.ready_git_result):
+            with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
     def test_update_of_inspected_generation_requires_all_private_proof_and_keeps_inspection(self):
         job=self.inspected_delivery();before=list(self.store.db.iterdump())
         install.idle_database(self.store.directory)

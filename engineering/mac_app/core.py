@@ -874,11 +874,32 @@ class Engine:
         finally:
             with self.store.lock:self.store.execution_busy.discard(key)
 
-    def validate_acceptance(self, job):
+    def validate_acceptance(self, job, value=None):
         if job['state'] != 'ready': raise AppError('NOT_READY_FOR_ACCEPTANCE')
+        already_merged=job.get('native_lineage') and self.repos.merge_candidate(job)['merged']
         if not self.inspected_head(job):
+            if already_merged: raise AppError('INSPECTION_CHANGED')
             self.rework(job, ['사용자 검수 전에 코드가 변경되었습니다. 전체 검증을 다시 실행하세요.'])
             raise AppError('INSPECTION_CHANGED', '검토 대상이 변경되어 다시 검증합니다.')
+        if already_merged:
+            # An Owner may explicitly approve the original reviewed head after
+            # an external ordinary merge. Never merge main into that checkout
+            # or infer User approval merely from a remote merged flag.
+            if not isinstance(value,dict) or set(value)!={'head','approval'}:
+                raise AppError('USER_INSPECTION_APPROVAL_REQUIRED')
+            approval={'head':text(value['head'],'head',40),'approval':text(value['approval'],'approval',2000)}
+            if approval['head']!=job['head']: raise AppError('USER_INSPECTION_HEAD_CHANGED')
+            if job.get('post_merge_owner_approval') and job['post_merge_owner_approval']!=approval:
+                raise AppError('USER_INSPECTION_APPROVAL_IMMUTABLE')
+            self.pipeline.source.preflight(job['native_lineage']['binding'],allow_base_advance=True)
+            ci=self.repos.checks(job)
+            if ci['state']!='passed': raise AppError('MAC_HOST_LIVE_CI_REQUIRED')
+            candidate={**job,'ci':ci}
+            self.pipeline.validate_inspection(candidate,refresh=False)
+            proof=self.repos.merged(candidate)
+            self.store.update(job['id'],ci=ci,post_merge_owner_approval=approval,
+                              inspection_merge_proof=proof)
+            return
         sync = self.repos.synchronize_base(job)
         if sync['changed']:
             self.store.update(job['id'], verified_base=sync['base'], head=self.repos.head(job))
