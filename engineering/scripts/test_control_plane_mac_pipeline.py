@@ -50,6 +50,7 @@ class FixtureRepositories(gitops.Repositories):
     def __init__(self,directory):
         super().__init__(directory); self.current='c'*40; self.dirty=False; self.checkpoints=0; self.published=0
         self.fail_checkpoint=False; self.merge_ready=True; self.ci_state='passed'
+        self.dispatches=[]
     def checkpoint(self,job):
         self.checkpoints+=1
         if self.fail_checkpoint: raise common.AppError('FIXTURE_CHECKPOINT_FAILED')
@@ -62,6 +63,8 @@ class FixtureRepositories(gitops.Repositories):
         return {'operation':'fixture host fetch','base_sha':job['base_sha'],'plan_blob':job['program_scope']['blob']}
     def synchronize_base(self,job): return {'changed':False}
     def publish(self,job): self.published+=1; return 'https://github.com/owner/kix/pull/2'
+    def candidate_workflows(self,job): return ['ktx-kernel.yml','protocol.yml']
+    def dispatch_candidate_workflow(self,job,workflow): self.dispatches.append((job['head'],workflow))
     def checks(self,job):
         return {'state':self.ci_state,'checks':[{'name':'fixture actual-API substitute','status':'SUCCESS'}],
                 'head':job['head'],'source':'GITHUB_ACTIONS_API'}
@@ -117,7 +120,8 @@ class MacPipelineTests(unittest.TestCase):
         review=self.review_evidence(job,'reviewer','2'*32,'fixture-reviewer')
         supervision=self.review_evidence(job,'supervisor','3'*32,'fixture-supervisor')
         return self.store.update(job['id'],state='ready',phase='verifying',review=review,supervision=supervision,
-                                 pr_url='https://github.com/owner/kix/pull/2',ci=self.repos.checks(job))
+                                 pr_url='https://github.com/owner/kix/pull/2',ci=self.repos.checks(job),
+                                 candidate_published_head=job['head'],candidate_ci_requested=job['head'])
     def test_native_completion_seeds_one_original_node_and_checkout_without_planning(self):
         job=self.seed()
         self.assertEqual(job['phase'],'reviewing'); self.assertEqual(job['plan']['tasks'][0]['id'],'P-SDK-0')
@@ -269,6 +273,15 @@ class MacPipelineTests(unittest.TestCase):
     def test_existing_engine_moves_native_delivery_through_both_reviews_pr_ci_and_user_inspection(self):
         job=self.seed()
         for role in ('reviewer','supervisor'):
+            if role=='supervisor':
+                job=self.store.get(job['id']); self.assertEqual(job['phase'],'publishing')
+                self.engine.step(job); job=self.store.get(job['id']); self.assertEqual(job['phase'],'verifying')
+                self.assertIsNone(job['supervision']); self.assertNotEqual(job['state'],'ready')
+                self.repos.ci_state='pending'
+                self.engine.step(job); self.assertEqual(len(self.repos.dispatches),2)
+                self.repos.ci_state='passed'
+                self.engine.step(self.store.get(job['id']))
+                self.assertEqual(self.store.get(job['id'])['phase'],'supervising')
             job=self.store.get(job['id'])
             with patch('core.agents.command',return_value=['fixture-not-executed']), patch('core.subprocess.Popen'):
                 self.engine.launch(job,role)
@@ -276,11 +289,57 @@ class MacPipelineTests(unittest.TestCase):
             folder=self.store.directory / 'jobs' / job['id'] / attempt['id']
             private_outcome(folder,attempt,report(job['head']),profile=job['settings']['roles'][role],sid='fixture-'+role)
             self.engine.observe(launched)
-        job=self.store.get(job['id']); self.assertEqual(job['phase'],'publishing')
-        self.engine.step(job); job=self.store.get(job['id']); self.assertEqual(job['phase'],'verifying')
+        job=self.store.get(job['id']); self.assertEqual(job['phase'],'verifying')
         self.engine.step(job); job=self.store.get(job['id']); self.assertEqual(job['state'],'ready')
         self.assertEqual(self.repos.published,1); self.assertEqual(self.worker.launched,1)
         self.app.action(job['id'],'accept',{}); self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'INSPECTED')
+
+    def test_old_supervisor_question_resumes_candidate_without_repeating_reviewer(self):
+        job=self.seed(); evidence=self.review_evidence(job,'reviewer','2'*32,'fixture-reviewer')
+        terminal={'status':'needs_user','attempt':'prior-supervisor-receipt-preserved'}
+        job=self.store.update(job['id'],state='needs_user',phase='supervising',review=evidence,
+                              question='Supply actual hosted CI.',last_terminal=terminal)
+        self.app.action(job['id'],'resume',{'answer':'Prepare the same Draft candidate through the app.'})
+        with patch.object(self.engine,'launch') as launch:
+            self.engine.step(self.store.get(job['id']))
+        launch.assert_not_called(); current=self.store.get(job['id'])
+        self.assertEqual(current['phase'],'publishing');self.assertEqual(current['review'],evidence)
+        self.assertEqual(current['last_terminal'],terminal);self.assertEqual(current['calls'],job['calls'])
+        self.assertEqual(current['user_answers'][-1]['question'],'Supply actual hosted CI.')
+
+    def test_pending_ci_holds_supervisor_and_dispatches_each_workflow_once(self):
+        job=self.ready();job=self.store.update(job['id'],state='verifying',supervision=None,candidate_ci_requested=None)
+        self.repos.ci_state='pending'
+        with patch.object(self.engine,'launch') as launch:
+            self.engine.step(job);self.engine.step(self.store.get(job['id']))
+        launch.assert_not_called();self.assertEqual(len(self.repos.dispatches),2)
+        self.assertEqual(self.store.get(job['id'])['state'],'verifying')
+        with self.assertRaises(common.AppError):self.app.action(job['id'],'accept',{})
+
+    def test_unknown_dispatch_is_preserved_and_never_retransmitted(self):
+        job=self.ready();job=self.store.update(job['id'],state='verifying',supervision=None,candidate_ci_requested=None)
+        self.repos.ci_state='pending'
+        with patch.object(self.repos,'dispatch_candidate_workflow',side_effect=TimeoutError):
+            with self.assertRaises(common.AppError) as first:self.engine.step(job)
+        self.assertEqual(first.exception.code,'MAC_HOST_CI_DISPATCH_UNKNOWN')
+        current=self.store.get(job['id']);self.assertEqual(current['candidate_ci_dispatches'][0]['state'],'UNKNOWN')
+        with patch.object(self.repos,'dispatch_candidate_workflow') as dispatch:
+            with self.assertRaises(common.AppError) as second:self.engine.step(current)
+        self.assertEqual(second.exception.code,'MAC_HOST_CI_DISPATCH_UNKNOWN')
+        dispatch.assert_not_called()
+
+    def test_declared_astra_gate_cannot_be_removed_by_job_or_model_text(self):
+        job=self.ready(); bound=job['native_lineage']['binding']; original=self.source.program(bound)
+        for floor,gate,expected in [('A3','NONE','ARCHITECTURE'),('A3','RELEASE','RELEASE'),('A2','MILESTONE','MILESTONE')]:
+            program=copy.deepcopy(original)
+            node=next(n for n in program['scope']['nodes'] if n['id']==bound['node'])
+            node.update(audit_floor=floor,astra_gate=gate)
+            job['audit_requirement']={'required':False,'audit_receipt':'model claimed PASS'}
+            with patch.object(self.source,'program',return_value=program):
+                requirement=self.engine.pipeline.audit_requirement(job)
+                self.assertTrue(requirement['required']);self.assertEqual(requirement['astra_gate'],expected)
+                with self.assertRaisesRegex(common.AppError,'ASTRA_AUDIT_REQUIRED'):
+                    self.engine.pipeline.validate_inspection(job,refresh=False)
     def test_native_rework_keeps_the_original_node_id_and_full_spec(self):
         job=self.seed(status='fail')
         with patch('core.agents.command',return_value=['fixture-not-executed']), patch('core.subprocess.Popen'):
@@ -291,6 +350,46 @@ class MacPipelineTests(unittest.TestCase):
         self.assertEqual(self.worker.launched,1)
 
 
+class CandidateDispatchTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.repos=gitops.Repositories(Path(self.temp.name)/'workspaces')
+        self.job={'repository':'BeautifulMind-JT/kix-protocol','head':'c'*40,'branch':'aiops/native-fixture',
+                  'base_branch':'main','pr_url':'https://github.com/BeautifulMind-JT/kix-protocol/pull/9'}
+        self.pull={'state':'open','draft':True,'auto_merge':None,
+                   'head':{'sha':'c'*40,'ref':self.job['branch']},'base':{'ref':'main'}}
+        self.ref={'object':{'sha':'c'*40}}
+        self.workflow={'path':'.github/workflows/ktx-kernel.yml','state':'active'}
+    def api(self,path):
+        return self.pull if '/pulls/' in path else self.ref if '/git/ref/' in path else self.workflow
+    def test_dispatch_is_only_product_verification_of_bound_draft_head(self):
+        with patch.object(self.repos,'candidate_workflows',return_value=['ktx-kernel.yml']),\
+             patch.object(self.repos,'assert_binding'),patch.object(self.repos,'head',return_value='c'*40),\
+             patch.object(self.repos,'clean',return_value=True),patch('handoff.api',side_effect=self.api),\
+             patch('gitops.execute') as execute:
+            self.repos.dispatch_candidate_workflow(self.job,'ktx-kernel.yml')
+        argv=execute.call_args.args[0]
+        self.assertEqual(argv,['gh','api','--method','POST',
+            'repos/BeautifulMind-JT/kix-protocol/actions/workflows/ktx-kernel.yml/dispatches',
+            '-f','ref=aiops/native-fixture'])
+    def test_ready_auto_merge_or_changed_remote_head_cannot_be_dispatched(self):
+        for change in ('ready','auto_merge','head'):
+            self.pull['draft']=change!='ready';self.pull['auto_merge']={} if change=='auto_merge' else None
+            self.ref['object']['sha']='d'*40 if change=='head' else 'c'*40
+            with patch.object(self.repos,'candidate_workflows',return_value=['ktx-kernel.yml']),\
+                 patch.object(self.repos,'assert_binding'),patch.object(self.repos,'head',return_value='c'*40),\
+                 patch.object(self.repos,'clean',return_value=True),patch('handoff.api',side_effect=self.api),\
+                 patch('gitops.execute') as execute:
+                with self.assertRaises(common.AppError):self.repos.dispatch_candidate_workflow(self.job,'ktx-kernel.yml')
+                execute.assert_not_called()
+    def test_control_plane_vm_or_unadmitted_repository_workflows_are_not_routes(self):
+        with patch('gitops.execute') as execute:
+            with self.assertRaises(common.AppError):self.repos.dispatch_candidate_workflow(self.job,'control-plane-runtime.yml')
+            self.job['repository']='other/repo'
+            with self.assertRaises(common.AppError):self.repos.candidate_workflows(self.job)
+            execute.assert_not_called()
+
+
 class HostedCITests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
@@ -298,7 +397,8 @@ class HostedCITests(unittest.TestCase):
         self.job={'repository':'owner/kix','head':'c'*40,'native_lineage':{}}
         self.check={'head_sha':'c'*40,'name':'verified CI','status':'completed','conclusion':'success',
                     'app':{'slug':'github-actions'},'details_url':'https://github.com/owner/kix/actions/runs/7/job/8'}
-        self.run={'head_sha':'c'*40,'repository':{'full_name':'owner/kix'}}
+        self.run={'head_sha':'c'*40,'repository':{'full_name':'owner/kix'},'event':'workflow_dispatch',
+                  'name':'verified workflow','status':'completed','conclusion':'success'}
     def api(self,path): return {'total_count':1,'check_runs':[self.check]} if 'check-runs' in path else self.run
     def test_actual_actions_metadata_is_bound_to_exact_commit_and_run(self):
         with patch('handoff.api',side_effect=self.api): result=self.repos.hosted_checks(self.job,'c'*40)
@@ -320,6 +420,15 @@ class HostedCITests(unittest.TestCase):
     def test_incomplete_check_run_page_cannot_drop_a_failed_check(self):
         with patch('handoff.api',return_value={'total_count':101,'check_runs':[self.check]}), self.assertRaises(common.AppError):
             self.repos.hosted_checks(self.job,'c'*40)
+    def test_successful_job_in_incomplete_or_failed_workflow_is_not_pass(self):
+        for status,conclusion,expected in [('in_progress',None,'pending'),('completed','failure','failed')]:
+            self.run.update(status=status,conclusion=conclusion)
+            with patch('handoff.api',side_effect=self.api):result=self.repos.hosted_checks(self.job,'c'*40)
+            self.assertEqual(result['state'],expected)
+    def test_draft_skipped_check_is_missing_evidence_not_code_failure(self):
+        self.run['event']='pull_request';self.check['conclusion']='skipped'
+        with patch('handoff.api',side_effect=self.api):result=self.repos.hosted_checks(self.job,'c'*40)
+        self.assertEqual(result['state'],'pending');self.assertEqual(result['checks'],[])
     def test_codex_native_thread_identity_is_extracted_from_its_cli_event(self):
         folder=common.private_directory(Path(self.temp.name) / 'receipt')
         common.atomic_json(folder / 'last-message.json',report())

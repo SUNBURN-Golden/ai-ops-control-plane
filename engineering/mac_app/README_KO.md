@@ -15,6 +15,7 @@ GitHub 레포와 목표를 한 번 주면 계획 → 개발·테스트 → 독�
 - 실행 시간·종료 한도·최근 출력 관측·다음 재시도·다른 작업의 미확정 실행 대기를 구분해 표시합니다.
 - 결과 준비 및 필수 질문에 대한 Mac 알림. 알림 표시는 macOS 알림 설정을 따릅니다.
 - GitHub 검수용 draft PR 생성과 CI 확인. 앱의 검수 완료는 자동 병합·배포 명령이 아닙니다.
+- Mac canonical 노드는 독립 검토 → Draft 후보 게시 → 정확한 HEAD의 제품 CI → 필수 감사 적용 범위 → 최종 감리 순서로 진행합니다. Draft 게시만으로 완료·A3 PASS·사용자 검수 완료가 되지 않습니다.
 - 어떤 봇에서도 호출할 수 있는 로컬 CLI와 stdio MCP.
 - 기존 프로그램의 `handoff inspect/prepare/list/status` 인계 준비 경로. 원래 계획과 기록을 보존하며 실행 권한을 변경하지 않습니다. [사용과 한계](../docs/MAC_HANDOFF_PREPARATION_KO.md)를 확인하세요.
 - 종료된 로컬 이력·단순 등록과 canonical 실행 승인을 구분합니다. [차단 조건과 남은 호스트 계약](../docs/MAC_OWNERSHIP_GUARD_KO.md)을 확인하세요.

@@ -143,13 +143,43 @@ class Pipeline:
                     (bound['repository'].lower(),bound['task_id']))
         return True
 
+    def audit_requirement(self,job):
+        """Observe the admitted schema-v1 node's gate; never manufacture a receipt.
+
+        Defaults match the adopted program reader. A3 promotes to ARCHITECTURE
+        while a declared RELEASE remains reserved. Other nodes stay unchanged.
+        """
+        bound=job['native_lineage']['binding']; node_id=bound['node']
+        scope=self.source.program(bound)['scope']
+        require(scope['blob']==bound['plan_blob'],'MAC_HOST_AUDIT_SCOPE_UNVERIFIED')
+        nodes=[n for n in scope['nodes'] if n['id']==node_id]
+        require(len(nodes)==1,'MAC_HOST_AUDIT_SCOPE_UNVERIFIED')
+        node=nodes[0]; floor=node.get('audit_floor','A1'); gate=node.get('astra_gate','NONE')
+        require(floor in ('A0','A1','A2','A3') and gate in ('NONE','MILESTONE','ARCHITECTURE','RELEASE'),
+                'MAC_HOST_AUDIT_SCOPE_UNVERIFIED')
+        if floor=='A3' and gate!='RELEASE': gate='ARCHITECTURE'
+        return {'node':node_id,'head':job['head'],'audit_floor':floor,'astra_gate':gate,
+                'required':floor=='A3' or gate!='NONE','source':scope['path'],
+                'plan_commit':job['base_sha'],'plan_blob':scope['blob'],
+                'authority':'engineering/AGENTS.md sections 8 and 14; pinned program node',
+                'audit_receipt':None}
+
+    def validate_candidate(self,job,*,refresh=True):
+        self.assert_job(job,refresh=refresh)
+        require(self.repos.head(job)==job['head'] and self.repos.clean(job),'MAC_HOST_INSPECTION_CHANGED')
+        self.validate_reviews(job,('review',))
+
     def validate_inspection(self,job,*,refresh=True):
         self.assert_job(job,refresh=refresh)
         require(job['pr_url'] and job['ci'] and job['ci']['state']=='passed' and job['ci']['checks'] and
                 job['ci'].get('head')==job['head'] and job['ci'].get('source')=='GITHUB_ACTIONS_API' and
                 self.repos.head(job)==job['head'] and self.repos.clean(job),'MAC_HOST_LIVE_CI_REQUIRED')
+        self.validate_reviews(job,('review','supervision'))
+        require(not self.audit_requirement(job)['required'],'MAC_HOST_ASTRA_AUDIT_REQUIRED')
+
+    def validate_reviews(self,job,roles):
         identities=set(s for s in job.get('builder_sessions',[]) if s)
-        for role in ('review','supervision'):
+        for role in roles:
             evidence=job.get(role)
             require(evidence and evidence['head']==job['head'],'MAC_HOST_CURRENT_HEAD_REVIEW_REQUIRED')
             folder=self.store.directory / 'jobs' / job['id'] / evidence['attempt']

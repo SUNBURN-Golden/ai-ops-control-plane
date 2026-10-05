@@ -505,6 +505,13 @@ class Engine:
             self.store.update(job['id'], state='paused'); return
         if job.get('native_lineage'): self.pipeline.assert_job(job,refresh=True)
         phase = job['phase']
+        # A resumed old supervisor question retains its receipts and reviewer.
+        # Prepare the candidate instead of repeating a model before live CI.
+        if job.get('native_lineage') and phase=='supervising' and not job.get('candidate_published_head'):
+            self.pipeline.validate_candidate(job,refresh=False)
+            self.store.update(job['id'],phase='publishing',state='publishing')
+            self.store.event(job['id'],'candidate_preparation','같은 검토 HEAD의 Draft 후보와 CI를 최종 감리 전에 준비합니다.')
+            return
         if phase == 'preparing':
             self.store.update(job['id'], state='preparing')
             pins = self.repos.prepare(job)
@@ -516,6 +523,9 @@ class Engine:
             role = next(key for key, value in ROLE_STATE.items() if value == phase)
             self.launch(job, role)
         elif phase == 'publishing':
+            if job.get('native_lineage'):
+                if job['head']==job['base_sha']: raise AppError('MAC_HOST_DELIVERABLE_REQUIRED')
+                self.pipeline.validate_candidate(job,refresh=False)
             if self.repos.head(job) != job['head'] or not self.repos.clean(job):
                 return self.rework(job, ['검토 후 코드가 변경되었습니다. 변경을 확인하고 전체 검증을 다시 실행하세요.'])
             sync = self.repos.synchronize_base(job)
@@ -532,13 +542,24 @@ class Engine:
             # that unique branch. An uncertain response is never blindly retried.
             self.store.update(job['id'], state='publishing', publishing_started=True)
             url = self.repos.publish(job)
-            self.store.update(job['id'], pr_url=url, state='verifying', phase='verifying', not_before=time.time() + 60)
+            fields={'pr_url':url,'state':'verifying','phase':'verifying','not_before':time.time()+60}
+            if job.get('native_lineage'): fields['candidate_published_head']=job['head']
+            self.store.update(job['id'],**fields)
             self.store.event(job['id'], 'published', '검수용 PR을 만들었습니다. GitHub 검증 결과를 확인합니다.')
         elif phase == 'verifying':
-            if not self.inspected_head(job):
+            native=bool(job.get('native_lineage'))
+            if native: self.pipeline.validate_candidate(job,refresh=False)
+            if not native and not self.inspected_head(job):
                 return self.rework(job, ['CI 확인 중 코드나 검토 근거가 달라졌습니다. 현재 코드 전체를 다시 검증하세요.'])
             data = self.repos.checks(job)
             self.store.update(job['id'], ci=data)
+            if native and job.get('candidate_ci_requested')!=job['head']:
+                if data['state']=='passed':
+                    self.store.update(job['id'],candidate_ci_requested=job['head'])
+                    job=self.store.get(job['id'])
+                else:
+                    self.request_candidate_ci(self.store.get(job['id']))
+                    return
             if data['state'] == 'failed':
                 self.rework(job, ['GitHub CI 실패. 실패 원인을 수정하세요: ' + encoded(data['checks'])])
             elif data['state'] == 'pending':
@@ -548,10 +569,47 @@ class Engine:
                 if sync['changed']:
                     self.store.update(job['id'], verified_base=sync['base'], head=self.repos.head(job))
                     return self.rework(job, ['CI 확인 중 기준 브랜치가 변경되었습니다. 최신 기준에서 전체 검증을 다시 실행하세요.'])
+                if native:
+                    requirement=self.pipeline.audit_requirement(job)
+                    self.store.update(job['id'],audit_requirement=requirement)
+                    if requirement['required']:
+                        raise AppError('MAC_HOST_ASTRA_AUDIT_REQUIRED',
+                            '원래 노드의 '+requirement['audit_floor']+'/'+requirement['astra_gate']+
+                            ' 감사가 필요합니다. 지원된 고정 aiops-fable 경로의 현재 HEAD 보호 영수증이 없어 최종 검수를 보류합니다.')
+                    if not job.get('supervision'):
+                        self.store.update(job['id'],state='supervising',phase='supervising',not_before=0)
+                        self.store.event(job['id'],'candidate_ci','Draft 후보의 실제 CI를 수집했습니다. 필수 감사 적용 범위와 최종 감리를 확인합니다.')
+                        return
+                    self.pipeline.validate_inspection(self.store.get(job['id']),refresh=False)
                 self.store.update(job['id'], state='ready', not_before=0)
                 self.store.event(job['id'], 'ready', '개발·감사·감리를 마쳤습니다. 최종 결과를 검수해 주세요.')
                 self.notify(job, ready=True)
         else: raise AppError('UNKNOWN_PHASE')
+
+    def request_candidate_ci(self,job):
+        """One durable intent per head/workflow; uncertain sends never retry.
+
+        Application-owned product CI, not a VM development/ownership workflow.
+        """
+        self.pipeline.validate_candidate(job,refresh=False)
+        workflows=self.repos.candidate_workflows(job)
+        receipts=list(job.get('candidate_ci_dispatches') or [])
+        for workflow in workflows:
+            prior=[r for r in receipts if r['head']==job['head'] and r['workflow']==workflow]
+            if prior:
+                if len(prior)!=1 or prior[0]['state']!='SUBMITTED':
+                    raise AppError('MAC_HOST_CI_DISPATCH_UNKNOWN','CI 요청 결과가 미확인입니다. 기존 요청을 확인하기 전 재전송하지 않습니다.')
+                continue
+            item={'head':job['head'],'workflow':workflow,'state':'SUBMITTING','at':time.time()}
+            receipts.append(item)
+            self.store.update(job['id'],candidate_ci_dispatches=receipts)
+            try: self.repos.dispatch_candidate_workflow(job,workflow)
+            except Exception:
+                item['state']='UNKNOWN'; self.store.update(job['id'],candidate_ci_dispatches=receipts)
+                raise AppError('MAC_HOST_CI_DISPATCH_UNKNOWN','CI 요청 결과가 미확인입니다. 기존 요청을 확인하기 전 재전송하지 않습니다.')
+            item['state']='SUBMITTED'; self.store.update(job['id'],candidate_ci_dispatches=receipts)
+        self.store.update(job['id'],candidate_ci_requested=job['head'],not_before=time.time()+60)
+        self.store.event(job['id'],'candidate_ci_requested','Draft 상태를 유지한 채 현재 HEAD의 제품 검증 workflow를 한 번 요청했습니다.')
 
     def launch(self, job, role):
         with self.store.lock:
@@ -753,15 +811,19 @@ class Engine:
             evidence = {'head': attempt['head'], 'attempt': attempt['id'], 'profile': job['settings']['roles'][role],
                         'report': report, 'provider_evidence': provider_evidence}
             if role == 'reviewer':
-                self.store.update(job['id'], review=evidence, phase='supervising', state='supervising', feedback=[])
+                phase='publishing' if job.get('native_lineage') else 'supervising'
+                self.store.update(job['id'], review=evidence, phase=phase, state=phase, feedback=[],
+                                  candidate_published_head=None,candidate_ci_requested=None)
             else:
                 if not job['review'] or job['review']['head'] != attempt['head'] or job['review']['attempt'] == attempt['id']:
                     raise AppError('INDEPENDENT_REVIEW_REQUIRED')
-                self.store.update(job['id'], supervision=evidence, phase='publishing', state='publishing', feedback=[])
+                phase='verifying' if job.get('native_lineage') else 'publishing'
+                self.store.update(job['id'], supervision=evidence, phase=phase, state=phase, feedback=[])
 
     def rework(self, job, feedback, retry_at=0):
         self.store.update(job['id'], state='building', phase='building', correcting=True,
-                          feedback=feedback, review=None, supervision=None, ci=None, not_before=retry_at)
+                          feedback=feedback, review=None, supervision=None, ci=None, not_before=retry_at,
+                          candidate_published_head=None,candidate_ci_requested=None)
         self.store.event(job['id'], 'rework', '개발자가 검토 의견을 반영하고 테스트를 다시 진행합니다.')
 
     def inspected_head(self, job):

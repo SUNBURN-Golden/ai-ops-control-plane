@@ -231,18 +231,26 @@ class MacGenerationTests(unittest.TestCase):
         for draft,auto in ((False,None),(True,{'enabledBy':{'login':'fixture'}})):
             prior=[{'url':'https://github.com/owner/kix/pull/2','state':'OPEN','headRefOid':job['head'],
                     'isDraft':draft,'autoMergeRequest':auto}]
-            with patch('gitops.git'),patch('gitops.gh',return_value=common.encoded(prior)) as gh:
+            with patch('gitops.git'),patch('gitops.gh',side_effect=[common.encoded({'nameWithOwner':'owner/kix','isPrivate':True}),common.encoded(prior)]) as gh:
                 with self.assertRaisesRegex(common.AppError,'PUBLICATION_POLICY_REQUIRED'):gitops.Repositories.publish(repos,job)
                 self.assertTrue(all('merge' not in c.args and '--auto' not in c.args for c in gh.call_args_list))
     def test_new_pr_uses_draft_without_legacy_marker_or_automatic_merge(self):
         repos,job=self.publication_job()
-        with patch('gitops.git'),patch('gitops.gh',side_effect=['[]','https://github.com/owner/kix/pull/2']) as gh:
+        with patch('gitops.git'),patch('gitops.gh',side_effect=[common.encoded({'nameWithOwner':'owner/kix','isPrivate':True}),'[]','https://github.com/owner/kix/pull/2']) as gh:
             self.assertEqual(gitops.Repositories.publish(repos,job),'https://github.com/owner/kix/pull/2')
-            self.assertIn('--draft',gh.call_args_list[1].args)
+            self.assertIn('--draft',gh.call_args_list[-1].args)
             self.assertTrue(all('merge' not in c.args and '--auto' not in c.args for c in gh.call_args_list))
         body=(self.store.directory/'jobs'/job['id']/'pr-body.md').read_text()
         self.assertIn(job['native_lineage']['binding']['generation_id'],body)
         self.assertNotIn('ASTRA_TASK_KEY_V1',body);self.assertNotIn('TASK ENVELOPE v4',body)
+    def test_candidate_publication_requires_exact_private_target_before_push(self):
+        repos,job=self.publication_job()
+        for metadata in ({'nameWithOwner':'owner/kix','isPrivate':False},
+                         {'nameWithOwner':'different/repo','isPrivate':True},[]):
+            with patch('gitops.git') as git,patch('gitops.gh',return_value=common.encoded(metadata)):
+                with self.assertRaises(common.AppError) as caught:gitops.Repositories.publish(repos,job)
+                self.assertEqual(caught.exception.code,'MAC_HOST_CANDIDATE_PUBLICATION_SCOPE_REQUIRED')
+                git.assert_not_called()
     def test_isolated_native_checkout_never_reuses_legacy_branch_or_folder(self):
         bound=self.adopt();work=self.source.call('read',bound).document['work']
         native=native_transfer.NativeWorker(self.store.directory,self.store.settings);calls=[]

@@ -197,6 +197,10 @@ class Repositories:
             if job.get('generation_policy') != POLICY: raise AppError('MAC_GENERATION_PUBLICATION_POLICY_REQUIRED')
         self.assert_binding(job)
         if self.head(job) != job['head'] or not self.clean(job): raise AppError('STALE_PUBLISH_HEAD')
+        if job.get('native_lineage'):
+            metadata=parse_json(gh(job['repository'],'repo','view','--json','nameWithOwner,isPrivate'))
+            if not isinstance(metadata,dict) or metadata.get('nameWithOwner','').lower()!=job['repository'].lower() or metadata.get('isPrivate') is not True:
+                raise AppError('MAC_HOST_CANDIDATE_PUBLICATION_SCOPE_REQUIRED')
         checkout = self.path(job)
         git(checkout, 'push', '--porcelain', 'origin', 'HEAD:refs/heads/' + job['branch'], timeout=180)
         fields='url,state,headRefOid'+(',isDraft,autoMergeRequest' if generation else '')
@@ -211,8 +215,8 @@ class Repositories:
         body = '\n'.join([
             '## 요청과 결과', job['goal'], '', job.get('summary', ''), '',
             '## 검증', f"- 작업: `{job['id']}`", f"- 기준: `{job['base_sha']}`", f"- 검토한 HEAD: `{job['head']}`",
-            '- 작성 세션과 분리된 감사·감리 세션 결과를 앱에 보관했습니다. 기존 보호 서비스의 A3 증명이나 CI 결과를 대체하지 않습니다.',
-            '- 최종 사용자 검수 대기 중입니다. 이 앱은 자동으로 병합·배포하지 않습니다.', '',
+            '- 작성 세션과 분리된 검토 근거를 앱에 보관합니다. 기존 보호 서비스의 A3 증명이나 CI 결과를 대체하지 않습니다.',
+            '- Draft 후보입니다. 실제 CI·필수 감사·최종 감리 완료 전에는 검수 준비 상태가 아닙니다. 자동 병합·배포는 수행하지 않습니다.', '',
             '## 계획', *[f"- {task['title']}: {'; '.join(task['acceptance'])}" for task in job['plan']['tasks']], '',
             '## 모델 구성', *[f"- {role}: {config['provider']} / {config['model'] or 'CLI configured default'}" for role, config in job['settings']['roles'].items()],
         ])
@@ -232,10 +236,15 @@ class Repositories:
         return url
 
     def checks(self, job):
-        data = parse_json(gh(job['repository'], 'pr', 'view', job['branch'], '--json', 'headRefOid,statusCheckRollup,url,state'))
+        fields='headRefOid,statusCheckRollup,url,state'
+        if job.get('native_lineage'): fields+=',isDraft,autoMergeRequest'
+        data = parse_json(gh(job['repository'], 'pr', 'view', job['branch'], '--json', fields))
         if data['headRefOid'] != job['head'] or data['state'] != 'OPEN':
             raise AppError('STALE_REMOTE_HEAD')
-        if job.get('native_lineage'): return self.hosted_checks(job,job['head'])
+        if job.get('native_lineage'):
+            if data.get('isDraft') is not True or data.get('autoMergeRequest') is not None:
+                raise AppError('MAC_GENERATION_PUBLICATION_POLICY_REQUIRED')
+            return self.hosted_checks(job,job['head'])
         checks = []
         for row in data.get('statusCheckRollup') or []:
             status = row.get('conclusion') if row.get('status') == 'COMPLETED' else row.get('status') or row.get('state')
@@ -260,6 +269,36 @@ class Repositories:
         return {'state': 'failed' if failed else 'pending' if pending else 'passed' if checks else 'not_configured',
                 'checks': checks}
 
+    def candidate_workflows(self,job):
+        """Bound product verification only; no control-plane/VM dispatch."""
+        if job['repository'].lower()!='beautifulmind-jt/kix-protocol':
+            raise AppError('MAC_HOST_DRAFT_CI_ROUTE_REQUIRED')
+        workflows=['ktx-kernel.yml','protocol.yml']
+        for name in workflows:
+            raw=git(self.path(job),'show',job['head']+':.github/workflows/'+name)
+            if not re.search(r'(?m)^  workflow_dispatch:\s*$',raw):
+                raise AppError('MAC_HOST_DRAFT_CI_ROUTE_REQUIRED')
+        return workflows
+
+    def dispatch_candidate_workflow(self,job,workflow):
+        from handoff import api
+        if workflow not in ('ktx-kernel.yml','protocol.yml'): raise AppError('MAC_HOST_DRAFT_CI_ROUTE_REQUIRED')
+        if workflow not in self.candidate_workflows(job): raise AppError('MAC_HOST_DRAFT_CI_ROUTE_REQUIRED')
+        self.assert_binding(job)
+        if self.head(job)!=job['head'] or not self.clean(job): raise AppError('STALE_PUBLISH_HEAD')
+        repo=job['repository']; match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/pull/([0-9]+)',job['pr_url'] or '')
+        if not match: raise AppError('MAC_HOST_CANDIDATE_BINDING_UNVERIFIED')
+        pull=api('repos/'+repo+'/pulls/'+match.group(1))
+        ref=api('repos/'+repo+'/git/ref/heads/'+job['branch'])
+        target=api('repos/'+repo+'/actions/workflows/'+workflow)
+        if not (pull.get('state')=='open' and pull.get('draft') is True and pull.get('auto_merge') is None and
+                pull.get('head',{}).get('sha')==job['head'] and pull.get('head',{}).get('ref')==job['branch'] and
+                pull.get('base',{}).get('ref')==job['base_branch'] and ref.get('object',{}).get('sha')==job['head'] and
+                target.get('path')=='.github/workflows/'+workflow and target.get('state')=='active'):
+            raise AppError('MAC_HOST_CANDIDATE_BINDING_UNVERIFIED')
+        execute(['gh','api','--method','POST','repos/'+repo+'/actions/workflows/'+workflow+'/dispatches',
+                 '-f','ref='+job['branch']])
+
     def hosted_checks(self,job,head):
         """Mac node CI comes from real GitHub Actions checks/runs, not status text."""
         from handoff import api
@@ -279,8 +318,15 @@ class Repositories:
             if run.get('head_sha')!=head or (run.get('repository') or {}).get('full_name','').lower()!=repo.lower():
                 raise AppError('MAC_HOST_CI_OBSERVATION_UNVERIFIED')
             status=check.get('conclusion') if check.get('status')=='completed' else check.get('status')
+            # A Draft's skipped PR checks are not passes or code failures. The
+            # exact-head manual product verification supplies the missing jobs.
+            if run.get('event')=='pull_request' and status in ('skipped','neutral'): continue
+            if status=='success' and (run.get('status')!='completed' or run.get('conclusion')!='success'):
+                status='in_progress' if run.get('status')!='completed' else 'failure'
             checks.append({'name':check.get('name'),'status':str(status).upper(),'url':check['details_url'],
-                           'head':head,'run_id':int(run_id)})
+                           'head':head,'run_id':int(run_id),'event':run.get('event'),
+                           'workflow_name':run.get('name'),'run_status':run.get('status'),
+                           'run_conclusion':run.get('conclusion')})
         registry=Path(__file__).with_name('projects.json')
         if not registry.exists(): registry=Path(__file__).parent.parent / '.github/control-plane/projects.json'
         config=read_json(registry).get(repo,{}) if registry.exists() else {}

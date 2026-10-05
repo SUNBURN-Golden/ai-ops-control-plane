@@ -10,7 +10,7 @@ import stat
 import tempfile
 from provider_catalog import CATALOG
 
-VERSION = '0.3.11'
+VERSION = '0.3.12'
 REPORT_LIMIT = 2 * 1024 * 1024
 JOB_RECORD_LIMIT = 16 * 1024 * 1024
 JOB_CONTROL_RESERVE = 1024 * 1024
