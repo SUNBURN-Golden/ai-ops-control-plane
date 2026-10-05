@@ -129,6 +129,8 @@ python3 engineering/mac_app/aiops.py pause JOB_ID
 
 0.3.17은 이미 병합된 PR의 Owner 검수에서 검토 HEAD의 GitHub Actions 결과를 직접 확인합니다. 닫힌 PR을 열린 Draft 후보로 조회해서 `STALE_REMOTE_HEAD`로 거절하던 경로를 고칩니다. 열린 후보의 Draft 조건, 명시적 승인, 독립 검토와 실제 병합 커밋의 ancestry·잠금·CI 검증은 유지합니다.
 
+0.3.18은 격리된 최종 감리에 호스트가 인증된 읽기로 확인한 PR·run·job·step 메타데이터를 전달합니다. 대상 작업·검토 HEAD와 자료 해시를 실행 입력에 바인딩하며 원시 로그·자격증명·전체 원장은 전달하지 않습니다. 감리의 네트워크 권한을 확대하거나 PASS를 주입하지 않습니다. 독립 감리 후 실제 CI·Draft 상태·User 검수·병합 후 검증 조건을 계속 적용합니다.
+
 추가 Python 패키지 없이 앱 자체를 실행할 수 있습니다.
 
 ```bash

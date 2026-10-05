@@ -9,7 +9,7 @@ import time
 
 import agents
 import admission
-from common import AppError, encoded, parse_json, read_json
+from common import AppError, digest, encoded, parse_json, read_json
 from program_scope import load_scope
 
 
@@ -57,6 +57,11 @@ def prepare_host_checkout(checkout, branch, base_sha, plan_blob):
         raise AppError('MAC_HOST_PROGRAM_REVISION_CHANGED')
     return {'operation':'git fetch origin '+branch,'branch':branch,'base_sha':base_sha,
             'plan_blob':plan_blob,'checkout_head':before,'fetched_head':fetched,'at':time.time()}
+
+
+def supervision_binding(job):
+    return digest({key:job.get(key) for key in
+                   ('id','head','pr_url','ci','review','plan','native_lineage')})
 
 
 class Repositories:
@@ -342,6 +347,59 @@ class Repositories:
         pending=not any(c['status']=='SUCCESS' for c in checks) or any(c['status'] not in ('SUCCESS','SKIPPED','NEUTRAL') for c in checks)
         return {'state':'failed' if failed else 'pending' if pending else 'passed','checks':checks,'head':head,
                 'source':'GITHUB_ACTIONS_API'}
+
+    def supervision_evidence(self,job):
+        """Sanitized live reads for the isolated inspector; never a model verdict."""
+        from handoff import api
+        def require(value):
+            if not value: raise AppError('MAC_HOST_LIVE_CI_REQUIRED')
+        repo,head=job['repository'],job['head']
+        match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/pull/([0-9]+)',job.get('pr_url') or '')
+        require(job.get('native_lineage') and match and job.get('candidate_published_head')==head)
+        paths={'.github/workflows/'+name for name in self.candidate_workflows(job)}
+        def pull():
+            value=api('repos/'+repo+'/pulls/'+match.group(1))
+            require(value.get('html_url')==job['pr_url'] and value.get('state')=='open' and
+                    value.get('draft') is True and value.get('auto_merge') is None and
+                    value.get('head',{}).get('sha')==head and value['head'].get('ref')==job['branch'] and
+                    value.get('base',{}).get('ref')==job['base_branch'])
+            return {'url':value['html_url'],'number':int(match.group(1)),'state':value['state'],
+                    'draft':value['draft'],'auto_merge':None,'head':head,'head_branch':value['head']['ref'],
+                    'base_branch':value['base']['ref'],'base_head':value['base']['sha']}
+        before=pull();ci=self.checks(job)
+        require(ci.get('state')=='passed' and ci.get('head')==head and ci.get('source')=='GITHUB_ACTIONS_API')
+        runs=[];seen=set()
+        for check in ci['checks']:
+            if check.get('status')!='SUCCESS' or check.get('run_id') in seen: continue
+            run_id=check.get('run_id'); require(type(run_id) is int and run_id>0)
+            seen.add(run_id);run=api('repos/'+repo+'/actions/runs/'+str(run_id))
+            require(run.get('head_sha')==head and run.get('head_branch')==job['branch'] and
+                    run.get('repository',{}).get('full_name','').lower()==repo.lower() and run.get('path') in paths and
+                    run.get('status')=='completed' and run.get('conclusion')=='success' and
+                    run.get('html_url')=='https://github.com/'+repo+'/actions/runs/'+str(run_id))
+            response=api('repos/'+repo+'/actions/runs/'+str(run_id)+'/jobs?per_page=100')
+            jobs=response.get('jobs');require(isinstance(jobs,list) and type(response.get('total_count')) is int and
+                0<len(jobs)==response['total_count']<=100)
+            selected=[row for row in jobs if row.get('name')==check['name']]
+            require(len(selected)==1);row=selected[0]
+            require(row.get('head_sha')==head and row.get('status')=='completed' and row.get('conclusion')=='success' and
+                    type(row.get('id')) is int and row['id']>0 and
+                    row.get('html_url')==run['html_url']+'/job/'+str(row['id']))
+            steps=row.get('steps');require(isinstance(steps,list) and 0<len(steps)<=256)
+            for step in steps:
+                require(isinstance(step,dict) and isinstance(step.get('name'),str) and 0<len(step['name'])<=512 and
+                        type(step.get('number')) is int and step['number']>0 and step.get('status')=='completed' and
+                        step.get('conclusion') in ('success','skipped','neutral','failure','cancelled','timed_out'))
+            runs.append({'id':run_id,'url':run['html_url'],'workflow':run['path'],'event':run['event'],
+                         'head':head,'head_branch':run['head_branch'],'status':run['status'],'conclusion':run['conclusion'],
+                         'job':{'id':row['id'],'name':row['name'],'url':row['html_url'],'head':head,
+                                'status':row['status'],'conclusion':row['conclusion'],
+                                'steps':[{k:s.get(k) for k in ('name','number','status','conclusion','started_at','completed_at')}
+                                         for s in steps]}})
+        require({run['workflow'] for run in runs}==paths)
+        require(pull()==before)
+        return {'schema_version':1,'source':'AUTHENTICATED_GITHUB_API','observed_at':time.time(),
+                'job_binding':supervision_binding(job),'repository':repo,'head':head,'pr':before,'runs':runs}
 
     def merge_candidate(self,job):
         from handoff import api

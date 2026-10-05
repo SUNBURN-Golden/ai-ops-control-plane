@@ -218,9 +218,25 @@ class Pipeline:
             require(evidence and evidence['head']==job['head'],'MAC_HOST_CURRENT_HEAD_REVIEW_REQUIRED')
             folder=self.store.directory / 'jobs' / job['id'] / evidence['attempt']
             request=self.source._private_json(folder / 'request.json')
-            expected=digest({'job':job['id'],'attempt':evidence['attempt'],'head':job['head'],
-                             'role':'reviewer' if role=='review' else 'supervisor','profile':evidence['profile'],
-                             'plan':job['plan'],'task':None})
+            material={'job':job['id'],'attempt':evidence['attempt'],'head':job['head'],
+                      'role':'reviewer' if role=='review' else 'supervisor','profile':evidence['profile'],
+                      'plan':job['plan'],'task':None}
+            if 'host_verification_sha256' in request:
+                proof=request['host_verification_sha256']
+                require(role=='supervision' and isinstance(proof,str) and
+                        re.fullmatch(r'[0-9a-f]{64}',proof),'MAC_HOST_PRIVATE_REVIEW_REQUIRED')
+                try:
+                    context=parse_json(request['prompt'].split('\nTRUSTED JOB CONTEXT\n')[1].split('\nOUTPUT CONTRACT\n')[0])
+                    snapshot=context['host_verification']
+                except (KeyError,IndexError,TypeError,AttributeError,AppError):
+                    raise AppError('MAC_HOST_PRIVATE_REVIEW_REQUIRED') from None
+                require(isinstance(snapshot,dict) and digest(snapshot)==proof and
+                        snapshot.get('source')=='AUTHENTICATED_GITHUB_API' and snapshot.get('head')==job['head'] and
+                        snapshot.get('repository')==job['repository'] and context.get('id')==job['id'] and
+                        context.get('exact_head')==job['head'] and context.get('plan')==job['plan'] and
+                        context.get('canonical_binding')==job['native_lineage']['binding'],'MAC_HOST_PRIVATE_REVIEW_REQUIRED')
+                material['host_verification_sha256']=proof
+            expected=digest(material)
             receipt=self.source.private_receipt(folder,{'id':request['attempt_id'],'binding':request['binding']})
             require(request['attempt_id']==evidence['attempt'] and request['binding']==expected and
                 request['host_directory']==str(self.store.directory.resolve()) and request['checkout']==str(self.repos.path(job).resolve()) and

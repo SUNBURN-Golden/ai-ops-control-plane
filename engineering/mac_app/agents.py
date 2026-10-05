@@ -81,7 +81,14 @@ def prompt(job, role, head):
     context.update(role=role, exact_head=head, current_task=task)
     if role=='supervisor' and job.get('native_lineage'):
         context.update(candidate_pr=job.get('pr_url'),hosted_ci=job.get('ci'),
-                       audit_requirement=job.get('audit_requirement'))
+                       audit_requirement=job.get('audit_requirement'),
+                       host_verification=job.get('supervisor_verification'))
+        instruction += (' The application obtains fresh authenticated GitHub PR/run/job/step metadata before this invocation. '
+                        'host_verification contains only scoped observations bound to this job and exact head; it is not a verdict. '
+                        'Your isolated role has no GitHub credentials or external network grant. Independently evaluate these '
+                        'observations against the pinned workflows, required executed steps, exact head, Draft policy and actual source. '
+                        'Missing, inconsistent or skipped required evidence cannot become PASS. Request missing application evidence '
+                        'without widening the sandbox. The application rechecks live CI and the candidate after your report.')
         instruction += (' Inspect the node-specific audit requirement against original authority. '
                         'A2/NONE does not itself require Fable; M5 assigns Fable the required Astra audits, '
                         'not routine independent review. A3/architecture/milestone/release and actual contract or '

@@ -75,6 +75,10 @@ class FixtureRepositories(gitops.Repositories):
     def hosted_checks(self,job,head,*,post_merge=False):
         return {'state':self.ci_state,'checks':[{'name':'fixture actual-API substitute','status':'SUCCESS'}],
                 'head':head,'source':'GITHUB_ACTIONS_API'}
+    def supervision_evidence(self,job):
+        return {'schema_version':1,'source':'AUTHENTICATED_GITHUB_API','fixture_only':True,
+                'repository':job['repository'],'head':job['head'],
+                'job_binding':gitops.supervision_binding(job),'pr':{'draft':True},'runs':[]}
     def merged(self,job):
         if not self.merge_ready: raise common.AppError('MAC_HOST_POST_MERGE_CI_REQUIRED')
         return {'reviewed_head':job['head'],'merge_head':'d'*40,'default_head':'d'*40,
@@ -82,6 +86,48 @@ class FixtureRepositories(gitops.Repositories):
 
 
 class MacPipelineTests(unittest.TestCase):
+    def test_supervisor_request_binds_host_observations_without_persisting_a_verdict(self):
+        job=self.seed()
+        job=self.store.update(job['id'],state='supervising',phase='supervising',pr_url='https://github.com/owner/kix/pull/2',
+            candidate_published_head=job['head'],ci=self.repos.hosted_checks(job,job['head']))
+        with patch('core.agents.command',return_value=['fixture-not-executed']),patch('core.subprocess.Popen'):
+            self.engine.launch(job,'supervisor')
+        current=self.store.get(job['id']);attempt=current['attempt']
+        request=common.read_json(self.store.directory/'jobs'/job['id']/attempt['id']/'request.json')
+        context=common.parse_json(request['prompt'].split('\nTRUSTED JOB CONTEXT\n')[1].split('\nOUTPUT CONTRACT\n')[0])
+        bundle=context['host_verification'];proof=common.digest(bundle)
+        self.assertEqual(request['host_verification_sha256'],proof)
+        self.assertEqual(attempt['host_verification_sha256'],proof)
+        self.assertEqual(request['binding'],common.digest({'job':job['id'],'attempt':attempt['id'],'head':job['head'],
+            'role':'supervisor','profile':job['settings']['roles']['supervisor'],'plan':job['plan'],'task':None,
+            'host_verification_sha256':proof}))
+        self.assertNotIn('supervisor_verification',current)
+        self.assertIsNone(current['supervision'])
+        self.assertIn('Missing, inconsistent or skipped required evidence cannot become PASS',request['prompt'])
+
+    def test_missing_live_evidence_blocks_before_a_supervisor_reservation_or_model(self):
+        job=self.seed();job=self.store.update(job['id'],state='supervising',phase='supervising')
+        with patch.object(self.repos,'supervision_evidence',side_effect=common.AppError('MAC_HOST_LIVE_CI_REQUIRED')),\
+             patch('core.subprocess.Popen') as spawn:
+            with self.assertRaisesRegex(common.AppError,'MAC_HOST_LIVE_CI_REQUIRED'):
+                self.engine.launch(job,'supervisor')
+        spawn.assert_not_called();current=self.store.get(job['id'])
+        self.assertEqual(current['calls'],job['calls']);self.assertIsNone(current['attempt'])
+
+    def test_changed_host_observations_do_not_validate_as_the_original_private_review(self):
+        job=self.ready();job=self.store.update(job['id'],state='supervising',phase='supervising',supervision=None)
+        with patch('core.agents.command',return_value=['fixture-not-executed']),patch('core.subprocess.Popen'):
+            self.engine.launch(job,'supervisor')
+        job=self.store.get(job['id']);attempt=job['attempt'];folder=self.store.directory/'jobs'/job['id']/attempt['id']
+        private_outcome(folder,attempt,report(job['head']),profile=job['settings']['roles']['supervisor'],sid='fixture-new-supervisor')
+        self.engine.observe(job);job=self.store.get(job['id'])
+        self.engine.pipeline.validate_reviews(job,('review','supervision'))
+        request=common.read_json(folder/'request.json')
+        request['prompt']=request['prompt'].replace('"fixture_only":true','"fixture_only":false')
+        common.atomic_json(folder/'request.json',request)
+        with self.assertRaisesRegex(common.AppError,'MAC_HOST_PRIVATE_REVIEW_REQUIRED'):
+            self.engine.pipeline.validate_reviews(job,('review','supervision'))
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.store=core.Store(Path(self.temp.name) / 'app'); self.addCleanup(self.store.close)
@@ -652,6 +698,91 @@ class HostedCITests(unittest.TestCase):
         (folder / 'stdout.log').write_text('{"type":"thread.started","thread_id":"fixture-thread-id"}\n')
         result=agents.completion({'provider':'codex','model':''},folder)
         self.assertEqual(result['session_id'],'codex-cli:fixture-thread-id')
+
+
+class LiveSupervisionEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.repos=gitops.Repositories(self.temp.name);self.head='c'*40;self.repo='BeautifulMind-JT/kix-protocol'
+        self.url='https://github.com/'+self.repo
+        self.job={'id':'fixture','repository':self.repo,'head':self.head,'branch':'aiops/fixture','base_branch':'main',
+                  'pr_url':self.url+'/pull/2','candidate_published_head':self.head,'native_lineage':{'fixture':'lineage'},
+                  'ci':{'head':self.head},'review':{'head':self.head},'plan':{'fixture':'scope'}}
+        self.pull={'html_url':self.job['pr_url'],'state':'open','draft':True,'auto_merge':None,
+                   'head':{'sha':self.head,'ref':self.job['branch']},'base':{'ref':'main','sha':'b'*40},
+                   'body':'PRIVATE_BLOB_MUST_NOT_BE_FORWARDED'}
+        self.runs={};self.jobs={};checks=[]
+        for rid,name,path in ((42,'kernel','ktx-kernel.yml'),(43,'protocol','protocol.yml')):
+            url=self.url+'/actions/runs/'+str(rid)
+            checks.append({'name':name,'status':'SUCCESS','run_id':rid})
+            self.runs[rid]={'head_sha':self.head,'head_branch':self.job['branch'],'repository':{'full_name':self.repo},
+                'path':'.github/workflows/'+path,'status':'completed','conclusion':'success',
+                'html_url':url,'event':'workflow_dispatch','secret':'PRIVATE_BLOB_MUST_NOT_BE_FORWARDED'}
+            self.jobs[rid]={'total_count':1,'jobs':[{'id':rid+100,'name':name,'head_sha':self.head,
+                'status':'completed','conclusion':'success','html_url':url+'/job/'+str(rid+100),
+                'steps':[{'name':'Fixture executed check','number':1,'status':'completed','conclusion':'success',
+                          'started_at':'fixture-start','completed_at':'fixture-end','secret':'PRIVATE_BLOB_MUST_NOT_BE_FORWARDED'},
+                         {'name':'Optional fixture artifact','number':2,'status':'completed','conclusion':'skipped'}]}]}
+        self.ci={'state':'passed','head':self.head,'source':'GITHUB_ACTIONS_API','checks':checks}
+        self.patchers=[patch.object(self.repos,'candidate_workflows',return_value=['ktx-kernel.yml','protocol.yml']),
+                       patch.object(self.repos,'checks',side_effect=lambda job:copy.deepcopy(self.ci)),
+                       patch('handoff.api',side_effect=self.api)]
+        for p in self.patchers:p.start();self.addCleanup(p.stop)
+    def api(self,path):
+        if path.endswith('/pulls/2'):return copy.deepcopy(self.pull)
+        rid=int(path.split('/actions/runs/')[1].split('/')[0])
+        return copy.deepcopy(self.jobs[rid] if '/jobs?' in path else self.runs[rid])
+    def test_live_observations_are_scoped_sanitized_and_keep_skips_visible(self):
+        value=self.repos.supervision_evidence(self.job)
+        self.assertEqual(value['job_binding'],gitops.supervision_binding(self.job))
+        self.assertEqual(value['head'],self.head);self.assertTrue(value['pr']['draft'])
+        self.assertEqual(len(value['runs']),2)
+        self.assertEqual(value['runs'][0]['job']['steps'][1]['conclusion'],'skipped')
+        text=common.encoded(value)
+        self.assertNotIn('PRIVATE_BLOB_MUST_NOT_BE_FORWARDED',text)
+        self.assertNotIn('verdict',value);self.assertNotIn('approval',value)
+    def test_stale_or_non_draft_pr_cannot_supply_evidence(self):
+        original=copy.deepcopy(self.pull)
+        for field,value in (('draft',False),('state','closed'),('auto_merge',{'enabled':True})):
+            with self.subTest(field=field):
+                self.pull=copy.deepcopy(original);self.pull[field]=value
+                with self.assertRaisesRegex(common.AppError,'MAC_HOST_LIVE_CI_REQUIRED'):
+                    self.repos.supervision_evidence(self.job)
+        self.pull=original;self.pull['head']['sha']='d'*40
+        with self.assertRaisesRegex(common.AppError,'MAC_HOST_LIVE_CI_REQUIRED'):
+            self.repos.supervision_evidence(self.job)
+    def test_wrong_run_or_job_head_and_unfinished_runs_are_rejected(self):
+        run=copy.deepcopy(self.runs[42]);job=copy.deepcopy(self.jobs[42])
+        for field,value in (('head_sha','d'*40),('status','in_progress'),('path','.github/workflows/control-plane.yml')):
+            with self.subTest(field=field):
+                self.runs[42]=copy.deepcopy(run);self.runs[42][field]=value
+                with self.assertRaisesRegex(common.AppError,'MAC_HOST_LIVE_CI_REQUIRED'):
+                    self.repos.supervision_evidence(self.job)
+        self.runs[42]=run;self.jobs[42]=job;self.jobs[42]['jobs'][0]['head_sha']='d'*40
+        with self.assertRaisesRegex(common.AppError,'MAC_HOST_LIVE_CI_REQUIRED'):
+            self.repos.supervision_evidence(self.job)
+    def test_missing_steps_or_truncated_job_observation_cannot_pass(self):
+        original=copy.deepcopy(self.jobs[42])
+        self.jobs[42]['jobs'][0]['steps']=[]
+        with self.assertRaisesRegex(common.AppError,'MAC_HOST_LIVE_CI_REQUIRED'):
+            self.repos.supervision_evidence(self.job)
+        self.jobs[42]=original;self.jobs[42]['total_count']=2
+        with self.assertRaisesRegex(common.AppError,'MAC_HOST_LIVE_CI_REQUIRED'):
+            self.repos.supervision_evidence(self.job)
+    def test_pending_live_ci_is_not_replaced_by_stored_success(self):
+        self.ci['state']='pending'
+        with self.assertRaisesRegex(common.AppError,'MAC_HOST_LIVE_CI_REQUIRED'):
+            self.repos.supervision_evidence(self.job)
+    def test_pr_change_during_collection_is_detected(self):
+        original=self.api;calls=[]
+        def moving(path):
+            if path.endswith('/pulls/2'):
+                calls.append(path)
+                if len(calls)==2:self.pull['head']['sha']='d'*40
+            return original(path)
+        with patch('handoff.api',side_effect=moving):
+            with self.assertRaisesRegex(common.AppError,'MAC_HOST_LIVE_CI_REQUIRED'):
+                self.repos.supervision_evidence(self.job)
 
 
 if __name__=='__main__': unittest.main()

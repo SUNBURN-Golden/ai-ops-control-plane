@@ -28,7 +28,7 @@ from common import (AppError, DEFAULTS, TERMINAL, EVENT_RECORD_LIMIT, JOB_RECORD
                     JOB_CONTROL_RESERVE, WORKER_REQUEST_LIMIT, atomic_json, digest, encoded,
                     parse_json, private_directory, read_json, repository, text,
                     validate_plan, validate_settings)
-from gitops import Repositories
+from gitops import Repositories, supervision_binding
 from program_scope import bind_specs, validate_coverage
 
 DEFAULT_GOAL = '레포의 공식 문서에 명시된 산출물을 완성하고 테스트와 독립 검토를 거쳐 최종 검수할 수 있게 해 주세요. 일반적인 구현 판단은 직접 하고, 꼭 필요한 경우에만 질문해 주세요.'
@@ -625,6 +625,7 @@ class Engine:
                 self.pipeline.assert_job(context,refresh=True)
                 preparation=self.repos.prepare_native(context)
                 observation={'mode':'mac_local','binding':job['native_lineage']['binding']}
+                verification=self.repos.supervision_evidence(context) if role=='supervisor' else None
             else:
                 transport_guard.require_clear(self.store.directory)
                 observation = self.repos.execution_admission(context)
@@ -653,6 +654,10 @@ class Engine:
                 admission.require_native(observation)
                 transport_guard.require_clear(self.store.directory)
             if native_transfer.local_fenced(self.store.db): raise AppError('NATIVE_LOCAL_TRANSFER_UNRESOLVED')
+            if job.get('native_lineage') and role=='supervisor':
+                if verification['job_binding']!=supervision_binding(job) or verification['head']!=job['head']:
+                    raise AppError('MAC_HOST_LIVE_CI_REQUIRED')
+                job=dict(job,supervisor_verification=verification)
             self._launch(job, role)
 
     def _launch(self, job, role):
@@ -679,18 +684,25 @@ class Engine:
                 task=copy.deepcopy(job['plan']['tasks'][0])
                 task['instructions'] += '\n\nResolve all supplied findings and re-run the original node verification. Preserve this node identity and complete original spec.'
         context = dict(job, current_task=task)
-        binding = digest({'job': job['id'], 'attempt': attempt_id, 'head': head, 'role': role,
-                          'profile': profile, 'plan': job['plan'], 'task': task})
+        material={'job': job['id'], 'attempt': attempt_id, 'head': head, 'role': role,
+                  'profile': profile, 'plan': job['plan'], 'task': task}
+        verification=job.get('supervisor_verification')
+        if verification:
+            if role!='supervisor' or verification['head']!=head: raise AppError('MAC_HOST_LIVE_CI_REQUIRED')
+            material['host_verification_sha256']=digest(verification)
+        binding = digest(material)
         request = {'attempt_id': attempt_id, 'binding': binding, 'role': role,
                    'profile': profile, 'checkout': str(self.repos.path(job).resolve()),
                    'prompt': agents.prompt(context, role, head), 'timeout_seconds': job['settings']['session_minutes'] * 60}
         if job.get('native_lineage'): request['host_directory']=str(self.store.directory.resolve())
+        if verification: request['host_verification_sha256']=material['host_verification_sha256']
         if len((encoded(request) + '\n').encode()) > WORKER_REQUEST_LIMIT:
             raise AppError('WORKER_REQUEST_TOO_LARGE',
                            '실행 입력이 한도를 넘었습니다. 원래 계획을 줄이지 않고 전달할 실행 기록의 크기를 확인해야 합니다.')
         atomic_json(attempt_dir / 'request.json', request); atomic_json(attempt_dir / 'schema.json', agents.SCHEMA)
         attempt = {'id': attempt_id, 'binding': binding, 'head': head, 'role': role,
                    'started': time.time(), 'timeout_seconds': request['timeout_seconds'], 'task': task}
+        if verification: attempt['host_verification_sha256']=material['host_verification_sha256']
         self.store.update(job['id'], state=ROLE_STATE[role], attempt=attempt, calls=job['calls'] + 1)
         self.store.event(job['id'], role, {'planner': '레포를 읽고 실행 계획을 작성합니다.',
             'builder': '개발과 테스트를 진행합니다.', 'reviewer': '별도 세션에서 코드와 근거를 감사합니다.',
