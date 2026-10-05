@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -11,6 +12,19 @@ import agents
 import admission
 from common import AppError, digest, encoded, parse_json, read_json
 from program_scope import load_scope
+
+# The original roadmap-sync explicitly names this status header. These pins
+# permit exactly its reviewed two-line alignment, retaining every body byte.
+# They do not authorize another decision, scope revision, repository or path.
+ROADMAP_HEADER = {
+    'repository': 'BeautifulMind-JT/kix-protocol', 'node': 'roadmap-sync',
+    'base': '5155ed307c71917ba3442fc5e1fc4cb950efefdc',
+    'plan_blob': 'ff0f39a8129ca8b8d30818cce35c3d4e588872fc',
+    'spec_sha256': '6a732abbfd4833c02d3e474088035417665ca27f7ae17aae9e8383537564fe41',
+    'path': 'docs/decisions/TOKEN_LAYER_AND_RIGHTS_SCALE_SCOPE_20260929.md',
+    'before_blob': 'ae63ff63d25c08e21bc61769d5a2c235b865afef',
+    'after_blob': '2ceb88df12d1344b7d8e8eeb7738526a3a150c6e',
+}
 
 
 def execute(argv, cwd=None, timeout=120, allowed=(0,)):
@@ -162,6 +176,35 @@ class Repositories:
         if changed or git(self.path(job), 'diff', 'HEAD', '--', scope['path']):
             raise AppError('PROGRAM_SCOPE_CHANGED', '원래 프로그램 계획이 변경되었습니다. 기존 범위의 완료 조건을 바꿀 수 없습니다.')
 
+    def approved_roadmap_header(self, job, name):
+        """Match one frozen original spec and exact before/after document bytes."""
+        pin = ROADMAP_HEADER
+        if name != pin['path'] or job.get('repository') != pin['repository']: return False
+        try:
+            bound = job['native_lineage']['binding']
+            if (bound['authority_kind'] != 'MAC_LOCAL' or bound['repository'] != pin['repository'] or
+                bound['node'] != pin['node'] or bound['plan_commit'] != pin['base'] or
+                bound['plan_blob'] != pin['plan_blob'] or job['base_sha'] != pin['base'] or
+                job['program_scope']['blob'] != pin['plan_blob']): return False
+            scope = self.program_scope(job)
+            if not scope or scope['blob'] != pin['plan_blob']: return False
+            nodes = [node for node in scope['nodes'] if node['id'] == pin['node']]
+            tasks = job['plan']['tasks']
+            if len(nodes) != 1 or len(tasks) != 1: return False
+            node, task = nodes[0], tasks[0]
+            if (node.get('audit_floor') != 'A1' or node.get('astra_gate', 'NONE') != 'NONE' or
+                task['id'] != node['id'] or task['title'] != node['title'] or
+                task['instructions'] != node['spec'] or
+                hashlib.sha256(node['spec'].encode()).hexdigest() != pin['spec_sha256']): return False
+            checkout = self.path(job); target = checkout / name
+            if (target.is_symlink() or not target.is_file() or target.stat().st_nlink != 1 or
+                target.stat().st_mode & 0o111 or
+                not target.resolve().is_relative_to(checkout.resolve())): return False
+            return (git(checkout, 'rev-parse', pin['base'] + ':' + name) == pin['before_blob'] and
+                    git(checkout, 'hash-object', '--no-filters', '--', name) == pin['after_blob'])
+        except (KeyError, TypeError, AttributeError, OSError, AppError):
+            return False
+
     def checkpoint(self, job):
         self.assert_binding(job)
         self.assert_scope(job)
@@ -173,7 +216,8 @@ class Repositories:
         if job.get('base_sha'): names += git(checkout, 'diff', job.get('verified_base', job['base_sha']), 'HEAD', '--name-only', '-z')
         for name in names.split('\x00'):
             if name == 'AGENTS.md' or name.endswith('/AGENTS.md') or name.startswith(('.aiops/', 'RUNBOOKS/', 'docs/decisions/')):
-                raise AppError('AUTHORITY_EDIT_NEEDS_USER', '기준 계약 변경은 별도 결정을 남겨야 합니다: ' + name)
+                if not self.approved_roadmap_header(job, name):
+                    raise AppError('AUTHORITY_EDIT_NEEDS_USER', '기준 계약 변경은 별도 결정을 남겨야 합니다: ' + name)
             if name and re.search(r'(^|/)(\.env(\.[^/]+)?|id_rsa|id_ed25519|credentials\.json|[^/]+\.(pem|p12|key))$', name) and not name.endswith(('.example', '.sample', '.template')):
                 raise AppError('SENSITIVE_FILE_CHANGE', '자격증명 파일 변경을 제외해야 합니다: ' + name)
         if changed:

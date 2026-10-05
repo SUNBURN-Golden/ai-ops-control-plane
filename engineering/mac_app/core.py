@@ -267,6 +267,12 @@ class Store:
                 fields = {'state': job['phase'], 'pause_requested': False, 'question': None,
                           'not_before': 0, 'user_answers': answers, 'provider_error': None,
                           'blocker': None, 'failures': 0, 'failure_fingerprint': None}
+                terminal = job.get('last_terminal') or {}
+                if (job.get('native_lineage') and job['phase'] == 'building' and
+                    (job.get('blocker') or {}).get('code') == 'AUTHORITY_EDIT_NEEDS_USER' and
+                    terminal.get('role') == 'builder' and terminal.get('status') == 'complete' and
+                    terminal.get('exit_code') == 0):
+                    fields['checkpoint_retry'] = {'attempt': terminal['attempt'], 'head': terminal['head']}
                 if job['settings']['max_agent_calls'] and job['calls'] >= job['settings']['max_agent_calls']:
                     new_limit = self.settings()['max_agent_calls']
                     if new_limit and new_limit <= job['calls']:
@@ -505,6 +511,8 @@ class Engine:
             self.store.update(job['id'], state='paused'); return
         if job.get('native_lineage'): self.pipeline.assert_job(job,refresh=True)
         phase = job['phase']
+        if job.get('checkpoint_retry'):
+            return self.retry_checkpoint(job)
         # A resumed old supervisor question retains its receipts and reviewer.
         # Prepare the candidate instead of repeating a model before live CI.
         if job.get('native_lineage') and phase=='supervising' and not job.get('candidate_published_head'):
@@ -676,13 +684,7 @@ class Engine:
         if role != 'builder' and not self.repos.clean(job): raise AppError('READ_ONLY_INPUT_IS_DIRTY')
         head = self.repos.head(job)
         task = None
-        if role == 'builder':
-            task = {'id': 'integration-rework', 'title': '검토 의견과 통합 문제 수정',
-                    'instructions': '모든 피드백을 해결하고 전체 산출물을 유지하세요.',
-                    'acceptance': ['모든 피드백 해결', '전체 회귀 검증 통과'], 'depends_on': []} if job['correcting'] else job['plan']['tasks'][job['task_index']]
-            if job.get('native_lineage') and job['correcting']:
-                task=copy.deepcopy(job['plan']['tasks'][0])
-                task['instructions'] += '\n\nResolve all supplied findings and re-run the original node verification. Preserve this node identity and complete original spec.'
+        if role == 'builder': task = self.builder_task(job)
         context = dict(job, current_task=task)
         material={'job': job['id'], 'attempt': attempt_id, 'head': head, 'role': role,
                   'profile': profile, 'plan': job['plan'], 'task': task}
@@ -806,15 +808,7 @@ class Engine:
             self.store.update(job['id'], plan=plan, source_pins=pins, state='building', phase='building', feedback=[])
             self.store.event(job['id'], 'plan', str(len(plan['tasks'])) + '개 단계로 계획을 세웠습니다. 바로 개발을 진행합니다.')
         elif role == 'builder':
-            current = self.store.get(job['id']); current['current_task'] = attempt['task']
-            head = self.repos.checkpoint(current)
-            built = list(job['built_tasks'])
-            if not job['correcting'] or (job.get('native_lineage') and attempt['task']['id'] not in built):
-                built.append(attempt['task']['id'])
-            index = 1 if job.get('native_lineage') else job['task_index'] if job['correcting'] else job['task_index'] + 1
-            phase = 'reviewing' if job['correcting'] or index >= len(job['plan']['tasks']) else 'building'
-            self.store.update(job['id'], head=head, built_tasks=built, task_index=index, phase=phase, state=phase,
-                              feedback=[], correcting=False, review=None, supervision=None, ci=None)
+            self.complete_builder(job, attempt['task'])
         else:
             expected = {task['id'] for task in job['plan']['tasks']}
             if report.get('reviewed_head') != attempt['head'] or set(report.get('covered_tasks') or []) != expected or not report.get('checks') or report.get('findings'):
@@ -831,6 +825,60 @@ class Engine:
                     raise AppError('INDEPENDENT_REVIEW_REQUIRED')
                 phase='verifying' if job.get('native_lineage') else 'publishing'
                 self.store.update(job['id'], supervision=evidence, phase=phase, state=phase, feedback=[])
+
+    def builder_task(self, job):
+        task = {'id': 'integration-rework', 'title': '검토 의견과 통합 문제 수정',
+                'instructions': '모든 피드백을 해결하고 전체 산출물을 유지하세요.',
+                'acceptance': ['모든 피드백 해결', '전체 회귀 검증 통과'], 'depends_on': []} if job['correcting'] else job['plan']['tasks'][job['task_index']]
+        if job.get('native_lineage') and job['correcting']:
+            task = copy.deepcopy(job['plan']['tasks'][0])
+            task['instructions'] += '\n\nResolve all supplied findings and re-run the original node verification. Preserve this node identity and complete original spec.'
+        return task
+
+    def complete_builder(self, job, task):
+        current = self.store.get(job['id']); current['current_task'] = task
+        head = self.repos.checkpoint(current)
+        built = list(job['built_tasks'])
+        if not job['correcting'] or (job.get('native_lineage') and task['id'] not in built):
+            built.append(task['id'])
+        index = 1 if job.get('native_lineage') else job['task_index'] if job['correcting'] else job['task_index'] + 1
+        phase = 'reviewing' if job['correcting'] or index >= len(job['plan']['tasks']) else 'building'
+        self.store.update(job['id'], head=head, built_tasks=built, task_index=index, phase=phase, state=phase,
+                          feedback=[], correcting=False, review=None, supervision=None, ci=None, checkpoint_retry=None)
+
+    def retry_checkpoint(self, job):
+        """Reconsume a proven completed builder after an Owner resume, never rerun it."""
+        retry = job['checkpoint_retry']; terminal = job.get('last_terminal') or {}
+        if (not job.get('native_lineage') or job['phase'] != 'building' or job['attempt'] or
+            retry != {'attempt': terminal.get('attempt'), 'head': terminal.get('head')} or
+            terminal.get('role') != 'builder' or terminal.get('status') != 'complete' or
+            terminal.get('exit_code') != 0 or job['head'] != retry['head'] or
+            self.repos.head(job) != retry['head'] or
+            not isinstance(retry['attempt'], str) or not re.fullmatch(r'[0-9a-f]{32}', retry['attempt'])):
+            raise AppError('MAC_HOST_CHECKPOINT_INPUT_CHANGED')
+        task = self.builder_task(job); profile = job['settings']['roles']['builder']
+        binding = digest({'job': job['id'], 'attempt': retry['attempt'], 'head': retry['head'],
+                          'role': 'builder', 'profile': profile, 'plan': job['plan'], 'task': task})
+        folder = self.store.directory / 'jobs' / job['id'] / retry['attempt']
+        request = self.pipeline.source._private_json(folder / 'request.json')
+        receipt = self.pipeline.source.private_receipt(folder, {'id': retry['attempt'], 'binding': binding})
+        actor = receipt.get('provider_evidence') or {}; report = receipt.get('report') or {}
+        agents.validate_report(report)
+        sid = actor.get('session_id'); writers = job.get('builder_sessions') or []
+        if (request.get('attempt_id') != retry['attempt'] or request.get('binding') != binding or
+            request.get('role') != 'builder' or request.get('profile') != profile or
+            request.get('host_directory') != str(self.store.directory.resolve()) or
+            request.get('checkout') != str(self.repos.path(job).resolve()) or
+            receipt.get('exit_code') != 0 or receipt.get('error') is not None or
+            report['status'] != 'complete' or report['findings'] or report['question'].strip() or
+            not report['checks'] or any(not check.strip() for check in report['checks']) or
+            actor != job.get('last_provider_evidence') or actor.get('provider') != profile['provider'] or
+            actor.get('harness') != agents.CATALOG[profile['provider']]['harness'] or
+            actor.get('model_requested') != profile['model'] or not isinstance(sid, str) or not sid or
+            not writers or writers[-1] != sid or writers.count(sid) != 1):
+            raise AppError('MAC_HOST_CHECKPOINT_RECEIPT_REQUIRED')
+        self.complete_builder(job, task)
+        self.store.event(job['id'], 'checkpoint_recovered', '기존 builder의 종료 영수증과 산출물을 다시 검증해 같은 작업의 독립 검토로 전달했습니다.')
 
     def rework(self, job, feedback, retry_at=0):
         self.store.update(job['id'], state='building', phase='building', correcting=True,
