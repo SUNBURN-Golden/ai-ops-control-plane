@@ -127,6 +127,8 @@ python3 engineering/mac_app/aiops.py pause JOB_ID
 
 0.3.16은 외부에서 먼저 일반 병합된 native PR의 정상 Owner 검수를 지원합니다. `accept`에 실제 사용자 승인 근거와 정확한 HEAD를 명시해야 하며, 원본 독립 리뷰·감리, 최신 exact-head CI, 병합 커밋의 두 번째 부모·main ancestry·잠금 blob·병합 후 CI를 모두 확인합니다. 원래 검토 HEAD를 변경하거나 main을 체크아웃에 합치지 않습니다. 승인만 `INSPECTED`를 기록하고 별도 정상 reconciliation이 `ACCEPTED`를 기록합니다. 미래 자동 승인 정책을 설정하지 않습니다. 종료된 새 Mac 세대의 `ready` 작업도 모든 원본 영수증·독립 검토·CI·깨끗한 HEAD가 입증된 경우에만 지원 업데이트를 허용하며 검수 상태와 소유권은 유지합니다.
 
+0.3.17은 이미 병합된 PR의 Owner 검수에서 검토 HEAD의 GitHub Actions 결과를 직접 확인합니다. 닫힌 PR을 열린 Draft 후보로 조회해서 `STALE_REMOTE_HEAD`로 거절하던 경로를 고칩니다. 열린 후보의 Draft 조건, 명시적 승인, 독립 검토와 실제 병합 커밋의 ancestry·잠금·CI 검증은 유지합니다.
+
 추가 Python 패키지 없이 앱 자체를 실행할 수 있습니다.
 
 ```bash

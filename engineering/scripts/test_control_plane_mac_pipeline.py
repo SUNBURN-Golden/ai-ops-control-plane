@@ -70,8 +70,11 @@ class FixtureRepositories(gitops.Repositories):
     def user_ready(self,job):self.readied+=1;self.remote_draft=False
     def user_merge(self,job):self.merge_count+=1;self.remote_merged=True;return self.merge_candidate(job)
     def checks(self,job):
+        if self.remote_merged:raise common.AppError('STALE_REMOTE_HEAD')
+        return self.hosted_checks(job,job['head'])
+    def hosted_checks(self,job,head,*,post_merge=False):
         return {'state':self.ci_state,'checks':[{'name':'fixture actual-API substitute','status':'SUCCESS'}],
-                'head':job['head'],'source':'GITHUB_ACTIONS_API'}
+                'head':head,'source':'GITHUB_ACTIONS_API'}
     def merged(self,job):
         if not self.merge_ready: raise common.AppError('MAC_HOST_POST_MERGE_CI_REQUIRED')
         return {'reviewed_head':job['head'],'merge_head':'d'*40,'default_head':'d'*40,
@@ -285,6 +288,18 @@ class MacPipelineTests(unittest.TestCase):
                 sync.assert_not_called()
             self.assertEqual(self.store.get(job['id'])['state'],'ready')
             self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'DELIVERING')
+    def test_closed_merged_pr_inspection_uses_reviewed_commit_ci_and_keeps_merge_commit_checks(self):
+        job=self.ready();self.repos.remote_merged=True;self.repos.remote_draft=False
+        approval={'head':job['head'],'approval':'fixture actual scoped User approval'}
+        with patch.object(self.repos,'checks',side_effect=common.AppError('STALE_REMOTE_HEAD')) as open_checks,\
+             patch.object(self.repos,'hosted_checks',wraps=self.repos.hosted_checks) as commit_checks,\
+             patch.object(self.repos,'merged',wraps=self.repos.merged) as merge_checks:
+            accepted=self.app.action(job['id'],'accept',approval)
+        open_checks.assert_not_called();commit_checks.assert_called_once_with(job,job['head'])
+        merge_checks.assert_called_once()
+        self.assertEqual(accepted['ci']['head'],job['head']);self.assertEqual(accepted['state'],'accepted')
+        self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'INSPECTED')
+        self.assertEqual(self.repos.merge_count,0);self.assertEqual(self.worker.launched,1)
     def test_changed_checkout_after_external_merge_holds_without_starting_another_writer(self):
         job=self.ready();self.repos.remote_merged=True;self.repos.current='e'*40
         with self.assertRaisesRegex(common.AppError,'INSPECTION_CHANGED'):

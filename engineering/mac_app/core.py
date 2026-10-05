@@ -892,7 +892,7 @@ class Engine:
             if job.get('post_merge_owner_approval') and job['post_merge_owner_approval']!=approval:
                 raise AppError('USER_INSPECTION_APPROVAL_IMMUTABLE')
             self.pipeline.source.preflight(job['native_lineage']['binding'],allow_base_advance=True)
-            ci=self.repos.checks(job)
+            ci=self.repos.hosted_checks(job,job['head'])
             if ci['state']!='passed': raise AppError('MAC_HOST_LIVE_CI_REQUIRED')
             candidate={**job,'ci':ci}
             self.pipeline.validate_inspection(candidate,refresh=False)
