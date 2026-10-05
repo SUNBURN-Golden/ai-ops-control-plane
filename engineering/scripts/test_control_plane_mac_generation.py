@@ -186,6 +186,36 @@ class MacGenerationTests(unittest.TestCase):
         path.write_bytes(original);path.chmod(0o600)
         self.store.update(job['id'],generation_policy={**mac_generation.POLICY,'auto_merge':True})
         with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
+    def inspected_delivery(self):
+        job,_=self.blocked_delivery();repos=delivery.FixtureRepositories(self.store.directory/'workspaces')
+        engine=core.Engine(self.store,repos,self.controller)
+        with patch.object(engine,'notify'):
+            self.store.action(job['id'],'resume',{'answer':'Fixture-only recovery'})
+            for role in ('builder','reviewer','supervisor'):
+                current=self.store.get(job['id'])
+                if role=='supervisor':
+                    engine.step(current);engine.step(self.store.get(job['id']))
+                    current=self.store.get(job['id'])
+                with patch('core.agents.command',return_value=['fixture-not-executed']),patch('core.subprocess.Popen'):
+                    engine.launch(current,role)
+                current=self.store.get(job['id']);attempt=current['attempt']
+                result=delivery.report(current['head']);result['covered_tasks']=['CONFORMANCE']
+                delivery.private_outcome(self.store.directory/'jobs'/job['id']/attempt['id'],attempt,result,
+                    profile=current['settings']['roles'][role],sid='fixture-inspected-'+role)
+                engine.observe(current)
+            engine.step(self.store.get(job['id']))
+            app=object.__new__(aiops.Application);app.store=self.store;app.engine=engine;app.canonical=self.controller
+            app.action(job['id'],'accept',{})
+        return self.store.get(job['id'])
+    def test_update_of_inspected_generation_requires_all_private_proof_and_keeps_inspection(self):
+        job=self.inspected_delivery();before=list(self.store.db.iterdump())
+        install.idle_database(self.store.directory)
+        self.assertEqual(list(self.store.db.iterdump()),before)
+        self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'INSPECTED')
+        self.assertEqual(self.store.get(job['id'])['accepted_head'],job['head'])
+    def test_inspected_label_without_matching_recorded_inspection_cannot_enable_update(self):
+        job=self.inspected_delivery();self.store.update(job['id'],accepted_head='e'*40)
+        with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
     def test_quiescent_update_cannot_bypass_an_extra_attempt_or_actual_live_child(self):
         job,folder=self.blocked_delivery()
         extra=common.private_directory(self.store.directory/'jobs'/job['id']/('9'*32))

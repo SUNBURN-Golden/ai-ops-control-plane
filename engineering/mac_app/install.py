@@ -147,7 +147,8 @@ def quiescent_generation_delivery(db,state,job,tables):
     import mac_generation
     import native_transfer
     from mac_authority import LocalSource, require
-    require(job['state'] in ('needs_user','paused') and job.get('attempt') is None,'UPDATE_BUSY')
+    inspected=job['state']=='accepted'
+    require(job['state'] in ('needs_user','paused','accepted') and job.get('attempt') is None,'UPDATE_BUSY')
     require({'mac_host_generations','mac_host_tasks','mac_host_attempts','native_local','mac_host_deliveries'} <= tables,
             'UPDATE_BUSY')
     lineage=job.get('native_lineage'); require(isinstance(lineage,dict),'UPDATE_BUSY')
@@ -173,7 +174,7 @@ def quiescent_generation_delivery(db,state,job,tables):
             job['settings']['publish_pr'] is True and len(job['plan']['tasks'])==1 and
             job['plan']['tasks'][0]['id']==work['task']['id'] and
             job['plan']['tasks'][0]['instructions']==work['task']['spec'] and
-            native[2]==local[1]=='TERMINAL' and task[2]==delivery[2]=='DELIVERING' and
+            native[2]==local[1]=='TERMINAL' and task[2]==delivery[2]==('INSPECTED' if inspected else 'DELIVERING') and
             request['binding']==local_record['binding']==bound and request['attempt']['id']==aid and
             local_record['attempt']==request['attempt'] and local_record['terminal']==terminal and
             delivery[0]==job['id'] and delivery_document['lineage']==lineage and
@@ -191,6 +192,7 @@ def quiescent_generation_delivery(db,state,job,tables):
                 require(re.fullmatch(r'[0-9a-f]{32}',item.name) is not None,'UPDATE_BUSY')
                 folders.append(item)
     require(type(job['calls']) is int and len(folders)==job['calls'],'UPDATE_BUSY')
+    receipts={}
     for folder in folders:
         private=reader._private_json(folder/'request.json')
         require(private['host_directory']==str(root) and private['checkout']==str(checkout) and
@@ -199,6 +201,7 @@ def quiescent_generation_delivery(db,state,job,tables):
             require(private['binding']==request['attempt']['binding'],'UPDATE_BUSY')
         receipt=reader.private_receipt(folder,{'id':private['attempt_id'],'binding':private['binding']},
                                        terminal['result_sha256'] if folder==checkout.parent else None)
+        receipts[private['attempt_id']]=receipt
         running=folder/'running.json'
         if running.exists():
             pid=reader._private_json(running).get('pid')
@@ -207,6 +210,25 @@ def quiescent_generation_delivery(db,state,job,tables):
             except ProcessLookupError: pass
             except OSError: raise AppError('UPDATE_BUSY') from None
             else: raise AppError('UPDATE_BUSY')
+    if inspected:
+        proof=delivery_document.get('inspection') or {}
+        require(job.get('accepted_head')==job['head']==proof.get('head') and
+                job.get('accepted_at')==proof.get('user_inspected_at') and
+                proof.get('task_revision')==bound['task_revision'] and
+                proof.get('review_sha256')==digest(job.get('review')) and
+                proof.get('supervision_sha256')==digest(job.get('supervision')) and
+                proof.get('ci_sha256')==digest(job.get('ci')) and
+                job['ci']['state']=='passed' and job['ci']['head']==job['head'] and
+                job['ci']['source']=='GITHUB_ACTIONS_API','UPDATE_BUSY')
+        actors=set(job.get('builder_sessions',[]))
+        for role in ('review','supervision'):
+            evidence=job[role]; receipt=receipts.get(evidence['attempt']) or {}
+            actor=(receipt.get('provider_evidence') or {}).get('session_id')
+            require(evidence['head']==job['head'] and receipt.get('exit_code')==0 and
+                    receipt.get('error') is None and receipt.get('report')==evidence['report'] and
+                    receipt.get('provider_evidence')==evidence['provider_evidence'] and
+                    receipt['report']['status']=='complete' and actor and actor not in actors,'UPDATE_BUSY')
+            actors.add(actor)
     return (bound['repository'].lower(),bound['task_id'])
 
 
@@ -244,6 +266,13 @@ def idle_database(state):
                     try: blocked_tasks.add(quiescent_generation_delivery(db,state,job,tables))
                     except (AppError,KeyError,TypeError,ValueError,OSError):
                         raise AppError('UPDATE_BUSY', '작업을 완료·검수하거나 안전하게 취소한 뒤 업데이트해 주세요. 대기·일시정지·실행 불명 작업은 유지합니다.') from None
+                elif state_name=='accepted' and job.get('native_lineage'):
+                    lineage=job['native_lineage']['binding']
+                    row=db.execute('SELECT state FROM mac_host_tasks WHERE repository=? AND task=?',
+                                   (lineage['repository'].lower(),lineage['task_id'])).fetchone()
+                    if row and row[0]=='INSPECTED':
+                        try: blocked_tasks.add(quiescent_generation_delivery(db,state,job,tables))
+                        except (AppError,KeyError,TypeError,ValueError,OSError): raise AppError('UPDATE_BUSY') from None
             for table,allowed in (('native_local',('TERMINAL',)),('mac_host_attempts',('TERMINAL',)),
                                   ):
                 if table in tables:
@@ -252,7 +281,7 @@ def idle_database(state):
                         raise AppError('UPDATE_BUSY','Mac canonical 작업의 실행·검토·병합 근거가 미완료입니다. 원장과 산출물을 보존합니다.')
             if 'mac_host_tasks' in tables:
                 for repo,task,state_name in db.execute('SELECT repository,task,state FROM mac_host_tasks'):
-                    if state_name not in ('READY','ACCEPTED') and not(state_name=='DELIVERING' and (repo,task) in blocked_tasks):
+                    if state_name not in ('READY','ACCEPTED') and not(state_name in ('DELIVERING','INSPECTED') and (repo,task) in blocked_tasks):
                         raise AppError('UPDATE_BUSY','Mac canonical 작업의 실행·검토·병합 근거가 미완료입니다. 원장과 산출물을 보존합니다.')
     except sqlite3.Error as exc:
         raise AppError('INSTALLATION_STATE_UNVERIFIED') from exc
