@@ -104,6 +104,19 @@ def prompt(job, role, head):
         context['plan']['task_ids'] = [item['id'] for item in job['plan']['tasks']]
         context['built_tasks'] = job['built_tasks']
     if job.get('native_lineage'):
+        if role in ('builder','reviewer'):
+            instruction += (' This native pipeline stage covers implementation and independent code review BEFORE Draft publication. '
+                            'For these roles, complete means the implementation/code review is ready for the next pipeline stage, '
+                            'not final checks-green acceptance, ready, merge, release or program completion. '
+                            'The host publishes the Draft only after independent code review, collects actual exact-head hosted CI, '
+                            'and sends that evidence to a separate final supervisor; all required CI and source gates still block ready. '
+                            'Inspect the actual code/scope/contracts and execute appropriate available local checks. '
+                            'Keep real implementation defects and unresolved consequential decisions as blockers. '
+                            'A sandbox-denied local check or unavailable local interpreter is not a local PASS: record exactly what '
+                            'was unexecuted/denied in checks or summary and what mandatory hosted CI must verify. '
+                            'Do not demand the post-publication hosted CI before allowing its Draft to be created, '
+                            'or put that expected later-stage verification in implementation-defect findings. '
+                            'Never fabricate CI/test evidence or edit code, CI or policy to disguise an environmental denial.')
         if job.get('host_preparation'):
             instruction += (' The trusted AIOPS host performed git fetch and verified the exact pinned base/plan before this invocation. '
                             'Read authoritative documents at that pin before editing. Git metadata is host-owned and read-only; '

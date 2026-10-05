@@ -123,6 +123,8 @@ python3 engineering/mac_app/aiops.py pause JOB_ID
 
 0.3.14는 최초 Codex trust preflight가 모델 시작 전에 정상 종료됐다는 private 영수증·정확한 binding·SDK 근거가 모두 일치할 때만 빈 작성자 ID를 분류합니다. 실패 기록과 작업의 작성자 목록은 보존하고, 실제 작성 세션은 독립 검토에서 계속 제외합니다. 모델이 시작됐거나 종료·근거가 미확인인 빈 ID는 계속 차단합니다.
 
+0.3.15는 native builder·reviewer에게 발행 전 구현·코드 검토의 범위를 명시합니다. 로컬 sandbox 거절이나 미지원 Python 검사는 PASS로 기록하지 않습니다. 독립 코드 검토 후 Draft와 실제 exact-head CI를 만들고 별도 최종 감리가 전체 검증을 확인하는 기존 순서를 유지하며, 모든 필수 검토·CI·Astra·사용자 게이트는 Ready와 완료를 계속 차단합니다.
+
 추가 Python 패키지 없이 앱 자체를 실행할 수 있습니다.
 
 ```bash
