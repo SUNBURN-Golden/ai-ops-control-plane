@@ -831,6 +831,49 @@ class Engine:
                 all(job.get(role) and job[role]['head'] == job['head'] for role in ('review', 'supervision')) and
                 job['review']['attempt'] != job['supervision']['attempt'])
 
+    def user_merge(self,key,value):
+        """Owner-only, head-bound human approval; no automatic merge loop."""
+        if not isinstance(value,dict) or set(value)!={'head','approval'}:
+            raise AppError('USER_MERGE_APPROVAL_REQUIRED')
+        approval={'head':text(value['head'],'head',40),'approval':text(value['approval'],'approval',2000)}
+        with self.store.lock:
+            job=self.store.get(key)
+            if not job.get('native_lineage') or job['state']!='accepted' or job.get('attempt') or key in self.store.execution_busy:
+                raise AppError('MAC_HOST_USER_INSPECTION_REQUIRED')
+            if approval['head']!=job['head']: raise AppError('USER_MERGE_HEAD_CHANGED')
+            self.pipeline.validate_inspection(job,refresh=False)
+            prior=job.get('user_merge')
+            if prior and prior['approval']!=approval: raise AppError('USER_MERGE_APPROVAL_IMMUTABLE')
+            if not prior:
+                prior={'approval':approval,'state':'APPROVED','at':time.time()}
+                job=self.store.update(key,user_merge=prior)
+                self.store.event(key,'user_merge_approved','사용자가 검수한 정확한 HEAD의 Ready 전환과 일반 merge commit 병합을 승인했습니다.')
+            self.store.execution_busy.add(key)
+        try:
+            pull=self.repos.merge_candidate(job)
+            if pull['merged']:
+                self.store.update(key,user_merge={**prior,'state':'MERGED','merge_head':pull['merge_head']})
+                return self.store.get(key)
+            if pull['draft']:
+                if prior['state']!='APPROVED': raise AppError('USER_READY_OUTCOME_UNKNOWN')
+                prior={**prior,'state':'READY_SUBMITTING'};self.store.update(key,user_merge=prior)
+                self.repos.user_ready(job)
+                pull=self.repos.merge_candidate(job)
+                if pull['draft']: raise AppError('USER_READY_OUTCOME_UNKNOWN')
+            if prior['state']=='MERGE_SUBMITTING': raise AppError('USER_MERGE_OUTCOME_UNKNOWN')
+            prior={**prior,'state':'READY'};job=self.store.update(key,user_merge=prior)
+            ci=self.repos.checks(job);self.store.update(key,user_merge_ci=ci)
+            if ci['state']!='passed': return self.store.get(key)
+            # The remote mutation has its own expected-head guard and obeys
+            # branch protection. An uncertain call is only reconciled by GET.
+            prior={**prior,'state':'MERGE_SUBMITTING'};self.store.update(key,user_merge=prior)
+            result=self.repos.user_merge(job)
+            self.store.update(key,user_merge={**prior,'state':'MERGED','merge_head':result['merge_head']})
+            self.store.event(key,'user_merge','사용자 승인 HEAD를 일반 merge commit으로 병합했습니다. 병합 후 검증은 별도로 확인합니다.')
+            return self.store.get(key)
+        finally:
+            with self.store.lock:self.store.execution_busy.discard(key)
+
     def validate_acceptance(self, job):
         if job['state'] != 'ready': raise AppError('NOT_READY_FOR_ACCEPTANCE')
         if not self.inspected_head(job):

@@ -242,7 +242,9 @@ class Repositories:
         if data['headRefOid'] != job['head'] or data['state'] != 'OPEN':
             raise AppError('STALE_REMOTE_HEAD')
         if job.get('native_lineage'):
-            if data.get('isDraft') is not True or data.get('autoMergeRequest') is not None:
+            approval=(job.get('user_merge') or {}).get('approval') or {}
+            human_ready=job['state']=='accepted' and approval.get('head')==job['head'] and bool(approval.get('approval'))
+            if (data.get('isDraft') is not True and not human_ready) or data.get('autoMergeRequest') is not None:
                 raise AppError('MAC_GENERATION_PUBLICATION_POLICY_REQUIRED')
             return self.hosted_checks(job,job['head'])
         checks = []
@@ -299,7 +301,7 @@ class Repositories:
         execute(['gh','api','--method','POST','repos/'+repo+'/actions/workflows/'+workflow+'/dispatches',
                  '-f','ref='+job['branch']])
 
-    def hosted_checks(self,job,head):
+    def hosted_checks(self,job,head,*,post_merge=False):
         """Mac node CI comes from real GitHub Actions checks/runs, not status text."""
         from handoff import api
         repo=job['repository']; data=api('repos/'+repo+'/commits/'+head+'/check-runs?per_page=100')
@@ -330,7 +332,8 @@ class Repositories:
         registry=Path(__file__).with_name('projects.json')
         if not registry.exists(): registry=Path(__file__).parent.parent / '.github/control-plane/projects.json'
         config=read_json(registry).get(repo,{}) if registry.exists() else {}
-        for required in config.get('program_required_checks',[]):
+        key='program_post_merge_required_checks' if post_merge else 'program_required_checks'
+        for required in config.get(key,[]):
             matches=[c for c in checks if c['name']==required]
             if not matches: checks.append({'name':required,'status':'EXPECTED','url':None,'head':head})
             elif any(c['status'] in ('SKIPPED','NEUTRAL') for c in matches):
@@ -339,6 +342,38 @@ class Repositories:
         pending=not any(c['status']=='SUCCESS' for c in checks) or any(c['status'] not in ('SUCCESS','SKIPPED','NEUTRAL') for c in checks)
         return {'state':'failed' if failed else 'pending' if pending else 'passed','checks':checks,'head':head,
                 'source':'GITHUB_ACTIONS_API'}
+
+    def merge_candidate(self,job):
+        from handoff import api
+        match=re.fullmatch(r'https://github\.com/'+re.escape(job['repository'])+r'/pull/([0-9]+)',job['pr_url'] or '')
+        if not match: raise AppError('USER_MERGE_BINDING_UNVERIFIED')
+        pull=api('repos/'+job['repository']+'/pulls/'+match.group(1))
+        if not (pull.get('head',{}).get('sha')==job['head'] and pull.get('head',{}).get('ref')==job['branch'] and
+                pull.get('base',{}).get('ref')==job['base_branch'] and pull.get('auto_merge') is None):
+            raise AppError('USER_MERGE_HEAD_CHANGED')
+        if pull.get('merged') is not True:
+            if pull.get('state')!='open' or pull.get('base',{}).get('sha')!=job.get('verified_base',job['base_sha']):
+                raise AppError('USER_MERGE_BASE_CHANGED')
+        return {'merged':pull.get('merged') is True,'draft':pull.get('draft') is True,
+                'merge_head':pull.get('merge_commit_sha'),'number':int(match.group(1))}
+
+    def user_ready(self,job):
+        pull=self.merge_candidate(job)
+        if pull['merged'] or not pull['draft']: return
+        gh(job['repository'],'pr','ready',str(pull['number']))
+
+    def user_merge(self,job):
+        pull=self.merge_candidate(job)
+        if pull['merged']: return pull
+        if pull['draft']: raise AppError('USER_READY_REQUIRED')
+        result=parse_json(execute(['gh','api','--method','PUT',
+            'repos/'+job['repository']+'/pulls/'+str(pull['number'])+'/merge',
+            '-f','sha='+job['head'],'-f','merge_method=merge']))
+        if result.get('merged') is not True: raise AppError('USER_MERGE_OUTCOME_UNKNOWN')
+        observed=self.merge_candidate(job)
+        if not observed['merged'] or observed['merge_head']!=result.get('sha'):
+            raise AppError('USER_MERGE_OUTCOME_UNKNOWN')
+        return observed
 
     def merged(self,job):
         from handoff import api
@@ -351,7 +386,14 @@ class Repositories:
         git(self.path(job),'fetch','origin',job['base_branch'])
         latest=git(self.path(job),'rev-parse','FETCH_HEAD')
         if git(self.path(job),'merge-base',merge,latest)!=merge: raise AppError('MAC_HOST_MERGE_BINDING_UNVERIFIED')
-        ci=self.hosted_checks(job,merge)
+        if job.get('user_merge') and git(self.path(job),'rev-parse',merge+'^2')!=job['head']:
+            raise AppError('MAC_HOST_MERGE_BINDING_UNVERIFIED')
+        registry=Path(__file__).with_name('projects.json')
+        if not registry.exists(): registry=Path(__file__).parent.parent/'.github/control-plane/projects.json'
+        config=read_json(registry).get(repo,{}) if registry.exists() else {}
+        for path,blob in config.get('program_post_merge_locked_blobs',{}).items():
+            if git(self.path(job),'rev-parse',merge+':'+path)!=blob: raise AppError('MAC_HOST_POST_MERGE_LOCK_CHANGED')
+        ci=self.hosted_checks(job,merge,post_merge=True)
         if ci['state']!='passed': raise AppError('MAC_HOST_POST_MERGE_CI_REQUIRED')
         return {'pr_url':job['pr_url'],'reviewed_head':job['head'],'merge_head':merge,'default_head':latest,
                 'post_merge_ci':ci,'source':'AUTHENTICATED_GITHUB_READ'}

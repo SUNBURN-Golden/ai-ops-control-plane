@@ -124,6 +124,7 @@ class Application:
         job = self.store.create(value); self.engine.wake.set(); return job
 
     def action(self, key, action, value):
+        if action=='merge': return self.engine.user_merge(key,value)
         with self.store.lock:
             if action == 'accept': self.engine.validate_acceptance(self.store.get(key))
             if action=='accept' and self.store.get(key).get('native_lineage'):

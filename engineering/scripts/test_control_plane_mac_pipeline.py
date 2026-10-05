@@ -51,6 +51,7 @@ class FixtureRepositories(gitops.Repositories):
         super().__init__(directory); self.current='c'*40; self.dirty=False; self.checkpoints=0; self.published=0
         self.fail_checkpoint=False; self.merge_ready=True; self.ci_state='passed'
         self.dispatches=[]
+        self.remote_draft=True;self.remote_merged=False;self.readied=0;self.merge_count=0
     def checkpoint(self,job):
         self.checkpoints+=1
         if self.fail_checkpoint: raise common.AppError('FIXTURE_CHECKPOINT_FAILED')
@@ -65,6 +66,9 @@ class FixtureRepositories(gitops.Repositories):
     def publish(self,job): self.published+=1; return 'https://github.com/owner/kix/pull/2'
     def candidate_workflows(self,job): return ['ktx-kernel.yml','protocol.yml']
     def dispatch_candidate_workflow(self,job,workflow): self.dispatches.append((job['head'],workflow))
+    def merge_candidate(self,job):return {'draft':self.remote_draft,'merged':self.remote_merged,'merge_head':'d'*40,'number':2}
+    def user_ready(self,job):self.readied+=1;self.remote_draft=False
+    def user_merge(self,job):self.merge_count+=1;self.remote_merged=True;return self.merge_candidate(job)
     def checks(self,job):
         return {'state':self.ci_state,'checks':[{'name':'fixture actual-API substitute','status':'SUCCESS'}],
                 'head':job['head'],'source':'GITHUB_ACTIONS_API'}
@@ -340,6 +344,37 @@ class MacPipelineTests(unittest.TestCase):
                 self.assertTrue(requirement['required']);self.assertEqual(requirement['astra_gate'],expected)
                 with self.assertRaisesRegex(common.AppError,'ASTRA_AUDIT_REQUIRED'):
                     self.engine.pipeline.validate_inspection(job,refresh=False)
+
+    def test_human_merge_requires_actual_inspection_exact_head_and_explicit_approval(self):
+        job=self.ready()
+        for value in ({},{'head':job['head'],'approval':'Explicit fixture User approval'}):
+            with self.assertRaises(common.AppError):self.app.action(job['id'],'merge',value)
+        self.app.action(job['id'],'accept',{})
+        with self.assertRaises(common.AppError):self.app.action(job['id'],'merge',{'head':'e'*40,'approval':'wrong head'})
+        self.assertEqual((self.repos.readied,self.repos.merge_count),(0,0))
+
+    def test_approved_ready_waits_for_ci_and_merge_is_ordinary_and_idempotent(self):
+        job=self.ready();self.app.action(job['id'],'accept',{})
+        value={'head':job['head'],'approval':'Human explicitly approved this PR and head; fixture only.'}
+        self.repos.ci_state='pending'
+        result=self.app.action(job['id'],'merge',value)
+        self.assertEqual(result['user_merge']['state'],'READY');self.assertEqual(self.repos.readied,1)
+        self.assertEqual(self.repos.merge_count,0);self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'INSPECTED')
+        self.repos.ci_state='passed';result=self.app.action(job['id'],'merge',value)
+        self.assertEqual(result['user_merge']['state'],'MERGED');self.assertEqual(self.repos.merge_count,1)
+        self.app.action(job['id'],'merge',value)
+        self.assertEqual(self.repos.merge_count,1);self.assertEqual(result['user_merge']['approval'],value)
+
+    def test_uncertain_merge_holds_without_retransmission_and_approval_is_immutable(self):
+        job=self.ready();self.app.action(job['id'],'accept',{})
+        value={'head':job['head'],'approval':'Specific human fixture approval.'}
+        with patch.object(self.repos,'user_merge',side_effect=TimeoutError):
+            with self.assertRaises(TimeoutError):self.app.action(job['id'],'merge',value)
+        current=self.store.get(job['id']);self.assertEqual(current['user_merge']['state'],'MERGE_SUBMITTING')
+        with patch.object(self.repos,'user_merge') as merge:
+            with self.assertRaises(common.AppError):self.app.action(job['id'],'merge',value)
+            merge.assert_not_called()
+        with self.assertRaises(common.AppError):self.app.action(job['id'],'merge',{**value,'approval':'Another approval'})
     def test_native_rework_keeps_the_original_node_id_and_full_spec(self):
         job=self.seed(status='fail')
         with patch('core.agents.command',return_value=['fixture-not-executed']), patch('core.subprocess.Popen'):
@@ -389,6 +424,25 @@ class CandidateDispatchTests(unittest.TestCase):
             with self.assertRaises(common.AppError):self.repos.candidate_workflows(self.job)
             execute.assert_not_called()
 
+    def test_user_merge_is_expected_head_guarded_ordinary_merge_without_admin_bypass(self):
+        candidate={'merged':False,'draft':False,'number':9,'merge_head':None}
+        merged={**candidate,'merged':True,'merge_head':'d'*40}
+        with patch.object(self.repos,'merge_candidate',side_effect=[candidate,merged]),\
+             patch('gitops.execute',return_value=common.encoded({'merged':True,'sha':'d'*40})) as execute:
+            result=self.repos.user_merge(self.job)
+        self.assertTrue(result['merged'])
+        self.assertEqual(execute.call_args.args[0],['gh','api','--method','PUT',
+            'repos/BeautifulMind-JT/kix-protocol/pulls/9/merge','-f','sha='+self.job['head'],'-f','merge_method=merge'])
+    def test_changed_head_or_base_holds_before_ready_or_merge(self):
+        self.job['base_sha']='b'*40
+        self.pull['base']['sha']='b'*40
+        for field in ('head','base'):
+            self.pull['head']['sha']='e'*40 if field=='head' else self.job['head']
+            self.pull['base']['sha']='e'*40 if field=='base' else self.job['base_sha']
+            with patch('handoff.api',return_value=self.pull),patch('gitops.execute') as execute:
+                with self.assertRaises(common.AppError):self.repos.user_ready(self.job)
+                execute.assert_not_called()
+
 
 class HostedCITests(unittest.TestCase):
     def setUp(self):
@@ -429,6 +483,12 @@ class HostedCITests(unittest.TestCase):
         self.run['event']='pull_request';self.check['conclusion']='skipped'
         with patch('handoff.api',side_effect=self.api):result=self.repos.hosted_checks(self.job,'c'*40)
         self.assertEqual(result['state'],'pending');self.assertEqual(result['checks'],[])
+    def test_post_merge_uses_actual_configured_post_merge_checks(self):
+        self.check['name']='protocol'
+        config={'owner/kix':{'program_required_checks':['protocol','kernel'],'program_post_merge_required_checks':['protocol']}}
+        with patch('gitops.read_json',return_value=config),patch('handoff.api',side_effect=self.api):
+            self.assertEqual(self.repos.hosted_checks(self.job,'c'*40)['state'],'pending')
+            self.assertEqual(self.repos.hosted_checks(self.job,'c'*40,post_merge=True)['state'],'passed')
     def test_codex_native_thread_identity_is_extracted_from_its_cli_event(self):
         folder=common.private_directory(Path(self.temp.name) / 'receipt')
         common.atomic_json(folder / 'last-message.json',report())
