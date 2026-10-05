@@ -197,6 +197,53 @@ class MacPipelineTests(unittest.TestCase):
         self.assertEqual(job['builder_sessions'],['fixture-builder','fixture-failed-builder'])
         self.store.update(job['id'],supervision=self.review_evidence(job,'supervisor','4'*32,'fixture-failed-builder'))
         with self.assertRaisesRegex(common.AppError,'INDEPENDENT_REVIEW_REQUIRED'): self.app.action(job['id'],'accept',{})
+    def trust_preflight_job(self):
+        from codex_native_exec import QUALIFIED_BINARY
+        job=self.seed(error='MAC_CODEX_TRUST_REQUIRED');lineage=job['native_lineage']
+        row=self.store.db.execute('SELECT document FROM mac_host_attempts WHERE request=?',(lineage['request_id'],)).fetchone()
+        request=common.parse_json(row['document'])['request'];attempt=request['attempt']
+        folder=self.store.directory/'native'/lineage['request_id']/attempt['id']
+        private={'attempt_id':attempt['id'],'binding':attempt['binding'],'profile':attempt['profile'],'role':'builder',
+                 'checkout':str(self.repos.path(job).resolve()),'host_directory':str(self.store.directory.resolve())}
+        proof={**{k:private[k] for k in ('attempt_id','binding','role','checkout')},
+               'qualified_binary_sha256':QUALIFIED_BINARY,'profile_application':'qualified-native-exec',
+               'model_turn_requested':False,'commands':[],'shutdown_verified':True,'error':'MAC_CODEX_TRUST_REQUIRED'}
+        common.atomic_json(folder/'request.json',private);common.atomic_json(folder/'codex-policy-evidence.json',proof)
+        common.atomic_json(folder/'codex-adapter-error.json',{k:proof[k] for k in ('attempt_id','binding','shutdown_verified')}|
+                           {'code':'MAC_CODEX_TRUST_REQUIRED'})
+        return job,folder,proof
+    def test_proven_trust_preflight_marker_survives_real_writer_recovery_and_inspection(self):
+        job,folder,proof=self.trust_preflight_job();receipt=(folder/'receipt.json').read_bytes()
+        self.app.action(job['id'],'resume',{})
+        with patch('core.agents.command',return_value=['fixture-not-executed']),patch('core.subprocess.Popen'):
+            self.engine.launch(self.store.get(job['id']),'builder')
+        job=self.store.get(job['id']);attempt=job['attempt']
+        private_outcome(self.store.directory/'jobs'/job['id']/attempt['id'],attempt,report(job['head']),sid='fixture-real-writer')
+        self.engine.observe(job);job=self.ready(self.store.get(job['id']))
+        self.assertEqual(job['builder_sessions'],[None,'fixture-real-writer'])
+        self.app.action(job['id'],'accept',{})
+        self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'INSPECTED')
+        self.assertEqual((folder/'receipt.json').read_bytes(),receipt)
+        self.assertEqual(self.store.get(job['id'])['builder_sessions'],[None,'fixture-real-writer'])
+    def test_preflight_without_an_actual_writer_never_proves_completion(self):
+        job,folder,proof=self.trust_preflight_job();job=self.ready(job)
+        with self.assertRaisesRegex(common.AppError,'MAC_HOST_BUILDER_IDENTITY_REQUIRED'):
+            self.app.action(job['id'],'accept',{})
+    def test_modeled_or_changed_preflight_cannot_erase_an_unknown_writer(self):
+        job,folder,proof=self.trust_preflight_job()
+        job=self.ready(self.store.update(job['id'],builder_sessions=[None,'fixture-real-writer']))
+        for changes in ({'model_turn_requested':True},{'binding':'changed'},{'commands':[{'event':'item.completed'}]},
+                        {'shutdown_verified':False},{'thread_id':'fixture-unknown-model-session'}):
+            with self.subTest(changes=changes):
+                common.atomic_json(folder/'codex-policy-evidence.json',{**proof,**changes})
+                with self.assertRaisesRegex(common.AppError,'MAC_HOST_BUILDER_IDENTITY_REQUIRED'):
+                    self.app.action(job['id'],'accept',{})
+    def test_real_writer_remains_disqualified_from_review_after_trust_recovery(self):
+        job,folder,proof=self.trust_preflight_job()
+        job=self.ready(self.store.update(job['id'],builder_sessions=[None,'fixture-real-writer']))
+        self.store.update(job['id'],supervision=self.review_evidence(job,'supervisor','4'*32,'fixture-real-writer'))
+        with self.assertRaisesRegex(common.AppError,'MAC_HOST_INDEPENDENT_REVIEW_REQUIRED'):
+            self.app.action(job['id'],'accept',{})
     def test_checkpoint_failure_preserves_lineage_and_requires_bounded_retry(self):
         self.end_builder(); self.repos.fail_checkpoint=True; self.engine.pipeline.deliver()
         self.assertEqual(self.store.jobs(),[]); self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'DELIVERY_BLOCKED')

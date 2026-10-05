@@ -177,8 +177,42 @@ class Pipeline:
         self.validate_reviews(job,('review','supervision'))
         require(not self.audit_requirement(job)['required'],'MAC_HOST_ASTRA_AUDIT_REQUIRED')
 
+    def writer_sessions(self,job):
+        """Exclude only a proven initial native trust preflight, keeping its record."""
+        writers=list(job.get('builder_sessions') or [])
+        if writers and writers[0] is None:
+            from codex_native_exec import QUALIFIED_BINARY
+            lineage=job['native_lineage']
+            row=self.store.db.execute('SELECT document,terminal,state FROM mac_host_attempts WHERE request=?',
+                                      (lineage['request_id'],)).fetchone()
+            require(row and row['state']=='TERMINAL','MAC_HOST_BUILDER_IDENTITY_REQUIRED')
+            request=parse_json(row['document'],1024*1024)['request']; attempt=request['attempt']
+            require(request['binding']==lineage['binding'] and attempt['id']==lineage['attempt_id'],
+                    'MAC_HOST_BUILDER_IDENTITY_REQUIRED')
+            receipt=self.source._terminal(request,parse_json(row['terminal']))
+            folder=self.store.directory/'native'/lineage['request_id']/lineage['attempt_id']
+            private=self.source._private_json(folder/'request.json')
+            proof=self.source._private_json(folder/'codex-policy-evidence.json')
+            error=self.source._private_json(folder/'codex-adapter-error.json')
+            require(private['attempt_id']==proof['attempt_id']==error['attempt_id']==attempt['id'] and
+                    private['binding']==proof['binding']==error['binding']==attempt['binding'] and
+                    private['profile']==attempt['profile']==job['settings']['roles']['builder'] and
+                    private['profile']['provider']=='codex' and private['role']==proof['role']=='builder' and
+                    private['checkout']==proof['checkout']==str(self.repos.path(job).resolve()) and
+                    private['host_directory']==str(self.store.directory.resolve()) and
+                    receipt.get('error')==proof.get('error')==error.get('code')=='MAC_CODEX_TRUST_REQUIRED' and
+                    receipt.get('report') is None and not receipt.get('provider_evidence') and
+                    proof.get('qualified_binary_sha256')==QUALIFIED_BINARY and
+                    proof.get('profile_application')=='qualified-native-exec' and
+                    proof.get('model_turn_requested') is False and proof.get('commands')==[] and
+                    not proof.get('thread_id') and proof.get('shutdown_verified') is True and
+                    error.get('shutdown_verified') is True,'MAC_HOST_BUILDER_IDENTITY_REQUIRED')
+            writers=writers[1:]
+        require(all(isinstance(s,str) and s.strip() for s in writers),'MAC_HOST_BUILDER_IDENTITY_REQUIRED')
+        return writers
+
     def validate_reviews(self,job,roles):
-        identities=set(s for s in job.get('builder_sessions',[]) if s)
+        writers=self.writer_sessions(job);identities=set(writers)
         for role in roles:
             evidence=job.get(role)
             require(evidence and evidence['head']==job['head'],'MAC_HOST_CURRENT_HEAD_REVIEW_REQUIRED')
@@ -200,7 +234,7 @@ class Pipeline:
                 report['status']=='complete' and report['reviewed_head']==job['head'] and report['covered_tasks']==[job['plan']['tasks'][0]['id']] and
                 report['checks'] and all(c.strip() for c in report['checks']) and not report['findings'] and not report['question'].strip(),'MAC_HOST_INDEPENDENT_REVIEW_REQUIRED')
             identities.add(sid)
-        require(job.get('builder_sessions') and all(s for s in job['builder_sessions']),'MAC_HOST_BUILDER_IDENTITY_REQUIRED')
+        require(bool(writers),'MAC_HOST_BUILDER_IDENTITY_REQUIRED')
 
     def record_inspection(self,job):
         require(job['state']=='accepted','MAC_HOST_USER_INSPECTION_REQUIRED')
