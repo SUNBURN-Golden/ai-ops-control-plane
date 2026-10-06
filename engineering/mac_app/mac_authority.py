@@ -231,7 +231,10 @@ class LocalSource:
         require(row['state']=='READY','MAC_HOST_TASK_COMPLETION_GATE_REQUIRED')
         work=parse_json(row['work'],1024*1024); deps=[]
         require(work['settings']['publish_pr'] is True,'MAC_HOST_PR_PUBLICATION_REQUIRED')
-        for node in bound['dependencies']:
+        if 'generation_id' in bound and bound['dependencies']:
+            import mac_generation
+            deps=mac_generation.frozen_dependencies(self,bound,live=True)
+        for node in (() if 'generation_id' in bound else bound['dependencies']):
             key=(bound['program']+'-'+node).upper()
             dependency=db.execute('SELECT task,state,binding FROM mac_host_tasks WHERE repository=? AND task=?',(bound['repository'].lower(),key)).fetchone()
             require(dependency is not None and dependency['state']=='ACCEPTED','MAC_HOST_DEPENDENCY_GATE_REQUIRED')

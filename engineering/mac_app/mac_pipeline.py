@@ -37,6 +37,7 @@ class Pipeline:
                 import mac_generation
                 require(job.get('generation_policy')==work['generation_policy']==mac_generation.POLICY and
                         job.get('generation_decision')==work['generation_decision'], 'MAC_GENERATION_PUBLICATION_POLICY_REQUIRED')
+                if bound['dependencies']: mac_generation.frozen_dependencies(self.source,bound)
             require(job['settings']['roles']['builder']==work['profile'] and job['base_sha']==bound['plan_commit'] and
                     job['program_scope']['blob']==bound['plan_blob'] and job['settings']['publish_pr'] is True and
                     job['branch']=='aiops/native-'+lineage['request_id'][:16] and
@@ -279,6 +280,69 @@ class Pipeline:
             self.source._terminal(request,parse_json(attempt['terminal']))
             self.store.db.execute("UPDATE mac_host_tasks SET state='REWORK_REQUIRED' WHERE repository=? AND task=?",(repo.lower(),bound['task_id']))
         return {'task_id':bound['task_id'],'state':'REWORK_REQUIRED','same_lineage':True}
+
+    def accepted_dependency(self,bound,plan_commit,*,current=True):
+        """Read a normal ACCEPTED delivery and its actual private/live proof.
+
+        No label, model PASS, legacy projection or caller-supplied evidence can
+        substitute for the original owner, inspection and merge lineage.
+        """
+        with self.store.lock:
+            task=self.source._task(self.store.db,bound)
+            require(task['state']=='ACCEPTED','MAC_HOST_ACCEPTED_DEPENDENCY_REQUIRED')
+            matches=[]
+            for row in self.store.db.execute("SELECT * FROM mac_host_deliveries WHERE state='ACCEPTED'"):
+                document=parse_json(row['document'])
+                if document['lineage']['binding']==bound: matches.append((row,document))
+            require(len(matches)==1,'MAC_HOST_DEPENDENCY_LINEAGE_UNVERIFIED')
+            row,document=matches[0]; job=self.store.get(row['job']); lineage=job['native_lineage']
+            inspection=document.get('inspection'); completion=document.get('completion')
+            require(isinstance(inspection,dict) and isinstance(completion,dict) and
+                    job['state']=='accepted' and job.get('accepted_head')==inspection.get('head')==job['head'] and
+                    inspection.get('task_revision')==bound['task_revision'] and inspection.get('pr_url')==job['pr_url'] and
+                    inspection.get('review_sha256')==digest(job['review']) and
+                    inspection.get('supervision_sha256')==digest(job['supervision']) and
+                    inspection.get('ci_sha256')==digest(job['ci']) and
+                    completion.get('source')=='AUTHENTICATED_GITHUB_READ' and
+                    completion.get('reviewed_head')==job['head'] and completion.get('pr_url')==job['pr_url'] and
+                    completion.get('post_merge_ci',{}).get('state')=='passed' and
+                    completion['post_merge_ci'].get('head')==completion.get('merge_head'),
+                    'MAC_HOST_DEPENDENCY_INSPECTION_UNVERIFIED')
+            native=self.store.db.execute('SELECT * FROM mac_host_attempts WHERE request=?',(row['request'],)).fetchone()
+            require(native is not None and native['state']=='TERMINAL' and row['request']==lineage['request_id'],
+                    'MAC_HOST_DEPENDENCY_LINEAGE_UNVERIFIED')
+            request=parse_json(native['document'],1024*1024)['request']; terminal=parse_json(native['terminal'])
+            require(request['binding']==bound and request['request_id']==row['request'] and
+                    request['attempt']['id']==lineage['attempt_id'] and
+                    document['terminal_sha256']==digest(terminal),'MAC_HOST_DEPENDENCY_LINEAGE_UNVERIFIED')
+            self.source._terminal(request,terminal)
+            local={'task_sha256':digest(dict(task)),'delivery_sha256':digest(dict(row)),
+                   'native_sha256':digest(dict(native)),'job_sha256':digest(job)}
+        self.validate_inspection(job,refresh=False)
+        live=self.repos.dependency_completion(job,plan_commit,current=current)
+        require(live['source']=='AUTHENTICATED_GITHUB_READ' and live['reviewed_head']==completion['reviewed_head'] and
+                live['merge_head']==completion['merge_head'] and live['pr_url']==completion['pr_url'],
+                'MAC_HOST_DEPENDENCY_COMPLETION_CHANGED')
+        result={'node':bound['node'],'task_id':bound['task_id'],'task_revision':bound['task_revision'],
+                'generation_id':bound['generation_id'],'request_id':row['request'],'job_id':job['id'],
+                'state':'ACCEPTED','binding_sha256':digest(bound),'inspection_sha256':digest(inspection),
+                'completion_sha256':digest(completion),'reviewed_head':job['head'],'merge_head':live['merge_head'],
+                'recorded_ci_sha256':live['recorded_ci_sha256'],'tree':live['tree'],
+                'gate_evidence':'mac-host:'+self.source.source_host+'#accepted-'+row['request'],'local':local}
+        with self.store.lock: self.validate_dependency_local(result)
+        return result
+
+    def validate_dependency_local(self,evidence):
+        """Detect a changed or partial local completion before any reservation."""
+        db=self.store.db
+        task=db.execute('SELECT * FROM mac_host_tasks WHERE task=?',(evidence['task_id'],)).fetchone()
+        delivery=db.execute('SELECT * FROM mac_host_deliveries WHERE request=?',(evidence['request_id'],)).fetchone()
+        native=db.execute('SELECT * FROM mac_host_attempts WHERE request=?',(evidence['request_id'],)).fetchone()
+        require(task is not None and delivery is not None and native is not None and
+                task['state']==delivery['state']=='ACCEPTED' and native['state']=='TERMINAL' and
+                {'task_sha256':digest(dict(task)),'delivery_sha256':digest(dict(delivery)),
+                 'native_sha256':digest(dict(native)),'job_sha256':digest(self.store.get(evidence['job_id']))}==evidence['local'],
+                'MAC_HOST_DEPENDENCY_COMPLETION_CHANGED')
 
     def reconcile_accepted(self,repo,task):
         bound=self.source.select(repo,task)

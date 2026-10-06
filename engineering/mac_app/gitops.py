@@ -499,3 +499,63 @@ class Repositories:
         if ci['state']!='passed': raise AppError('MAC_HOST_POST_MERGE_CI_REQUIRED')
         return {'pr_url':job['pr_url'],'reviewed_head':job['head'],'merge_head':merge,'default_head':latest,
                 'post_merge_ci':ci,'source':'AUTHENTICATED_GITHUB_READ'}
+
+    def dependency_completion(self,job,plan_commit,*,current=True):
+        """Reobserve one recorded completion; never merge or edit its ledger.
+
+        The normal merge verifier supplies protected-lock/postmerge checks.
+        A dependent admission additionally binds the reviewed tree, original
+        base, target ancestry and the exact recorded premerge Actions jobs.
+        """
+        from handoff import api
+        proof=self.merged(job); merge=proof['merge_head']; checkout=self.path(job)
+        if (current and proof['default_head']!=plan_commit or
+                git(checkout,'merge-base',merge,plan_commit)!=merge or
+                git(checkout,'rev-parse',merge+'^1')!=job['base_sha'] or
+                git(checkout,'rev-parse',merge+'^{tree}')!=git(checkout,'rev-parse',job['head']+'^{tree}')):
+            raise AppError('MAC_HOST_DEPENDENCY_MERGE_UNVERIFIED')
+        recorded=job['ci']; runs=[]
+        registry=Path(__file__).with_name('projects.json')
+        if not registry.exists(): registry=Path(__file__).parent.parent/'.github/control-plane/projects.json'
+        config=read_json(registry).get(job['repository'],{}) if registry.exists() else {}
+        passed={c.get('name') for c in recorded['checks'] if c.get('status')=='SUCCESS'}
+        if not (recorded.get('state')=='passed' and recorded.get('head')==job['head'] and
+                recorded.get('source')=='GITHUB_ACTIONS_API' and
+                set(config.get('program_required_checks',[]))<=passed):
+            raise AppError('MAC_HOST_DEPENDENCY_CI_UNVERIFIED')
+        for check in recorded['checks']:
+            if check.get('status')!='SUCCESS': continue
+            url=check.get('url') or ''
+            match=re.fullmatch(r'https://github\.com/'+re.escape(job['repository'])+
+                               r'/actions/runs/([0-9]+)(?:/job/([0-9]+))?',url)
+            if not match or check.get('run_id')!=int(match.group(1)):
+                raise AppError('MAC_HOST_DEPENDENCY_CI_UNVERIFIED')
+            prefix='repos/'+job['repository']+'/actions/'
+            run=api(prefix+'runs/'+match.group(1))
+            if match.group(2):
+                selected=api(prefix+'jobs/'+match.group(2))
+            else:
+                items=api(prefix+'runs/'+match.group(1)+'/jobs?per_page=100')
+                if items.get('total_count')!=len(items.get('jobs',[])) or items['total_count']>100:
+                    raise AppError('MAC_HOST_DEPENDENCY_CI_UNVERIFIED')
+                matches=[item for item in items['jobs'] if item.get('name')==check.get('name')]
+                if len(matches)!=1: raise AppError('MAC_HOST_DEPENDENCY_CI_UNVERIFIED')
+                selected=matches[0]
+            steps=selected.get('steps')
+            if not (run.get('id')==check['run_id'] and run.get('head_sha')==job['head'] and
+                    (run.get('repository') or {}).get('full_name','').lower()==job['repository'].lower() and
+                    run.get('status')=='completed' and run.get('conclusion')=='success' and
+                    run.get('event')==check.get('event') and run.get('name')==check.get('workflow_name') and
+                    selected.get('run_id')==run['id'] and
+                    (not match.group(2) or selected.get('id')==int(match.group(2))) and
+                    selected.get('head_sha')==job['head'] and selected.get('name')==check.get('name') and
+                    selected.get('status')=='completed' and selected.get('conclusion')=='success' and
+                    isinstance(steps,list) and steps and any(s.get('conclusion')=='success' for s in steps) and
+                    all(s.get('status')=='completed' and s.get('conclusion') in ('success','skipped') for s in steps)):
+                raise AppError('MAC_HOST_DEPENDENCY_CI_UNVERIFIED')
+            runs.append({'run_id':run['id'],'job_id':selected['id'],'head':job['head'],
+                         'run_attempt':run.get('run_attempt'),'name':selected['name'],
+                         'steps_sha256':digest(steps)})
+        if not runs: raise AppError('MAC_HOST_DEPENDENCY_CI_UNVERIFIED')
+        return {**proof,'tree':git(checkout,'rev-parse',merge+'^{tree}'),
+                'target_plan_commit':plan_commit,'recorded_ci_sha256':digest(recorded),'runs':runs}

@@ -1,6 +1,7 @@
 """Explicit owner-approved isolated work; never declares legacy work terminal.
 
-One dependency-free source node is pinned to a new task/revision. The immutable
+One source node is pinned to a new task/revision. Only qualified local ACCEPTED
+generations can satisfy its exact original dependencies. The immutable
 boundary acknowledges the exact pre-existing opaque receipts and projections
 for this new draft-only scope, without changing their origin, owner or state.
 """
@@ -16,6 +17,52 @@ from mac_authority import require
 from program_scope import load_scope
 import handoff
 import transport_guard
+
+
+def dependency_evidence(source,scope,node,plan_commit,*,current=True):
+    """Consume only the same original revision's normal Mac completions."""
+    if not node.get('depends_on',[]): return []
+    import gitops
+    from mac_pipeline import Pipeline
+    code='MAC_GENERATION_DEPENDENCY_GATE_REQUIRED'; result=[]
+    pipeline=Pipeline(source.store,source,gitops.Repositories(source.store.directory/'workspaces'))
+    for dep in node.get('depends_on',[]):
+        originals=[n for n in scope['nodes'] if n['id']==dep]; require(len(originals)==1,code)
+        original=originals[0]; expected={'task_id':(scope['program']+'-'+dep).upper(),
+            'task_revision':digest({'plan_blob':scope['blob'],'node':original}),'provenance_only':True}
+        with source.store.lock:
+            candidates=[]
+            for row in source.store.db.execute("SELECT * FROM mac_host_tasks WHERE repository=? AND state='ACCEPTED'",
+                                               (scope['repository'].lower(),)):
+                bound=parse_json(row['binding'])
+                if bound.get('node')==dep and 'generation_id' in bound: candidates.append((row,bound))
+            require(len(candidates)==1,code); row,bound=candidates[0]
+            work=parse_json(row['work'],1024*1024); generation=record(source,bound)
+            require(bound['plan_blob']==scope['blob'] and bound['program']==scope['program'] and
+                    work['task']==original and work['original_task']==generation['original_task']==expected and
+                    digest(work)==bound['work_sha256'] and work['generation_policy']==POLICY,code)
+        result.append(pipeline.accepted_dependency(bound,plan_commit,current=current))
+    return result
+
+
+def frozen_dependencies(source,bound,*,live=False):
+    """Retain the pinned graph and recheck its protected completion lineage."""
+    from mac_pipeline import Pipeline
+    import gitops
+    generation=record(source,bound); task=source._task(source.store.db,bound)
+    work=parse_json(task['work'],1024*1024); node=work['task']; expected=node.get('depends_on',[])
+    require(bound['dependencies']==expected and digest(work)==bound['work_sha256'],
+            'MAC_GENERATION_BINDING_INVALID')
+    frozen=work.get('dependency_evidence',[])
+    require(isinstance(frozen,list) and [e.get('node') for e in frozen]==expected,
+            'MAC_GENERATION_DEPENDENCY_GATE_REQUIRED')
+    if not expected: return []
+    pipeline=Pipeline(source.store,source,gitops.Repositories(source.store.directory/'workspaces'))
+    for evidence in frozen: pipeline.validate_dependency_local(evidence)
+    if live and expected:
+        observed=dependency_evidence(source,generation['program']['scope'],node,bound['plan_commit'])
+        require(observed==frozen,'MAC_HOST_DEPENDENCY_COMPLETION_CHANGED')
+    return copy.deepcopy(frozen)
 
 POLICY = {'auto_merge': False, 'draft_pr': True, 'user_only_merge': True,
           'legacy_terminal_verified': False, 'isolated_checkout': True}
@@ -70,9 +117,9 @@ def adopt(source, value):
     node = matches[0]
     require(node.get('audit_floor', 'A1') != 'A3' and node.get('astra_gate', 'NONE') == 'NONE',
             'MAC_HOST_ASTRA_GATE_REQUIRED')
-    # No legacy dependency completion is inherited. Later dependent adoption
-    # needs a separately implemented, proven new-generation dependency reader.
-    require(not node.get('depends_on', []), 'MAC_GENERATION_DEPENDENCY_GATE_REQUIRED')
+    # Legacy DONE/closed/merged/PASS text never supplies dependency authority.
+    # This reader validates existing immutable, normally ACCEPTED Mac lineage.
+    dependencies=dependency_evidence(source,scope,node,original['head'])
     settings = source.store.settings(); profile = settings['roles']['builder']
     lanes = {'devin': 'DEVIN', 'cursor': 'CURSOR', 'glm': 'GLM', 'grok_build': 'GROK_BUILD',
              'claude': 'MAC_CLAUDE', 'codex': 'MAC_CODEX'}
@@ -87,6 +134,7 @@ def adopt(source, value):
             'profile': profile, 'settings': settings, 'task': copy.deepcopy(node), 'original_plan': raw,
             'generation_policy': copy.deepcopy(POLICY), 'generation_decision': value['decision'],
             'original_task': {'task_id': origin_task, 'task_revision': origin_revision, 'provenance_only': True}}
+    if dependencies: work['dependency_evidence']=dependencies
     require(len(encoded(work).encode()) <= 300000, 'MAC_HOST_SCOPE_TOO_LARGE')
     program = {'scope': scope, 'head': original['head'], 'branch': original['branch'],
                'profile': profile, 'settings': settings, 'tasks': copy.deepcopy(snapshot['tasks'])}
@@ -107,12 +155,16 @@ def adopt(source, value):
                     'MAC_HOST_LOCAL_WORK_BUSY')
             require(not db.execute("SELECT 1 FROM native_local WHERE state!='TERMINAL'").fetchone(),
                     'MAC_HOST_LOCAL_WORK_BUSY')
+            if dependencies:
+                from mac_pipeline import Pipeline
+                pipeline=Pipeline(source.store,source,None)
+                for evidence in dependencies: pipeline.validate_dependency_local(evidence)
             cursor = db.execute('INSERT INTO mac_host_tasks(repository,task,binding,work,state) VALUES (?,?,?,?,?)',
                                 (repo, task, '{}', encoded(work), 'READY'))
             bound = {'repository': snapshot['repository'], 'task_id': task, 'task_revision': revision,
                      'issue': cursor.lastrowid, 'program': scope['program'], 'node': node['id'],
                      'materialization_request_id': digest({'host': source.source_host, 'generation': value['generation_id']})[:24],
-                     'plan_commit': original['head'], 'plan_blob': scope['blob'], 'dependencies': [],
+                     'plan_commit': original['head'], 'plan_blob': scope['blob'], 'dependencies': copy.deepcopy(node.get('depends_on',[])),
                      'owner_lane': lanes[profile['provider']], 'source_host': source.source_host,
                      'target_host': source.target_host, 'work_sha256': digest(work), 'authority_kind': 'MAC_LOCAL',
                      'canonical_task_pointer': 'mac-host:' + source.source_host + ':' + repo + ':' + task,
