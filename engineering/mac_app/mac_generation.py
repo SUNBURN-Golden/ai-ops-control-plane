@@ -165,8 +165,8 @@ def adopt(source, value):
     matches = [n for n in scope['nodes'] if n['id'] == value['node']]
     require(len(matches) == 1, 'MAC_GENERATION_NODE_NOT_FOUND')
     node = matches[0]
-    require(node.get('audit_floor', 'A1') != 'A3' and node.get('astra_gate', 'NONE') == 'NONE',
-            'MAC_HOST_ASTRA_GATE_REQUIRED')
+    import mac_astra_receipt
+    astra_decision = mac_astra_receipt.admission(node)
     # Legacy DONE/closed/merged/PASS text never supplies dependency authority.
     # This reader validates existing immutable, normally ACCEPTED Mac lineage.
     dependencies=dependency_evidence(source,scope,node,original['head'])
@@ -185,6 +185,7 @@ def adopt(source, value):
             'generation_policy': copy.deepcopy(POLICY), 'generation_decision': value['decision'],
             'generation_decision_evidence': approval,
             'original_task': {'task_id': origin_task, 'task_revision': origin_revision, 'provenance_only': True}}
+    if astra_decision: work['astra_decision'] = astra_decision
     if dependencies: work['dependency_evidence']=dependencies
     require(len(encoded(work).encode()) <= 300000, 'MAC_HOST_SCOPE_TOO_LARGE')
     program = {'scope': scope, 'head': original['head'], 'branch': original['branch'],

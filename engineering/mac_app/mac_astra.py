@@ -1,8 +1,4 @@
-"""Mac audit request context, never an audit result or execution authority.
-
-The fixed protected producer does not yet bind MAC_LOCAL tasks. Keep its
-absence explicit; a request digest, model text or GitHub comment is no receipt.
-"""
+"""Mac audit request context; verified results come from the separate journal."""
 from __future__ import annotations
 
 import copy
@@ -56,6 +52,8 @@ def audit_requirement(job, scope):
         'plan_commit': bound['plan_commit'], 'plan_blob': bound['plan_blob'],
         'job': job['id'], 'native_request_id': lineage['request_id'],
         'native_attempt_id': lineage['attempt_id'], 'head': job['head'],
+        'branch': job.get('branch'), 'writer_sessions': copy.deepcopy(job.get('builder_sessions') or []),
+        'review_sha256': digest(job.get('review')),
         'pr_url': job.get('pr_url'), 'gate': gate, 'requested_depth': floor,
         'approval_pointer': scope.get('approval_pointer'),
         'requested_auditor': 'ASTRA_FABLE', 'declared_user_only_merge': True,
@@ -66,5 +64,5 @@ def audit_requirement(job, scope):
         'plan_blob': bound['plan_blob'],
         'authority': 'engineering/AGENTS.md sections 8 and 14; pinned program node',
         'audit_receipt': None, 'request_binding': request, 'request_sha256': digest(request),
-        'receipt_support': 'PROTECTED_MAC_CONNECTOR_REQUIRED' if required else 'NOT_REQUIRED',
+        'receipt_support': 'AUTHENTICATED_GITHUB_AUDIT_COMMENT' if required else 'NOT_REQUIRED',
     }

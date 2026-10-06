@@ -6,10 +6,12 @@ JSON, model text and request digests cannot supply an audit result.
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 import hashlib
 import re
+import sqlite3
 
-from common import AppError, repository
+from common import AppError, digest, encoded, parse_json, repository
 import handoff
 
 MARK = '<!-- aiops-fable-audit -->'
@@ -169,3 +171,103 @@ def read_receipt(requirement, comment_id, *, expected=None):
     require(found, 'MAC_HOST_ASTRA_RECEIPT_CHANGED')
     live_pr(requirement)
     return evidence
+
+
+def admission(node):
+    """The User's live channel adoption opens work, never its completion gate."""
+    if node.get('audit_floor', 'A1') == 'A3' or node.get('astra_gate', 'NONE') != 'NONE':
+        return decision_evidence()
+    return None
+
+
+class Journal:
+    """Private Mac ledger: a comment can be bound to exactly one audit request.
+
+    Requests are durable before the audit is consumed. An earlier audit cannot
+    be retroactively assigned a new task revision, writer/review or attempt.
+    Neither this journal nor its caller accepts a supplied receipt document.
+    """
+    def __init__(self, store):
+        self.store = store
+        with store.lock:
+            store.db.executescript('''
+                CREATE TABLE IF NOT EXISTS mac_host_astra_requests(
+                    request_sha256 TEXT PRIMARY KEY, document TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS mac_host_astra_receipts(
+                    request_sha256 TEXT PRIMARY KEY, repository TEXT NOT NULL,
+                    comment_id INTEGER NOT NULL, audit_request_id TEXT NOT NULL, document TEXT NOT NULL,
+                    UNIQUE(repository, comment_id), UNIQUE(repository, audit_request_id));
+            ''')
+
+    def request(self, requirement):
+        _, _, request = context(requirement)
+        sha = requirement.get('request_sha256')
+        require(sha == digest(request) and isinstance(request.get('task_id'), str) and request['task_id'] and
+                isinstance(request.get('task_revision'), str) and re.fullmatch(r'[0-9a-f]{64}', request['task_revision']) and
+                isinstance(request.get('canonical_binding'), dict) and
+                request['canonical_binding'].get('task_id') == request['task_id'] and
+                request['canonical_binding'].get('task_revision') == request['task_revision'])
+        decision_evidence()
+        with self.store.lock:
+            row = self.store.db.execute('SELECT document FROM mac_host_astra_requests WHERE request_sha256=?', (sha,)).fetchone()
+            if row:
+                document = parse_json(row[0])
+                require(document['request'] == request and document['decision'] == DECISION)
+            else:
+                document = {'schema_version': 1, 'request_sha256': sha, 'request': copy.deepcopy(request),
+                            'decision': copy.deepcopy(DECISION),
+                            'created_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+                self.store.db.execute('INSERT INTO mac_host_astra_requests VALUES (?,?)', (sha, encoded(document)))
+        return document
+
+    def consume(self, requirement):
+        document = self.request(requirement); sha = document['request_sha256']
+        repo, number, request = context(requirement)
+        with self.store.lock:
+            row = self.store.db.execute('SELECT document FROM mac_host_astra_receipts WHERE request_sha256=?', (sha,)).fetchone()
+            pinned = parse_json(row[0]) if row else None
+        if pinned:
+            require(pinned.get('request_sha256') == sha and pinned.get('request') == document['request'] and
+                    pinned.get('decision') == DECISION)
+            evidence = read_receipt(requirement, pinned['comment']['comment_id'], expected=pinned['comment'])
+        else:
+            live_pr(requirement)
+            pages = api('repos/' + repo + '/issues/' + str(number) + '/comments?per_page=100', paginate=True)
+            require(isinstance(pages, list) and pages and all(isinstance(page, list) for page in pages) and
+                    sum(len(page) for page in pages) <= 4096)
+            candidates = []; seen = set()
+            for page in pages:
+                for item in page:
+                    require(isinstance(item, dict) and type(item.get('id')) is int and item['id'] not in seen)
+                    seen.add(item['id'])
+                    if not trusted_actor(item) or not isinstance(item.get('body'), str) or not item['body'].startswith(MARK):
+                        continue
+                    lines = item['body'].splitlines(); require(len(lines) >= 2)
+                    header = HEADER.fullmatch(lines[1]); require(header is not None)
+                    if header[2] != request['head']:
+                        continue
+                    value = parse_comment(item, requirement)
+                    if value['created_at'] >= document['created_at'] and value['result'] in ('PASS', 'PASS_WITH_NOTES'):
+                        candidates.append(value['comment_id'])
+            require(candidates, 'MAC_HOST_ASTRA_AUDIT_REQUIRED')
+            evidence = read_receipt(requirement, min(candidates))
+        require(evidence['created_at'] >= document['created_at'], 'MAC_HOST_ASTRA_RECEIPT_REPLAY')
+        try:
+            invoked_at=datetime.strptime(evidence['audit_request_id'].split('-')[0],'%Y%m%dT%H%M%SZ').strftime('%Y-%m-%dT%H:%M:%SZ')
+        except ValueError:
+            raise AppError('MAC_HOST_ASTRA_RECEIPT_UNVERIFIED') from None
+        require(document['created_at'] <= invoked_at <= evidence['created_at'],'MAC_HOST_ASTRA_RECEIPT_REPLAY')
+        result = {'schema_version': 1, 'source': 'AUTHENTICATED_GITHUB_AUDIT_COMMENT',
+                  'request_sha256': sha, 'request': copy.deepcopy(document['request']),
+                  'decision': copy.deepcopy(DECISION), 'comment': evidence}
+        with self.store.lock:
+            old = self.store.db.execute('SELECT document FROM mac_host_astra_receipts WHERE request_sha256=?', (sha,)).fetchone()
+            if old:
+                require(parse_json(old[0]) == result, 'MAC_HOST_ASTRA_RECEIPT_CHANGED')
+            else:
+                try:
+                    self.store.db.execute('INSERT INTO mac_host_astra_receipts VALUES (?,?,?,?,?)',
+                                          (sha, repo.lower(), evidence['comment_id'], evidence['audit_request_id'], encoded(result)))
+                except sqlite3.IntegrityError:
+                    raise AppError('MAC_HOST_ASTRA_RECEIPT_REPLAY') from None
+        return result

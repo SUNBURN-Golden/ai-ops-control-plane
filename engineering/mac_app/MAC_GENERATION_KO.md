@@ -4,7 +4,7 @@
 
 사용자는 기존 VM 기록을 보존하면서 새 Mac 작업의 별도 실행 기록·격리 브랜치·자동 병합 금지를 승인했다. 이 승인은 과거 실행 종료·소유권 이전·A3 감사 통과를 뜻하지 않는다. 기존 scope를 승계하는 `register` 경로와 UNKNOWN scope annotation의 보수적 검사는 유지한다.
 
-`host generation`은 repository/node/generation-id/decision/plan-commit/plan-blob을 받는다. 앱이 GitHub의 원문 프로그램과 전체 task 투영을 직접 읽고 정확한 HEAD/blob을 확인한다. caller가 원문 spec·legacy receipt·병합 policy를 주입할 수 없다. 원문 기술 spec, gate, 전체 프로그램 맥락 및 과거 task/revision은 provenance로 보존하며 새 task ID에는 전체 generation UUID를 포함한다. 원문 의존성이 있거나 audit_floor=A3 또는 astra_gate가 NONE이 아닌 노드는 이 최소 경로로 채택할 수 없다.
+`host generation`은 repository/node/generation-id/decision/plan-commit/plan-blob을 받는다. 앱이 GitHub의 원문 프로그램과 전체 task 투영을 직접 읽고 정확한 HEAD/blob을 확인한다. caller가 원문 spec·legacy receipt·병합 policy를 주입할 수 없다. 원문 기술 spec, gate, 전체 프로그램 맥락 및 과거 task/revision은 provenance로 보존하며 새 task ID에는 전체 generation UUID를 포함한다. 원문 의존성은 기존 immutable ACCEPTED Mac lineage의 검수·일반 merge·post-merge 근거를 확인해야 한다. A3 또는 명시된 Astra gate는 사용자 결정 D-2026-10-06-MAC-A3-RECEIPT를 실시간 검증한 경우에만 채택할 수 있고, 완료에는 별도의 현재 요청/HEAD 감사 댓글 영수증이 필요하다. [Mac A3 전달 계약](MAC_A3_RECEIPT_KO.md)을 따른다.
 
 불변 generation record는 승인 시점의 기존 외부 투영 및 opaque receipt의 정확한 origin digest/state를 새 격리 범위의 경계로 기록한다. 기존 원장·receipt·owner·UNKNOWN 상태를 수정하거나 종료로 선언하지 않는다. 새로 나타난 또는 변경된 관련 외부 claim/receipt는 실행을 막는다. 원래 경로에서는 기존 barrier가 계속 실행을 막는다. 같은 generation/start 요청의 재전송은 기존 기록을 읽으며 새 writer를 만들지 않는다.
 

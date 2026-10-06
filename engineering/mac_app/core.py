@@ -39,7 +39,10 @@ PROVIDER_SETUP = ('MODEL_UNAVAILABLE', 'PROVIDER_LOGIN_REQUIRED', 'CLI_SETUP_REQ
                   'MAC_CODEX_TURN_TIMEOUT','MAC_CODEX_CONFIG_CHANGED','MAC_CODEX_TRUST_REQUIRED','MAC_CODEX_RUNTIME_UNQUALIFIED')
 TRANSIENT_FAILURES = ('PROVIDER_TEMPORARILY_UNAVAILABLE', 'COMMAND_TIMEOUT', 'SESSION_TIMEOUT')
 EXECUTION_BLOCKERS = ('HOST_ADMISSION_REQUIRED', 'ADMISSION_OBSERVATION_UNRESOLVED',
-                      'TRANSPORT_EXECUTION_UNRESOLVED', 'TRANSPORT_JOURNAL_UNVERIFIED')
+                      'TRANSPORT_EXECUTION_UNRESOLVED', 'TRANSPORT_JOURNAL_UNVERIFIED',
+                      'MAC_HOST_ASTRA_AUDIT_REQUIRED', 'MAC_HOST_ASTRA_RECEIPT_UNVERIFIED',
+                      'MAC_HOST_ASTRA_DECISION_UNVERIFIED', 'MAC_HOST_ASTRA_RECEIPT_CHANGED',
+                      'MAC_HOST_ASTRA_RECEIPT_REPLAY', 'MAC_HOST_ASTRA_AUDIT_CONFLICT')
 ROLE_STATE = {'planner': 'planning', 'builder': 'building', 'reviewer': 'reviewing', 'supervisor': 'supervising'}
 
 
@@ -459,6 +462,12 @@ class Engine:
             'ADMISSION_OBSERVATION_UNRESOLVED': '기존 작업의 실행 승인 관측이 불완전합니다. 실제 소유권 근거를 확인해야 합니다.',
             'TRANSPORT_EXECUTION_UNRESOLVED': '기존 전달의 실제 실행·종료가 미확인입니다. 영수증을 보존하고 인증된 대사 근거를 확인해야 합니다.',
             'TRANSPORT_JOURNAL_UNVERIFIED': '기존 전달 원장을 확인할 수 없습니다. 원본을 보존하고 읽기 상태를 확인해야 합니다.',
+            'MAC_HOST_ASTRA_AUDIT_REQUIRED': '현재 작업 revision과 HEAD의 Fable 감사가 필요합니다. 고정 Linux 도구가 감사 요청 이후 게시한 PR 댓글을 확인한 뒤 같은 작업을 계속하세요.',
+            'MAC_HOST_ASTRA_RECEIPT_UNVERIFIED': '인증된 GitHub 감사 댓글을 검증할 수 없어 보류합니다. 작성자·PR·HEAD·schema·깊이와 실제 조회 상태를 확인하세요.',
+            'MAC_HOST_ASTRA_DECISION_UNVERIFIED': 'Mac A3 전달 방식의 고정 사용자 결정 댓글을 검증할 수 없어 보류합니다.',
+            'MAC_HOST_ASTRA_RECEIPT_CHANGED': '감사 댓글 또는 작업 요청이 변경·삭제되어 보류합니다. 기존 영수증을 덮어쓰지 않고 정확한 작업과 HEAD를 다시 확인하세요.',
+            'MAC_HOST_ASTRA_RECEIPT_REPLAY': '다른 작업 revision·시도에 묶인 감사 댓글을 재사용할 수 없어 보류합니다.',
+            'MAC_HOST_ASTRA_AUDIT_CONFLICT': '같은 HEAD의 Fable 감사 결과가 상충해 보류합니다. 이전 PASS를 선택하여 통과할 수 없습니다.',
         }
         # This holds infrastructure failures, never ordinary engineering FAILs.
         # Explicit transient outages remain automatic; unknown repeated faults
@@ -578,12 +587,8 @@ class Engine:
                     self.store.update(job['id'], verified_base=sync['base'], head=self.repos.head(job))
                     return self.rework(job, ['CI 확인 중 기준 브랜치가 변경되었습니다. 최신 기준에서 전체 검증을 다시 실행하세요.'])
                 if native:
-                    requirement=self.pipeline.audit_requirement(job)
+                    requirement=self.pipeline.validate_audit(job)
                     self.store.update(job['id'],audit_requirement=requirement)
-                    if requirement['required']:
-                        raise AppError('MAC_HOST_ASTRA_AUDIT_REQUIRED',
-                            '원래 노드의 '+requirement['audit_floor']+'/'+requirement['astra_gate']+
-                            ' 감사가 필요합니다. 지원된 고정 aiops-fable 경로의 현재 HEAD 보호 영수증이 없어 최종 검수를 보류합니다.')
                     if not job.get('supervision'):
                         self.store.update(job['id'],state='supervising',phase='supervising',not_before=0)
                         self.store.event(job['id'],'candidate_ci','Draft 후보의 실제 CI를 수집했습니다. 필수 감사 적용 범위와 최종 감리를 확인합니다.')
@@ -634,6 +639,9 @@ class Engine:
                 preparation=self.repos.prepare_native(context)
                 observation={'mode':'mac_local','binding':job['native_lineage']['binding']}
                 verification=self.repos.supervision_evidence(context) if role=='supervisor' else None
+                if role=='supervisor':
+                    audit=self.pipeline.validate_audit(context)
+                    verification={**verification,'astra_audit':audit}
             else:
                 transport_guard.require_clear(self.store.directory)
                 observation = self.repos.execution_admission(context)
@@ -665,6 +673,8 @@ class Engine:
             if job.get('native_lineage') and role=='supervisor':
                 if verification['job_binding']!=supervision_binding(job) or verification['head']!=job['head']:
                     raise AppError('MAC_HOST_LIVE_CI_REQUIRED')
+                if verification['astra_audit'].get('request_sha256')!=self.pipeline.audit_requirement(job).get('request_sha256'):
+                    raise AppError('MAC_HOST_ASTRA_RECEIPT_CHANGED')
                 job=dict(job,supervisor_verification=verification)
             self._launch(job, role)
 
@@ -924,6 +934,7 @@ class Engine:
             prior={**prior,'state':'READY'};job=self.store.update(key,user_merge=prior)
             ci=self.repos.checks(job);self.store.update(key,user_merge_ci=ci)
             if ci['state']!='passed': return self.store.get(key)
+            self.pipeline.validate_inspection(self.store.get(key),refresh=False)
             # The remote mutation has its own expected-head guard and obeys
             # branch protection. An uncertain call is only reconciled by GET.
             prior={**prior,'state':'MERGE_SUBMITTING'};self.store.update(key,user_merge=prior)

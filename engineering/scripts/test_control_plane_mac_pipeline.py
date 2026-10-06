@@ -500,11 +500,15 @@ class MacPipelineTests(unittest.TestCase):
             node=next(n for n in program['scope']['nodes'] if n['id']==bound['node'])
             node.update(audit_floor=floor,astra_gate=gate)
             job['audit_requirement']={'required':False,'audit_receipt':'model claimed PASS'}
-            with patch.object(self.source,'program',return_value=program):
+            with patch.object(self.source,'program',return_value=program), \
+                 patch.object(self.engine.pipeline.astra,'request',return_value={'created_at':'2030-01-01T00:00:00Z'}) as request, \
+                 patch.object(self.engine.pipeline.astra,'consume',side_effect=common.AppError('MAC_HOST_ASTRA_AUDIT_REQUIRED')) as consume:
                 requirement=self.engine.pipeline.audit_requirement(job)
                 self.assertTrue(requirement['required']);self.assertEqual(requirement['astra_gate'],expected)
                 with self.assertRaisesRegex(common.AppError,'ASTRA_AUDIT_REQUIRED'):
                     self.engine.pipeline.validate_inspection(job,refresh=False)
+                consume.assert_called_once()
+                request.assert_called_once()
 
     def test_human_merge_requires_actual_inspection_exact_head_and_explicit_approval(self):
         job=self.ready()

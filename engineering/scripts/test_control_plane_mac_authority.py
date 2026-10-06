@@ -162,7 +162,9 @@ class MacAuthorityTests(unittest.TestCase):
         self.assertEqual(self.worker.launched,0)
         gate=snapshot(repo='owner/gated',nodes=[{'id':'A3','title':'Architecture','spec':'original gate','audit_floor':'A3'}])
         bound=self.source.register(gate)[0]['binding']
-        with self.assertRaisesRegex(common.AppError,'ASTRA_GATE_REQUIRED'): self.source.call('read',bound)
+        with patch('mac_astra_receipt.decision_evidence',side_effect=common.AppError('MAC_HOST_ASTRA_DECISION_UNVERIFIED')):
+            with self.assertRaisesRegex(common.AppError,'ASTRA_DECISION_UNVERIFIED'): self.source.call('read',bound)
+        self.assertEqual(self.worker.launched,0)
     def test_terminal_fixture_releases_only_current_mac_attempt_not_old_unknowns(self):
         self.configure(); record=self.controller.start(self.request()); self.worker.finish(record)
         self.controller.tick(); ended=self.controller.get(record['request_id'])

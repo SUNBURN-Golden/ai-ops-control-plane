@@ -2,11 +2,14 @@
 import copy
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'mac_app'))
 from common import AppError
+import common
+import core
 import mac_astra_receipt as receipts
 
 
@@ -120,6 +123,71 @@ class DecisionReceiptTests(unittest.TestCase):
                 bad={**value,field:changed}
                 with self.subTest(field=field),patch('handoff.api',return_value=bad),self.assertRaises(AppError):
                     receipts.decision_evidence()
+
+
+class JournalTests(unittest.TestCase):
+    api = CommentReceiptTests.api
+    def setUp(self):
+        CommentReceiptTests.setUp(self)
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.store=core.Store(Path(self.temp.name)/'app');self.addCleanup(self.store.close)
+        request=self.requirement['request_binding']
+        request.update(task_id='MAC-FIXTURE',task_revision='d'*64,
+                       canonical_binding={'task_id':'MAC-FIXTURE','task_revision':'d'*64},
+                       native_request_id='fixture-request',native_attempt_id='fixture-attempt',job='fixture-job',
+                       writer_sessions=['fixture-builder'],review_sha256='e'*64)
+        self.requirement['request_sha256']=common.digest(request)
+        self.journal=receipts.Journal(self.store)
+
+    def test_request_is_durable_before_audit_and_pinned_consumption_is_idempotent(self):
+        self.pages=[[]]
+        with self.assertRaisesRegex(AppError,'ASTRA_AUDIT_REQUIRED'):self.journal.consume(self.requirement)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM mac_host_astra_requests').fetchone()[0],1)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM mac_host_astra_receipts').fetchone()[0],0)
+        self.pages=[[self.comment]]
+        first=self.journal.consume(self.requirement)
+        self.assertEqual(receipts.Journal(self.store).consume(self.requirement),first)
+        self.assertEqual(first['request']['task_revision'],'d'*64)
+        self.assertEqual(first['request']['head'],'a'*40)
+        self.assertEqual(first['comment']['comment_id'],123)
+
+    def test_task_revision_native_attempt_writer_and_review_cannot_reuse_one_comment(self):
+        self.journal.consume(self.requirement)
+        for field in ('task_revision','native_attempt_id','job','writer_sessions','review_sha256'):
+            requirement=copy.deepcopy(self.requirement);request=requirement['request_binding']
+            if field=='task_revision':
+                request[field]='f'*64;request['canonical_binding'][field]=request[field]
+            elif field=='writer_sessions':request[field]=['different-builder']
+            else:request[field]='different-context'
+            requirement['request_sha256']=common.digest(request)
+            with self.subTest(field=field),self.assertRaisesRegex(AppError,'RECEIPT_REPLAY'):
+                self.journal.consume(requirement)
+
+    def test_older_audit_and_caller_supplied_pass_cannot_satisfy_new_request(self):
+        self.comment['created_at']=self.comment['updated_at']='2020-01-01T00:00:00Z';self.pages=[[self.comment]]
+        self.requirement['audit_receipt']={'result':'PASS','comment_id':123}
+        with self.assertRaisesRegex(AppError,'ASTRA_AUDIT_REQUIRED'):self.journal.consume(self.requirement)
+
+    def test_reposted_old_run_and_same_run_under_new_comment_id_are_rejected(self):
+        original=copy.deepcopy(self.comment)
+        self.comment['body']=self.comment['body'].replace('20300101T000000Z-12345678','20200101T000000Z-12345678')
+        self.pages=[[self.comment]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_REPLAY'):self.journal.consume(self.requirement)
+        self.comment=original;self.pages=[[self.comment]];self.journal.consume(self.requirement)
+        changed=copy.deepcopy(self.requirement);changed['request_binding']['native_attempt_id']='new-attempt'
+        changed['request_sha256']=common.digest(changed['request_binding'])
+        self.comment=audit_comment(changed,cid=124);self.pages=[[self.comment]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_REPLAY'):self.journal.consume(changed)
+
+    def test_new_head_or_pr_requires_a_new_audit_and_pinned_edits_do_not_get_replaced(self):
+        self.journal.consume(self.requirement)
+        changed=copy.deepcopy(self.requirement);changed['request_binding']['head']='f'*40
+        changed['request_sha256']=common.digest(changed['request_binding']);self.pull['head']['sha']='f'*40
+        with self.assertRaisesRegex(AppError,'ASTRA_AUDIT_REQUIRED'):self.journal.consume(changed)
+        self.pull['head']['sha']='a'*40
+        self.comment['body']+='\nChanged';self.pages=[[self.comment,audit_comment(self.requirement,cid=124)]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):self.journal.consume(self.requirement)
+        self.assertEqual(self.store.db.execute('SELECT comment_id FROM mac_host_astra_receipts').fetchone()[0],123)
 
 
 if __name__ == '__main__': unittest.main()
