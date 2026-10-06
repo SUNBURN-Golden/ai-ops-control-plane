@@ -190,14 +190,14 @@ class Journal:
     def __init__(self, store):
         self.store = store
         with store.lock:
-            store.db.executescript('''
-                CREATE TABLE IF NOT EXISTS mac_host_astra_requests(
-                    request_sha256 TEXT PRIMARY KEY, document TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS mac_host_astra_receipts(
-                    request_sha256 TEXT PRIMARY KEY, repository TEXT NOT NULL,
-                    comment_id INTEGER NOT NULL, audit_request_id TEXT NOT NULL, document TEXT NOT NULL,
-                    UNIQUE(repository, comment_id), UNIQUE(repository, audit_request_id));
-            ''')
+            # Pipeline is also constructed inside admission transactions.
+            # executescript would implicitly commit their single-owner fence.
+            store.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_requests(
+                request_sha256 TEXT PRIMARY KEY, document TEXT NOT NULL)''')
+            store.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_receipts(
+                request_sha256 TEXT PRIMARY KEY, repository TEXT NOT NULL,
+                comment_id INTEGER NOT NULL, audit_request_id TEXT NOT NULL, document TEXT NOT NULL,
+                UNIQUE(repository, comment_id), UNIQUE(repository, audit_request_id))''')
 
     def request(self, requirement):
         _, _, request = context(requirement)

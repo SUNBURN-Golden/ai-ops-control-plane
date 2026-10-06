@@ -151,6 +151,14 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(first['request']['head'],'a'*40)
         self.assertEqual(first['comment']['comment_id'],123)
 
+    def test_journal_construction_preserves_an_outer_admission_transaction(self):
+        self.store.db.execute('BEGIN IMMEDIATE')
+        try:
+            receipts.Journal(self.store)
+            self.assertTrue(self.store.db.in_transaction)
+        finally:
+            self.store.db.rollback()
+
     def test_task_revision_native_attempt_writer_and_review_cannot_reuse_one_comment(self):
         self.journal.consume(self.requirement)
         for field in ('task_revision','native_attempt_id','job','writer_sessions','review_sha256'):
