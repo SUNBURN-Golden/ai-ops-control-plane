@@ -68,6 +68,51 @@ POLICY = {'auto_merge': False, 'draft_pr': True, 'user_only_merge': True,
           'legacy_terminal_verified': False, 'isolated_checkout': True}
 FIELDS = {'repository', 'node', 'generation_id', 'decision', 'plan_commit', 'plan_blob'}
 
+# The User's durable authority-boundary decision; prose supplied by a model
+# or an arbitrary comment is never an approval. Edits/deletion fail closed.
+HOST_DECISION = {
+    'url': 'https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/77#issuecomment-6008874154',
+    'comment_id': 6008874154, 'actor_id': 263336091, 'actor_login': 'BeautifulMind-JT',
+    'body_sha256': '9cc695f0a5ce11789dc3cce57a09b03a19165c84ed0d91c201c5047cb19f8f9b',
+}
+DECISION_API = 'repos/BeautifulMind-JT/ai-ops-control-plane/issues/comments/6008874154'
+
+
+def decision_evidence(pointer):
+    require(pointer == HOST_DECISION['url'], 'MAC_GENERATION_DURABLE_DECISION_REQUIRED')
+    comment = handoff.api(DECISION_API)
+    require(isinstance(comment, dict) and comment.get('id') == HOST_DECISION['comment_id'] and
+            comment.get('html_url') == pointer and
+            comment.get('issue_url') == 'https://api.github.com/repos/BeautifulMind-JT/ai-ops-control-plane/issues/77' and
+            isinstance(comment.get('user'), dict) and
+            comment['user'].get('id') == HOST_DECISION['actor_id'] and
+            comment['user'].get('login') == HOST_DECISION['actor_login'] and
+            comment['user'].get('type') == 'User' and isinstance(comment.get('body'), str) and
+            hashlib.sha256(comment['body'].encode()).hexdigest() == HOST_DECISION['body_sha256'],
+            'MAC_GENERATION_DURABLE_DECISION_UNVERIFIED')
+    return copy.deepcopy(HOST_DECISION)
+
+
+def require_unowned_original(snapshot, program, node):
+    require(snapshot.get('task_scope') == 'all' and isinstance(snapshot.get('tasks'), list),
+            'MAC_HOST_HISTORY_INCOMPLETE')
+    for task in snapshot['tasks']:
+        require(isinstance(task, dict) and task.get('state') in ('open', 'closed'),
+                'MAC_HOST_HISTORY_INCOMPLETE')
+        # An open canonical projection is a hold even when its owner is only
+        # in a protected control record/comment. Missing task keys also hold.
+        if task['state'] == 'open':
+            require(task.get('program') and task.get('node') and
+                    (task['program'].upper(), task['node'].upper()) != (program.upper(), node.upper()),
+                    'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
+
+
+def preflight(source, bound, snapshot):
+    value = record(source, bound)
+    require(decision_evidence(value['request']['decision']) == value['decision_evidence'],
+            'MAC_GENERATION_DURABLE_DECISION_UNVERIFIED')
+    require_unowned_original(snapshot, bound['program'], bound['node'])
+
 
 def claim(repo, task):
     key = (task.get('program', '') + '-' + task.get('node', '')).upper() if task.get('node') else '*'
@@ -83,6 +128,9 @@ def record(source, bound):
     value = parse_json(row[0], 4 * 1024 * 1024)
     require(value['binding'] == bound and value['source_host'] == source.source_host and
             value['policy'] == POLICY, 'MAC_GENERATION_BINDING_INVALID')
+    require(value.get('decision_evidence') == HOST_DECISION and
+            value['request']['decision'] == HOST_DECISION['url'],
+            'MAC_GENERATION_DURABLE_DECISION_REQUIRED')
     return value
 
 
@@ -112,6 +160,8 @@ def adopt(source, value):
             hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == original['blob'],
             'MAC_HOST_PROGRAM_REVISION_CHANGED')
     scope = load_scope(raw, snapshot['repository'], original['blob'])
+    require_unowned_original(snapshot, scope['program'], value['node'])
+    approval = decision_evidence(value['decision'])
     matches = [n for n in scope['nodes'] if n['id'] == value['node']]
     require(len(matches) == 1, 'MAC_GENERATION_NODE_NOT_FOUND')
     node = matches[0]
@@ -133,6 +183,7 @@ def adopt(source, value):
     work = {'task_id': task, 'task_revision': revision, 'plan_commit': original['head'],
             'profile': profile, 'settings': settings, 'task': copy.deepcopy(node), 'original_plan': raw,
             'generation_policy': copy.deepcopy(POLICY), 'generation_decision': value['decision'],
+            'generation_decision_evidence': approval,
             'original_task': {'task_id': origin_task, 'task_revision': origin_revision, 'provenance_only': True}}
     if dependencies: work['dependency_evidence']=dependencies
     require(len(encoded(work).encode()) <= 300000, 'MAC_HOST_SCOPE_TOO_LARGE')
@@ -155,6 +206,10 @@ def adopt(source, value):
                     'MAC_HOST_LOCAL_WORK_BUSY')
             require(not db.execute("SELECT 1 FROM native_local WHERE state!='TERMINAL'").fetchone(),
                     'MAC_HOST_LOCAL_WORK_BUSY')
+            for row in db.execute('SELECT binding FROM mac_host_tasks WHERE repository=?', (repo,)):
+                owner = parse_json(row['binding'])
+                require((owner.get('program'), owner.get('node')) != (scope['program'], node['id']),
+                        'MAC_GENERATION_ORIGINAL_TASK_ALREADY_OWNED')
             if dependencies:
                 from mac_pipeline import Pipeline
                 pipeline=Pipeline(source.store,source,None)
@@ -170,6 +225,7 @@ def adopt(source, value):
                      'canonical_task_pointer': 'mac-host:' + source.source_host + ':' + repo + ':' + task,
                      'generation_id': value['generation_id']}
             document = {'request': request, 'binding': bound, 'program': program, 'source_host': source.source_host,
+                        'decision_evidence': approval,
                         'policy': copy.deepcopy(POLICY), 'original_task': work['original_task'],
                         'legacy_claims': sorted({digest(c) for c in legacy} | {r[0] for r in db.execute(
                             'SELECT id FROM mac_host_external WHERE repository=?',(repo,))}),
@@ -189,8 +245,10 @@ def adopt(source, value):
 def check_external(source, bound):
     value = record(source, bound)
     original = value['original_task']['task_id']
-    for row in source.store.db.execute('SELECT id FROM mac_host_external WHERE repository=? AND task IN (?,?,?)',
+    for row in source.store.db.execute('SELECT id,document FROM mac_host_external WHERE repository=? AND task IN (?,?,?)',
                                       (bound['repository'].lower(), original, bound['task_id'], '*')):
+        require_unowned_original({'task_scope': 'all', 'tasks': [parse_json(row['document'])['task']]},
+                                 bound['program'], bound['node'])
         require(row['id'] in value['legacy_claims'], 'MAC_GENERATION_EXTERNAL_CHANGE_UNRESOLVED')
     acknowledged = {digest(r) for r in value['legacy_receipts']}
     for fence in transport_guard.unresolved(source.store.directory, include_digest=True):

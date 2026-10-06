@@ -163,6 +163,9 @@ class LocalSource:
         # Fresh read-only projections add barriers only. They never release an
         # external owner, infer terminal execution or advance the pinned plan.
         snapshot=handoff.inspect_repository(bound['repository'])
+        if 'generation_id' in bound:
+            import mac_generation
+            mac_generation.preflight(self,bound,snapshot)
         with self.store.lock:
             self._task(self.store.db,bound)
             record=self.program(bound)

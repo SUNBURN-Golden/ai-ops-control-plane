@@ -54,6 +54,7 @@ class AcceptedDependencyTests(unittest.TestCase):
         self.engine.pipeline.reconcile_accepted('owner/kix',self.bound['task_id'])
         self.latest['source']['head']='d'*40
         self.api_values={}
+        self.api_values[mac_generation.DECISION_API]=generation.decision_fixture()
         for name,run in [('protocol',11),('kernel',22)]:
             self.api_values[f'repos/owner/kix/actions/runs/{run}']={
                 'id':run,'head_sha':'c'*40,'repository':{'full_name':'owner/kix'},

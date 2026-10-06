@@ -27,22 +27,32 @@ import test_control_plane_mac_authority as fixtures
 import test_control_plane_mac_pipeline as delivery
 
 
+def decision_fixture():
+    """Authenticated-comment shape fixture; not live host qualification."""
+    return {'id': 6008874154, 'html_url': mac_generation.HOST_DECISION['url'],
+            'issue_url': "https://api.github.com/repos/BeautifulMind-JT/ai-ops-control-plane/issues/77",
+            'user': {'id': 263336091, 'login': "BeautifulMind-JT", 'type': 'User'},
+            'body': "## 결정 기록 (JunTae Park, 2026-10-06 12:42 KST)\n\nA3 감사(https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/77#issuecomment-6008601206)의 F1·F2에 대한 소유자 결정이다.\n\n**D-2026-10-06-MAC-HOST: MacBook(`aiops-macbook` 러너)을 Linux 보호 호스트와 함께 정식 실행 호스트로 인정한다.**\n\n조건(재감사 기준):\n1. **F1 단일 원장:** 두 호스트는 같은 작업에 대해 하나의 승인(admission) 기록만 가진다. 맥 러너로 보내는 경로는 공유 승인 설계(어느 호스트가 작업을 잡았는지 한 곳에서 판정, 중복 승인 차단)를 갖춘 뒤에만 활성화한다. dispatcher가 넘긴 이름만 비교하는 러너 확인은 증거로 인정하지 않는다.\n2. **F2 단일 소유자:** 한 작업은 한 기록, 한 소유자다. MAC-* 작업이 원래 프로그램 노드를 넘겨받으려면 이 결정 기록을 참조해야 하고, Linux 호스트가 열린 이슈를 이미 소유 중이면 넘겨받기를 거절한다(명시적 이관 절차 없이 이중 소유 금지). 자유 텍스트 `decision` 필드만으로는 승인 근거가 될 수 없다.\n3. **F3:** PR 설명은 main 대비 실제 범위(맥 앱 전체, VM 도구, 워크플로 2개, README)와 정확한 CI·리뷰 증거 링크로 고친다.\n\n위 조건을 반영한 새 HEAD에서 A3를 다시 받는다.\n"}
+
+
 class MacGenerationTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.store=core.Store(Path(self.temp.name)/'app'); self.addCleanup(self.store.close)
         self.source=mac_authority.LocalSource(self.store); self.worker=fixtures.FixtureWorker(self.store)
         self.controller=native_transfer.Controller(self.store,self.source,self.worker)
-        self.latest=fixtures.snapshot(tasks=[{'number':108,'program':'KIX','node':'CONFORMANCE','state':'open',
+        self.latest=fixtures.snapshot(tasks=[{'number':108,'program':'KIX','node':'CONFORMANCE','state':'closed',
                             'declared_owners':['CURSOR'],'body_sha256':'c'*64}],
             nodes=[{'id':'CONFORMANCE','title':'Local conformance','spec':'Exact original technical spec; do not alter',
                     'audit_floor':'A2','astra_gate':'NONE','astra_auto_merge':True}])
         self.reader=patch('mac_authority.handoff.inspect_repository',side_effect=lambda repo:copy.deepcopy(self.latest))
         self.reader.start();self.addCleanup(self.reader.stop)
+        self.decision_reader=patch('handoff.api',return_value=decision_fixture())
+        self.decision_reader.start();self.addCleanup(self.decision_reader.stop)
         self.source.initialize({'mode':'MAC','decision':'Explicit fixture Mac mode, not legacy quiescence'})
     def value(self,index=1,**changes):
         return {'repository':'owner/kix','node':'CONFORMANCE','generation_id':f'{index:032x}',
-                'decision':'User approved a distinct isolated Mac generation with draft-only publication, not legacy terminal',
+                'decision':mac_generation.HOST_DECISION['url'],
                 'plan_commit':self.latest['source']['head'],'plan_blob':self.latest['source']['blob'],**changes}
     def adopt(self,index=1): return self.source.generation(self.value(index))
     def request(self,bound,index=20): return {'binding':bound,'request_id':f'{index:032x}'}
@@ -61,6 +71,71 @@ class MacGenerationTests(unittest.TestCase):
         self.assertFalse(work['generation_policy']['auto_merge']);self.assertTrue(work['original_task']['provenance_only'])
         self.assertEqual(native_transfer.binding(bound),bound)
         self.assertFalse(self.source.meta()['legacy_terminal_verified'])
+        self.assertEqual(work['generation_decision'],mac_generation.HOST_DECISION['url'])
+        self.assertEqual(work['generation_decision_evidence'],mac_generation.HOST_DECISION)
+    def test_free_text_or_another_comment_is_not_durable_user_authority(self):
+        before=list(self.store.db.iterdump())
+        for pointer in ('User approves Mac','https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/77#issuecomment-1'):
+            with self.assertRaisesRegex(common.AppError,'DURABLE_DECISION_REQUIRED'):
+                self.source.generation(self.value(decision=pointer))
+        self.assertEqual(list(self.store.db.iterdump()),before);self.assertEqual(self.worker.launched,0)
+    def test_decision_requires_the_pinned_comment_actor_body_and_issue(self):
+        changes=[{'id':1},{'html_url':'https://example.invalid/approval'},
+                 {'issue_url':'https://api.github.com/repos/owner/kix/issues/77'},
+                 {'user':{'id':1,'login':'BeautifulMind-JT','type':'User'}},
+                 {'user':{'id':mac_generation.HOST_DECISION['actor_id'],'login':'another','type':'User'}},
+                 {'body':decision_fixture()['body']+'\nEdited approval'}]
+        before=list(self.store.db.iterdump())
+        for change in changes:
+            with patch('handoff.api',return_value={**decision_fixture(),**change}):
+                with self.assertRaisesRegex(common.AppError,'DURABLE_DECISION_UNVERIFIED'):self.adopt()
+        self.assertEqual(list(self.store.db.iterdump()),before);self.assertEqual(self.worker.launched,0)
+    def test_open_linux_canonical_owner_is_not_acknowledged_as_an_adoption(self):
+        before=list(self.store.db.iterdump());self.latest['tasks'][0]['state']='open'
+        with self.assertRaisesRegex(common.AppError,'LINUX_OWNER_UNRESOLVED'):self.adopt()
+        self.assertEqual(list(self.store.db.iterdump()),before);self.assertEqual(self.worker.launched,0)
+    def test_ownerless_or_unkeyed_open_issue_also_fails_closed(self):
+        self.latest['tasks'][0]['state']='open';self.latest['tasks'][0].pop('declared_owners')
+        with self.assertRaisesRegex(common.AppError,'LINUX_OWNER_UNRESOLVED'):self.adopt()
+        self.latest['tasks'][0].pop('node')
+        with self.assertRaisesRegex(common.AppError,'LINUX_OWNER_UNRESOLVED'):self.adopt()
+        self.assertEqual(self.source.tasks('owner/kix'),[])
+    def test_new_linux_owner_before_start_blocks_without_a_native_reservation(self):
+        bound=self.adopt();before=list(self.store.db.iterdump())
+        self.latest['tasks'][0]['state']='open'
+        with self.assertRaisesRegex(common.AppError,'LINUX_OWNER_UNRESOLVED'):
+            self.controller.start(self.request(bound))
+        self.assertEqual(list(self.store.db.iterdump()),before);self.assertEqual(self.worker.launched,0)
+    def test_owner_appearing_after_checkout_preparation_blocks_claim_and_worker(self):
+        bound=self.adopt();prepare=self.worker.prepare
+        def changed(*args):
+            attempt=prepare(*args);self.latest['tasks'][0]['state']='open';return attempt
+        with patch.object(self.worker,'prepare',side_effect=changed):
+            with self.assertRaisesRegex(common.AppError,'LINUX_OWNER_UNRESOLVED'):
+                self.controller.start(self.request(bound))
+        self.assertEqual(self.worker.launched,0)
+    def test_edited_decision_after_adoption_blocks_start_without_repinning(self):
+        bound=self.adopt();before=list(self.store.db.iterdump())
+        with patch('handoff.api',return_value={**decision_fixture(),'body':'Changed decision'}):
+            with self.assertRaisesRegex(common.AppError,'DURABLE_DECISION_UNVERIFIED'):
+                self.controller.start(self.request(bound))
+        self.assertEqual(list(self.store.db.iterdump()),before);self.assertEqual(self.worker.launched,0)
+    def test_old_free_text_generation_cannot_gain_authority_on_update(self):
+        bound=self.adopt();row=self.store.db.execute('SELECT document FROM mac_host_generations').fetchone()
+        old=common.parse_json(row[0]);old.pop('decision_evidence')
+        self.store.db.execute('UPDATE mac_host_generations SET document=?',(common.encoded(old),))
+        before=list(self.store.db.iterdump())
+        with self.assertRaisesRegex(common.AppError,'DURABLE_DECISION_REQUIRED'):
+            self.controller.start(self.request(bound))
+        self.assertEqual(list(self.store.db.iterdump()),before);self.assertEqual(self.worker.launched,0)
+    def test_concurrent_different_generations_cannot_own_one_original_node(self):
+        def adopt(index):
+            try:self.adopt(index);return 'ADOPTED'
+            except common.AppError as exc:return exc.code
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:results=list(pool.map(adopt,[1,2]))
+        self.assertEqual(results.count('ADOPTED'),1)
+        self.assertIn('MAC_GENERATION_ORIGINAL_TASK_ALREADY_OWNED',results)
+        self.assertEqual(len(self.source.tasks('owner/kix')),1);self.assertEqual(self.worker.launched,0)
     def test_generation_replay_is_read_only_and_cannot_repin_or_change_decision(self):
         value=self.value();bound=self.source.generation(value)
         before=[tuple(r) for r in self.store.db.execute('SELECT * FROM mac_host_generations')]
@@ -90,8 +165,8 @@ class MacGenerationTests(unittest.TestCase):
         journal=self.journal();before=journal.read_bytes();jobs=self.store.jobs()
         events=[tuple(r) for r in self.store.db.execute('SELECT * FROM events')];settings=self.store.settings()
         claims=[tuple(r) for r in self.store.db.execute('SELECT * FROM mac_host_external')]
-        bound=self.adopt();record=self.controller.start(self.request(bound))
-        self.assertEqual(record['state'],'RUNNING');self.assertEqual(self.worker.launched,1)
+        with self.assertRaisesRegex(common.AppError,'ORIGINAL_TASK_ALREADY_OWNED'):self.adopt()
+        self.assertEqual(self.worker.launched,0)
         self.assertEqual(journal.read_bytes(),before);self.assertEqual(self.store.jobs(),jobs)
         self.assertEqual([tuple(r) for r in self.store.db.execute('SELECT * FROM events')],events)
         self.assertEqual(self.store.settings(),settings)
@@ -118,11 +193,12 @@ class MacGenerationTests(unittest.TestCase):
             with self.assertRaises(common.AppError):self.controller.start(value)
         self.assertEqual(self.worker.launched,0)
     def test_two_requests_and_generations_keep_one_global_writer(self):
-        first=self.adopt();second=self.adopt(2)
+        first=self.adopt()
+        with self.assertRaisesRegex(common.AppError,'ORIGINAL_TASK_ALREADY_OWNED'):self.adopt(2)
         def start(item):
             try:return self.controller.start(self.request(item[1],item[0]))['state']
             except common.AppError:return 'FENCED'
-        with concurrent.futures.ThreadPoolExecutor(2) as pool:results=list(pool.map(start,[(21,first),(22,second)]))
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:results=list(pool.map(start,[(21,first),(22,first)]))
         self.assertEqual(results.count('RUNNING'),1);self.assertEqual(self.worker.launched,1)
         with self.assertRaisesRegex(common.AppError,'WORK_BUSY'):self.adopt(3)
     def test_same_start_after_unknown_launch_does_not_start_another_writer(self):
