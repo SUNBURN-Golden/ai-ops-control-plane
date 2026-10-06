@@ -52,6 +52,7 @@ class AuthorityCheckpointTests(unittest.TestCase):
             return ''
         self.decision_body = 'Synthetic bounded User approval fixture; no live product authority.'
         self.approval = {'comment_id': 123456, 'body_sha256': hashlib.sha256(self.decision_body.encode()).hexdigest(),
+                         'body_utf8_bytes': len(self.decision_body.encode('utf-8')),
                          'created_at': '2026-10-06T00:00:00Z', 'updated_at': '2026-10-06T00:00:00Z'}
         self.comment = {'id': self.approval['comment_id'], 'body': self.decision_body,
             'html_url': 'https://github.com/' + self.pin['repository'] + '/issues/92#issuecomment-123456',
@@ -85,6 +86,13 @@ class AuthorityCheckpointTests(unittest.TestCase):
         with patch('handoff.api', side_effect=common.AppError('REPOSITORY_ACCESS_REQUIRED')):
             self.assertFalse(self.allowed())
         with patch.object(authority, 'APPROVAL', None): self.assertFalse(self.allowed())
+
+    def test_scope_mismatch_in_approval_body_cannot_reuse_the_pinned_hash(self):
+        for body in (self.decision_body.replace('bounded', 'unrestricted'),
+                     self.decision_body.replace('User approval', 'another scope')):
+            self.comment['body'] = body; self.assertFalse(self.allowed())
+        self.comment['body'] = self.decision_body
+        self.approval['body_utf8_bytes'] += 1; self.assertFalse(self.allowed())
 
     def test_other_job_repo_node_plan_spec_gate_and_alias_do_not_inherit(self):
         original = copy.deepcopy(self.job)
@@ -142,6 +150,29 @@ class AuthorityCheckpointTests(unittest.TestCase):
             self.assertFalse(self.allowed())
         self.assertIsNone(handoff.remaining_api_seconds())
         self.assertFalse(any(c[0] in ('add','commit') for c in self.calls))
+
+
+class ApprovalArtifactTests(unittest.TestCase):
+    def test_actual_pinned_comment_copy_metadata_and_scope_match(self):
+        docs = Path(__file__).resolve().parents[1] / 'docs'
+        record = json.loads((docs / 'MAC_AGENTS_SCOPE_APPROVAL_6018278031_RECORD.json').read_text())
+        body = (docs / record['exact_body_copy']).read_bytes()
+        self.assertEqual(len(body), authority.APPROVAL['body_utf8_bytes'])
+        self.assertEqual(hashlib.sha256(body).hexdigest(), authority.APPROVAL['body_sha256'])
+        self.assertEqual(record['body_sha256'], authority.APPROVAL['body_sha256'])
+        self.assertEqual(record['body_utf8_bytes'], authority.APPROVAL['body_utf8_bytes'])
+        for key in ('comment_id', 'created_at', 'updated_at'):
+            self.assertEqual(record[key], authority.APPROVAL[key])
+        self.assertEqual(record['actor'], authority.ACTOR)
+        comment = {'id': record['comment_id'], 'body': body.decode('utf-8'), 'html_url': record['url'],
+                   'issue_url': record['issue_url'], 'user': record['actor'],
+                   'created_at': record['created_at'], 'updated_at': record['updated_at']}
+        with patch('handoff.api', return_value=comment): self.assertTrue(authority.decision_verified())
+        for key in ('job', 'branch', 'before_blob', 'after_blob', 'plan_commit'):
+            self.assertIn(authority.PINS[key], comment['body'])
+        self.assertIn('AGENTS.md §5', comment['body']); self.assertIn('A3 감사·병합은 그대로', comment['body'])
+        self.assertNotIn(authority.PINS['plan_blob'], comment['body'])
+        self.assertNotIn(authority.PINS['spec_sha256'], comment['body'])
 
 
 if __name__ == '__main__': unittest.main()

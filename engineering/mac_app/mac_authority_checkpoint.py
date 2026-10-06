@@ -17,8 +17,14 @@ PINS = {
     'before_blob': '5ef2f06dcfe35f3a53ea8e7d021aba8bc38f121e',
     'after_blob': '190bcae4f0c7d60666b942dd7df9e87749a09297',
 }
-# Pending a real User comment. No caller-supplied answer or fixture grants access.
-APPROVAL = None
+# Verified actual User API body. No caller-supplied answer or fixture grants access.
+APPROVAL = {
+    'comment_id': 6018278031,
+    'body_sha256': '000fa33005152da022795f01ef3ab91b3d4d085a81454b41907f8fd44488e951',
+    'body_utf8_bytes': 348,
+    'created_at': '2026-10-06T14:18:45Z',
+    'updated_at': '2026-10-06T14:18:45Z',
+}
 ACTOR = {'login': 'BeautifulMind-JT', 'id': 263336091, 'type': 'User'}
 
 
@@ -35,6 +41,7 @@ def decision_verified():
             isinstance(comment.get('user'), dict) and all(comment['user'].get(k) == v for k, v in ACTOR.items()) and
             comment.get('created_at') == pin['created_at'] and comment.get('updated_at') == pin['updated_at'] and
             isinstance(comment.get('body'), str) and
+            len(comment['body'].encode('utf-8')) == pin['body_utf8_bytes'] and
             hashlib.sha256(comment['body'].encode('utf-8')).hexdigest() == pin['body_sha256'])
 
 

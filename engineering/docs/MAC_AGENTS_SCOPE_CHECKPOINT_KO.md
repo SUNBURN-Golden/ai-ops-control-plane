@@ -26,12 +26,23 @@ symlink/hardlink/실행 mode, 변형된 bytes는 수용하지 않는다.
 
 ## 승인 입력
 
-실제 User가 kix-protocol #92에 남긴 별도 승인 댓글의 ID·repo/issue URL·actor login/
-numeric ID/type·생성/수정 시각·본문 UTF-8 SHA-256을 고정하고 authenticated GitHub GET으로
+실제 User의 [승인 댓글 6018278031](https://github.com/BeautifulMind-JT/kix-protocol/issues/92#issuecomment-6018278031)을
+authenticated GitHub GET으로 읽어 원문 348 UTF-8 bytes와 SHA-256
+`000fa33005152da022795f01ef3ab91b3d4d085a81454b41907f8fd44488e951`을 직접 계산했다.
+actor는 BeautifulMind-JT / 263336091 / User, 생성·수정은 모두 2026-10-06T14:18:45Z다.
+[정확한 API 본문 사본](MAC_AGENTS_SCOPE_APPROVAL_6018278031.md)과
+[별도 metadata](MAC_AGENTS_SCOPE_APPROVAL_6018278031_RECORD.json)를 보존했다.
+ID·repo/issue URL·actor login/numeric ID/type·생성/수정 시각·본문 bytes/hash를 고정하고
 checkpoint와 push 직전에 다시 읽는다. 수정·삭제·외부 actor·다른 issue·읽기 실패는
 AUTHORITY_EDIT_NEEDS_USER 보류를 유지한다. 자유 resume answer나 모델 text, fixture는
-승인 입력이 아니다. 실제 댓글을 검증해 pin하기 전 APPROVAL=None은 항상 거절한다.
-기존 #92 body/control/confirmation은 수정하거나 닫지 않는다.
+승인 입력이 아니다. 기존 #92 body/control/confirmation은 수정하거나 닫지 않는다.
+
+댓글에 실제 있는 범위는 node/job/branch, AGENTS.md §5, 전후 blob, plan commit,
+commit/push/PR 승인과 A3 감사·병합 유지다. plan blob·spec hash·일반 Mac authority
+예외는 댓글에 없으므로 댓글 원문으로 주장하지 않는다. source 수리 승인은 위 별도
+명시 User 메시지에, plan blob/spec는 보존된 원래 plan과 source의 추가 축소 조건에 따른다.
+User 메시지 `Sentinel_189daa51ad4481918cf45ff2f1306cc0`은 이 실제 댓글 pin 후
+같은 source 브랜치의 commit/push/CI/독립 검토 진행을 명시 승인했다.
 
 이는 지정 User 계정의 승인 권한을 신뢰하는 Mac 한정 policy 입력이다.
 본문 hash는 불변성을 검증하며 host 서명이나 Linux ledger 읽기 증거가 아니다.

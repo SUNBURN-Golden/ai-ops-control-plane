@@ -1,0 +1,33 @@
+{
+  "comment_id": 6018278031,
+  "url": "https://github.com/BeautifulMind-JT/kix-protocol/issues/92#issuecomment-6018278031",
+  "issue_url": "https://api.github.com/repos/BeautifulMind-JT/kix-protocol/issues/92",
+  "actor": {
+    "login": "BeautifulMind-JT",
+    "id": 263336091,
+    "type": "User"
+  },
+  "created_at": "2026-10-06T14:18:45Z",
+  "updated_at": "2026-10-06T14:18:45Z",
+  "body_utf8_bytes": 348,
+  "body_sha256": "000fa33005152da022795f01ef3ab91b3d4d085a81454b41907f8fd44488e951",
+  "exact_body_copy": "MAC_AGENTS_SCOPE_APPROVAL_6018278031.md",
+  "explicit_comment_scope": [
+    "node",
+    "job",
+    "branch",
+    "AGENTS.md section 5",
+    "before_blob",
+    "after_blob",
+    "plan_commit",
+    "commit/push/PR",
+    "A3 audit and merge unchanged"
+  ],
+  "fields_not_in_comment": [
+    "plan_blob",
+    "spec_sha256",
+    "general Mac authority exception"
+  ],
+  "source_repair_user_message": "Sentinel_18579c8bc67c8191a70e193d38fbd27e",
+  "pinning_user_message": "Sentinel_189daa51ad4481918cf45ff2f1306cc0"
+}
