@@ -150,20 +150,9 @@ class Pipeline:
         Defaults match the adopted program reader. A3 promotes to ARCHITECTURE
         while a declared RELEASE remains reserved. Other nodes stay unchanged.
         """
-        bound=job['native_lineage']['binding']; node_id=bound['node']
-        scope=self.source.program(bound)['scope']
-        require(scope['blob']==bound['plan_blob'],'MAC_HOST_AUDIT_SCOPE_UNVERIFIED')
-        nodes=[n for n in scope['nodes'] if n['id']==node_id]
-        require(len(nodes)==1,'MAC_HOST_AUDIT_SCOPE_UNVERIFIED')
-        node=nodes[0]; floor=node.get('audit_floor','A1'); gate=node.get('astra_gate','NONE')
-        require(floor in ('A0','A1','A2','A3') and gate in ('NONE','MILESTONE','ARCHITECTURE','RELEASE'),
-                'MAC_HOST_AUDIT_SCOPE_UNVERIFIED')
-        if floor=='A3' and gate!='RELEASE': gate='ARCHITECTURE'
-        return {'node':node_id,'head':job['head'],'audit_floor':floor,'astra_gate':gate,
-                'required':floor=='A3' or gate!='NONE','source':scope['path'],
-                'plan_commit':job['base_sha'],'plan_blob':scope['blob'],
-                'authority':'engineering/AGENTS.md sections 8 and 14; pinned program node',
-                'audit_receipt':None}
+        import mac_astra
+        bound=job['native_lineage']['binding']
+        return mac_astra.audit_requirement(job,self.source.program(bound)['scope'])
 
     def validate_candidate(self,job,*,refresh=True):
         self.assert_job(job,refresh=refresh)
