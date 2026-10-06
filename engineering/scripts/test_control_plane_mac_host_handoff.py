@@ -68,9 +68,11 @@ class HostHandoffTests(unittest.TestCase):
                 self.calls += 1
                 assert method == 'POST' and endpoint.endswith('/control-plane-runtime.yml/dispatches')
                 inputs = body['inputs']; args = json.loads(inputs['program_args'])
-                assert inputs['execution_host'] == 'current' and inputs['operation'] == 'start'
+                assert inputs['operation'] == 'start'
                 assert inputs['target_repository'] == program_fixture.REPO
-                assert 'expected_runner_name' not in inputs and 'builder_id' not in inputs
+                # The unchanged main workflow selects the existing host itself;
+                # relay cannot send undeclared routing or admission inputs.
+                assert set(inputs) == {'target_repository', 'operation', 'program_args', 'issue_number'}
                 # Same start, dispatch, finalize and protected ledger code as the
                 # runtime fixture; no second admission implementation in the test.
                 self.results.append(f.launch_writer(int(inputs['issue_number']), args['node'], args['plan_commit']))
@@ -275,10 +277,23 @@ class HostHandoffTests(unittest.TestCase):
 
     def test_preview_routes_existing_host_without_lane_or_model_override(self):
         preview = self.preview(); prepared = relay.prepare(preview['request'])
-        self.assertEqual(prepared['body']['inputs']['execution_host'], 'current')
-        self.assertEqual(prepared['body']['inputs']['operation'], 'start')
+        self.assertEqual(preview['request']['execution_host'], 'current')
+        self.assertEqual(prepared['body']['inputs'], {
+            'target_repository': program_fixture.REPO, 'operation': 'start',
+            'program_args': relay.canonical(preview['request']['args']), 'issue_number': str(self.issue)})
+        self.assertEqual(prepared['body']['ref'], 'main')
         for extra in ({'runner_name': 'different-host'}, {'execution_host': 'native-mac'}, {'builder_id': 'CURSOR'}):
             with self.subTest(extra=extra), self.assertRaises(relay.RelayError): relay.prepare(dict(preview['request'], **extra))
+        self.assertEqual(self.f.rows(), [])
+
+    def test_macbook_handoff_cannot_reserve_or_dispatch_without_shared_admission(self):
+        request = dict(self.preview()['request'], execution_host='macbook', runner_name='aiops-macbook')
+        journal = self.journal('unqualified-macbook'); api = self.workflow_api()
+        with self.assertRaisesRegex(relay.RelayError, '^SHARED_ADMISSION_AUTHORITY_REQUIRED$'):
+            relay.submit(request, journal, api)
+        self.assertEqual(api.calls, 0)
+        self.assertEqual(api.results, [])
+        self.assertEqual(journal.db.execute('SELECT COUNT(*) FROM requests').fetchone()[0], 0)
         self.assertEqual(self.f.rows(), [])
 
     def test_fixture_preview_to_actual_program_and_shared_ledger_admits_one_writer(self):
