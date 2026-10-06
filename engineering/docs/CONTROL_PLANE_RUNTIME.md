@@ -369,7 +369,7 @@ sudo env GH_TOKEN="$(gh auth token)" /opt/aiops/bin/aiops-fable consult \
   본문에 `DISPATCH.md` §14의 결과 필드와 finding이 있다. 요약은 쉬운 한국어다.
 - 상담: 첫 두 줄이 `<!-- aiops-fable-consult -->`와
   `ASTRA_CONSULT_V1 result=<ANSWERED|USER_REQUIRED> by=ASTRA_FABLE question=<id> ref=<sha> session=<id>`이다.
-- 도구는 이 첫 두 줄만 읽어 이전 결과를 찾는다. gate는 이 글을 읽지 않는다(M4).
+- 도구는 이 첫 두 줄만 읽어 이전 결과를 찾는다. Linux program gate는 이 글을 읽지 않는다(M4). Mac local 결과 전달은 이미 승인된 [D-2026-10-06-MAC-A3-RECEIPT 예외](PROGRAM_MODE.md#131-mac-local-감사-결과-전달-예외--d-2026-10-06-mac-a3-receipt)를 따른다.
 
 증거: 실행 폴더에 packet, 원본 CLI 출력(`claude-output.jsonl`), 올린 글, `run.json`이 남는다.
 댓글에는 host run id, 모델 세션, 도구 sha256, 원본 출력 sha256이 있다.
