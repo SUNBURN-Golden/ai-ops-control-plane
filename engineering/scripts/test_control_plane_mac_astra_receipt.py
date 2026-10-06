@@ -285,5 +285,26 @@ class JournalTests(unittest.TestCase):
         with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):
             receipts.Journal(self.store).consume(self.requirement)
 
+    def concurrent_hold(self,boundary):
+        reads=0
+        def racing_api(path,paginate=False):
+            nonlocal reads
+            value=self.api(path,paginate=paginate)
+            if path.endswith('/pulls/2'):
+                reads+=1
+                if reads==boundary:
+                    # Another authenticated observer commits an edited-comment
+                    # hold while this observer's network read is in flight.
+                    try:receipts.Journal(self.store).hold(self.requirement,'MAC_HOST_ASTRA_RECEIPT_CHANGED')
+                    except AppError:pass
+            return value
+        with patch('handoff.api',side_effect=racing_api):
+            with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):self.journal.consume(self.requirement)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_receipts').fetchone()[0],0)
+
+    def test_concurrent_hold_prevents_observation_publication(self):self.concurrent_hold(1)
+
+    def test_concurrent_hold_prevents_final_receipt_publication(self):self.concurrent_hold(4)
+
 
 if __name__ == '__main__': unittest.main()

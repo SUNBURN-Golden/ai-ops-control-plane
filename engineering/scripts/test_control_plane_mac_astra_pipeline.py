@@ -93,6 +93,16 @@ class AstraPipelineTests(unittest.TestCase):
         self.assertGreater(self.reads,reads)
         self.assertEqual(self.store.get(job['id']),before)
 
+    def test_pending_to_passed_ci_uses_current_host_evidence_for_audit_request(self):
+        job=self.candidate();self.repos.ci_state='pending'
+        self.engine.step(job);job=self.store.get(job['id'])
+        self.assertEqual(job['ci']['state'],'pending')
+        self.repos.ci_state='passed'
+        with self.assertRaisesRegex(common.AppError,'ASTRA_AUDIT_REQUIRED'):self.engine.step(job)
+        current=self.store.get(job['id'])
+        self.assertEqual(current['ci']['state'],'passed')
+        self.assertIsNotNone(current['audit_requirement']['request_recorded_at'])
+
     def test_constructing_pipeline_does_not_migrate_read_only_source_ledgers(self):
         from mac_pipeline import Pipeline
         with patch('mac_astra_receipt.Journal') as journal:

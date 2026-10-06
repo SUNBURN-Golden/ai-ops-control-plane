@@ -184,6 +184,7 @@ class Pipeline:
                 self.writer_sessions(job)+[job['review']['provider_evidence']['session_id']],
                 'MAC_HOST_INDEPENDENT_REVIEW_REQUIRED')
         with self.store.lock:
+            self.astra.check_hold(requirement)
             current=self.store.get(job['id'])
             require(self.audit_requirement(current)['request_sha256']==requirement['request_sha256'] and
                     self.repos.head(current)==job['head'] and self.repos.clean(current),

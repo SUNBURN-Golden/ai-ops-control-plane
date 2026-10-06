@@ -573,7 +573,7 @@ class Engine:
             if not native and not self.inspected_head(job):
                 return self.rework(job, ['CI 확인 중 코드나 검토 근거가 달라졌습니다. 현재 코드 전체를 다시 검증하세요.'])
             data = self.repos.checks(job)
-            self.store.update(job['id'], ci=data)
+            job=self.store.update(job['id'], ci=data)
             if native and job.get('candidate_ci_requested')!=job['head']:
                 if data['state']=='passed':
                     self.store.update(job['id'],candidate_ci_requested=job['head'])

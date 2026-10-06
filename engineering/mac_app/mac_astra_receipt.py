@@ -243,12 +243,17 @@ class Journal:
                                   (repo.lower(),number,request['head'],code,encoded(document)))
         raise AppError(code)
 
-    def observe(self, requirement):
+    def check_hold(self,requirement):
         repo,number,request=context(requirement)
         key=(repo.lower(),number,request['head'])
         with self.store.lock:
             held=self.db.execute('SELECT code FROM mac_host_astra_holds WHERE repository=? AND pr=? AND head=?',key).fetchone()
         if held: raise AppError(held[0])
+
+    def observe(self, requirement):
+        repo,number,request=context(requirement)
+        key=(repo.lower(),number,request['head'])
+        self.check_hold(requirement)
         live_pr(requirement)
         pages=api('repos/'+repo+'/issues/'+str(number)+'/comments?per_page=100',paginate=True)
         require(isinstance(pages,list) and pages and all(isinstance(page,list) for page in pages) and
@@ -267,6 +272,7 @@ class Journal:
                 except AppError:self.hold(requirement,'MAC_HOST_ASTRA_RECEIPT_CHANGED')
                 observed[value['comment_id']]=value
         with self.store.lock:
+            self.check_hold(requirement)
             old={row['comment_id']:parse_json(row['document']) for row in self.db.execute(
                 'SELECT comment_id,document FROM mac_host_astra_observations WHERE repository=? AND pr=? AND head=?',key)}
             for cid,value in old.items():
@@ -339,6 +345,7 @@ class Journal:
                   'request_sha256': sha, 'request': copy.deepcopy(document['request']),
                   'decision': copy.deepcopy(DECISION), 'comment': evidence}
         with self.store.lock:
+            self.check_hold(requirement)
             old = self.db.execute('SELECT document FROM mac_host_astra_receipts WHERE request_sha256=?', (sha,)).fetchone()
             if old:
                 require(parse_json(old[0]) == result, 'MAC_HOST_ASTRA_RECEIPT_CHANGED')
