@@ -12,7 +12,6 @@ import fcntl
 import hashlib
 import hmac
 import json
-import math
 import os
 import re
 from pathlib import Path
@@ -50,7 +49,7 @@ REVIEW_PIN_RE = re.compile(r"ASTRA_REVIEW_V1 review=([0-9a-f]{24}) head=([0-9a-f
 DELIVERY_PIN_RE = re.compile(r"ASTRA_DELIVERY_V1 pr=([1-9][0-9]{0,9}) head=([0-9a-f]{40}) mac=([0-9a-f]{64})")
 BLOCKER_PIN_RE = re.compile(r"ASTRA_BLOCKED_V1 kind=(DECISION_REQUIRED|BLOCKED|STALLED) launch=([0-9a-f]{24}) "
                             r"mac=([0-9a-f]{64})")
-OPERATOR_ONLY = {"init", "reconcile", "migrate", "materialize-resolve", "native-transfer-init"}
+OPERATOR_ONLY = {"init", "reconcile", "migrate", "materialize-resolve"}
 MATERIALIZE_STATES = ("SUBMITTING", "CREATED", "UNKNOWN", "ABANDONED")
 CLEAN_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
 
@@ -610,12 +609,7 @@ class Ledger:
                 return False, parse_json(previous["result"])
             task = (packet["repository"], packet["task_id"])
             reason = None
-            native = native_rows(db)
-            if any((r["repository"], r["task"]) == task for r in native):
-                reason = "canonical task moved to a native target; source cannot reclaim it"
-            elif any(r["lane"] == lane and r["state"] != "TERMINAL" for r in native):
-                reason = "lane has an unresolved native transfer"
-            elif role == "WRITER" and db.execute(
+            if role == "WRITER" and db.execute(
                     f"SELECT 1 FROM launches WHERE repository=? AND task=? AND role='WRITER' AND {ACTIVE_SQL}",
                     task).fetchone():
                 reason = "task already has an active or unresolved owner"
@@ -633,13 +627,11 @@ class Ledger:
                 reason = "review request already has an active or unresolved session"
             elif db.execute(f"SELECT 1 FROM launches WHERE lane=? AND {ACTIVE_SQL}", (lane,)).fetchone():
                 reason = "lane busy"
-            elif (db.execute(f"SELECT count(*) FROM launches WHERE {ACTIVE_SQL}").fetchone()[0] +
-                  sum(r["state"] != "TERMINAL" for r in native)) >= policy["max_active_sessions"]:
+            elif db.execute(f"SELECT count(*) FROM launches WHERE {ACTIVE_SQL}").fetchone()[0] >= policy["max_active_sessions"]:
                 reason = "host max_active_sessions reached"
             elif (policy.get("max_launches_per_24h") is not None and
-                  (db.execute("SELECT count(*) FROM launches WHERE admitted=1 AND created>=?",
-                              (self.clock() - 86400,)).fetchone()[0] +
-                   sum(r["created"] >= self.clock() - 86400 for r in native)) >= policy["max_launches_per_24h"]):
+                  db.execute("SELECT count(*) FROM launches WHERE admitted=1 AND created>=?",
+                             (self.clock() - 86400,)).fetchone()[0] >= policy["max_launches_per_24h"]):
                 reason = "host max_launches_per_24h reached"
             state = "FAILED_PRESTART" if reason else "SUBMITTING"
             result = result_for(packet, "FAILED_PRESTART" if reason else "UNKNOWN",
@@ -700,12 +692,9 @@ class Ledger:
         try:
             rows = db.execute(f"SELECT request, repository, task, role, lane, state, created FROM launches "
                               f"WHERE {ACTIVE_SQL} ORDER BY created").fetchall()
-            native = [dict(request=r['request'], repository=r['repository'], task=r['task'], role='WRITER',
-                           lane=r['lane'], state='UNKNOWN', created=r['created'], execution_host='NATIVE_TARGET')
-                      for r in native_rows(db) if r['state'] != 'TERMINAL']
         finally:
             db.close()
-        active = [dict(row) for row in rows] + native
+        active = [dict(row) for row in rows]
         return {"status": "OK", "max_active_sessions": policy["max_active_sessions"], "active_total": len(active),
                 "lanes": [{"lane": lane, "enabled": lane in policy["enabled_builders"],
                            "active": [row for row in active if row["lane"] == lane]}
@@ -859,10 +848,6 @@ class Ledger:
         db = self.connect()
         try:
             db.execute("BEGIN IMMEDIATE")
-            for row in native_rows(db):
-                binding = parse_json(row['document'])['request']['binding']
-                if (binding['program'], binding['node']) == (program, node):
-                    raise HostError('native transferred plan requires a separate canonical revision authorization')
             changed = db.execute("UPDATE materializations SET plan_commit=?, updated=? "
                                  "WHERE program=? AND node=? AND plan_commit=?",
                                  (new, self.clock(), program, node, old)).rowcount
@@ -971,279 +956,6 @@ class Ledger:
             db.close()
 
 
-def native_rows(db):
-    """An uninstalled candidate has no table and cannot grant a transfer."""
-    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_transfers'").fetchone():
-        return []
-    rows = db.execute("SELECT * FROM native_transfers ORDER BY created, request LIMIT 4097").fetchall()
-    if len(rows) > 4096:
-        raise HostError("native transfer history limit reached; history cannot be discarded")
-    return rows
-
-
-def native_digest(value):
-    return hashlib.sha256(canonical(value).encode()).hexdigest()
-
-
-def native_policy(policy):
-    """A separately adopted, root-protected program authorization seal is mandatory.
-
-    No client-supplied plan, URL, fixture or terminal flag can create this seal.
-    Provisioning/qualification is deliberately outside these fixed operations.
-    """
-    value = policy.get("native_transfer")
-    if not isinstance(value, dict) or value.get("qualified") is not True:
-        raise HostError("NATIVE_TRANSFER_UNSUPPORTED: protected service authorization absent")
-    if set(value) != {"qualified", "source_host", "authorization", "targets", "contracts"}:
-        raise HostError("invalid native transfer policy")
-    safe_key(value["source_host"], "source host")
-    if not evidence_url(value["authorization"]):
-        raise HostError("native security-boundary adoption/qualification pointer required")
-    if not isinstance(value["targets"], dict) or not value["targets"]:
-        raise HostError("qualified native target identities required")
-    for target, uid in value["targets"].items():
-        safe_key(target, "target host")
-        if (type(uid) is not int or uid <= 0 or target == value["source_host"] or
-                uid in [policy["control_uid"], policy["runner_uid"], *policy["builder_uids"].values()]):
-            raise HostError("target needs a distinct authenticated custodian identity")
-    if len(set(value["targets"].values())) != len(value["targets"]):
-        raise HostError("native target custodian identities must be distinct")
-    if not isinstance(value["contracts"], list) or not 1 <= len(value["contracts"]) <= 256:
-        raise HostError("protected canonical program contract seals required")
-    return value
-
-
-def native_contract(policy, binding):
-    config = native_policy(policy)
-    fields = {"repository", "task_id", "task_revision", "issue", "program", "node",
-              "materialization_request_id", "plan_commit", "plan_blob", "dependencies",
-              "owner_lane", "source_host", "target_host", "work_sha256"}
-    if not isinstance(binding, dict) or set(binding) != fields:
-        raise HostError("invalid native binding")
-    for key in ("task_id", "task_revision", "program", "node", "source_host", "target_host"):
-        safe_key(binding[key], key)
-    if (binding["repository"] not in policy["allowed_repositories"] or
-            binding["source_host"] != config["source_host"] or binding["target_host"] not in config["targets"] or
-            binding["owner_lane"] not in policy["enabled_builders"] or
-            type(binding["issue"]) is not int or binding["issue"] < 1 or
-            not isinstance(binding["materialization_request_id"], str) or
-            not REQUEST_RE.fullmatch(binding["materialization_request_id"]) or
-            any(not isinstance(binding[k], str) or not SHA_RE.fullmatch(binding[k]) for k in ("plan_commit", "plan_blob")) or
-            not isinstance(binding["work_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", binding["work_sha256"]) or
-            not isinstance(binding["dependencies"], list) or len(binding["dependencies"]) > 256):
-        raise HostError("invalid native canonical identity")
-    matches = [item for item in config["contracts"] if isinstance(item, dict) and item.get("binding") == binding]
-    if len(matches) != 1 or set(matches[0]) != {"binding", "work", "gate_evidence"}:
-        raise HostError("binding lacks one exact protected program authorization seal")
-    contract = matches[0]
-    if (not isinstance(contract["work"], dict) or native_digest(contract["work"]) != binding["work_sha256"] or
-            not evidence_url(contract["gate_evidence"])):
-        raise HostError("protected task scope/gate seal is invalid")
-    if (contract["work"].get("task_id") != binding["task_id"] or
-            contract["work"].get("task_revision") != binding["task_revision"] or
-            contract["work"].get("plan_commit") != binding["plan_commit"]):
-        raise HostError("protected work differs from its canonical identity")
-    return contract
-
-
-class NativeTransferLedger:
-    """Candidate fixed source operations; never starts a VM or releases UNKNOWN.
-
-    The existing ledger, lock and Linux lane census remain authoritative. A
-    transfer fences the source task permanently; only the same target can resume.
-    RESERVED/CLAIMED never expire. A lost response is queried, never resubmitted.
-    """
-    def __init__(self, ledger, policy, *, quiescence=None):
-        self.ledger, self.policy = ledger, policy
-        self.quiescence = quiescence or lane_quiescence
-
-    def initialize(self):
-        native_policy(self.policy)
-        with self.ledger.inflight_lock(exclusive=True):
-            db = self.ledger.connect()
-            try:
-                db.executescript("""BEGIN IMMEDIATE;
-                    CREATE TABLE IF NOT EXISTS native_transfers (
-                        request TEXT PRIMARY KEY, repository TEXT NOT NULL, task TEXT NOT NULL,
-                        lane TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('RESERVED','CLAIMED','TERMINAL')),
-                        document TEXT NOT NULL, created REAL NOT NULL, terminal TEXT);
-                    CREATE UNIQUE INDEX IF NOT EXISTS native_one_active_task ON native_transfers(repository,task)
-                        WHERE state != 'TERMINAL';
-                    CREATE UNIQUE INDEX IF NOT EXISTS native_one_active_lane ON native_transfers(lane)
-                        WHERE state != 'TERMINAL'; COMMIT;""")
-            finally: db.close()
-        return {"status": "INITIALIZED", "candidate": "NATIVE_TRANSFER_V1"}
-
-    def _require_table(self, db):
-        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_transfers'").fetchone():
-            raise HostError("NATIVE_TRANSFER_UNSUPPORTED: candidate is not provisioned")
-
-    def _snapshot(self, db, binding):
-        contract = native_contract(self.policy, binding)
-        mat = db.execute("SELECT * FROM materializations WHERE program=? AND node=?",
-                         (binding["program"], binding["node"])).fetchone()
-        if (mat is None or mat["state"] != "CREATED" or
-                any(mat[k] != binding[v] for k, v in (("repository", "repository"), ("issue", "issue"),
-                    ("request", "materialization_request_id"), ("plan_commit", "plan_commit")))):
-            raise HostError("canonical materialization/plan binding changed or unresolved")
-        rows = db.execute("SELECT * FROM launches WHERE repository=? AND task=? ORDER BY created,request LIMIT 4097",
-                          (binding["repository"], binding["task_id"])).fetchall()
-        if len(rows) > 4096: raise HostError("canonical task history incomplete")
-        owners = []
-        for row in rows:
-            result = parse_json(row["result"])
-            if row["state"] == "FAILED_PRESTART":
-                if result.get("outcome") != "FAILED_PRESTART" or result.get("session_id") is not None:
-                    raise HostError("invalid prestart terminal proof")
-            elif row["state"] == "RECONCILED":
-                proof = parse_json(row["evidence"] or "{}")
-                known = result.get("session_id")
-                if not evidence_url(proof.get("terminal_evidence")):
-                    raise HostError("terminal proof lacks durable evidence")
-                if proof.get("resolution") in ("SESSION_TERMINAL", "SESSION_TERMINAL_VERIFIED"):
-                    if not known or proof.get("session_id") != known:
-                        raise HostError("terminal session proof differs from source session")
-                elif proof.get("resolution") == "NO_SESSION_CONFIRMED":
-                    if known is not None or proof.get("sender_fenced") is not True:
-                        raise HostError("unverified no-session/sender fence")
-                else: raise HostError("unsupported terminal resolution")
-                if row["role"] == "WRITER": owners.append(row["lane"])
-            else: raise HostError("source session ACTIVE/SUBMITTING/UNKNOWN remains fenced")
-        if owners and any(lane != binding["owner_lane"] for lane in owners):
-            raise HostError("first owner lane/history must survive transfer")
-        writer_rows = [r for r in rows if r["role"] == "WRITER"]
-        if writer_rows and parse_json(writer_rows[-1]["packet"]).get("task_revision") != binding["task_revision"]:
-            raise HostError("current canonical task revision differs from protected seal")
-        dependencies = []
-        for dep in binding["dependencies"]:
-            if not isinstance(dep, dict) or set(dep) != {"task_id", "task_revision", "launch_request_id", "head_sha", "gate_evidence"}:
-                raise HostError("invalid dependency seal")
-            safe_key(dep["task_id"], "dependency task"); safe_key(dep["task_revision"], "dependency revision")
-            if (dep["task_id"] == binding["task_id"] or not evidence_url(dep["gate_evidence"]) or
-                    not isinstance(dep["head_sha"], str) or not SHA_RE.fullmatch(dep["head_sha"])):
-                raise HostError("invalid dependency gate identity")
-            row = db.execute("SELECT * FROM launches WHERE request=?", (dep["launch_request_id"],)).fetchone()
-            if (row is None or row["state"] != "RECONCILED" or row["role"] != "WRITER" or
-                    row["repository"] != binding["repository"] or row["task"] != dep["task_id"] or
-                    parse_json(row["packet"]).get("task_revision") != dep["task_revision"]):
-                raise HostError("dependency canonical delivery not verified")
-            proof = parse_json(row["evidence"] or "{}"); pin = proof.get("pin") or {}
-            if (proof.get("resolution") != "SESSION_TERMINAL_VERIFIED" or pin.get("kind") != "DELIVERY" or
-                    pin.get("head") != dep["head_sha"] or not evidence_url(proof.get("terminal_evidence"))):
-                raise HostError("dependency delivery/gate differs from protected seal")
-            dependencies.append(row_view(row))
-        if len({d['task_id'] for d in binding['dependencies']}) != len(binding['dependencies']):
-            raise HostError("duplicate dependency seal")
-        return {"binding": binding, "work": contract["work"], "gate_evidence": contract["gate_evidence"],
-                "history": [row_view(r) for r in rows], "dependencies": dependencies}
-
-    def read(self, binding):
-        db = self.ledger.connect()
-        try:
-            self._require_table(db); db.execute("BEGIN")
-            snapshot = self._snapshot(db, binding)
-            return {"status": "OBSERVED", **snapshot, "observed_at": self.ledger.clock()}
-        finally: db.close()
-
-    def reserve(self, payload):
-        if not isinstance(payload, dict) or set(payload) != {"request_id", "binding", "attempt"}:
-            raise HostError("invalid transfer reservation")
-        request, binding, attempt = payload["request_id"], payload["binding"], payload["attempt"]
-        if not isinstance(request, str) or not NONCE_RE.fullmatch(request): raise HostError("invalid transfer request")
-        if (not isinstance(attempt, dict) or set(attempt) != {"id", "binding", "head", "profile"} or
-                not isinstance(attempt["id"], str) or not NONCE_RE.fullmatch(attempt["id"]) or
-                any(not isinstance(attempt[k], str) or not re.fullmatch(r"[0-9a-f]{64}" if k == "binding" else r"[0-9a-f]{40}", attempt[k])
-                    for k in ("binding", "head"))):
-            raise HostError("invalid bound native attempt")
-        contract = native_contract(self.policy, binding)
-        providers = {"DEVIN": "devin", "GROK_BUILD": "grok_build", "GLM": "glm", "CURSOR": "cursor"}
-        if (not isinstance(attempt["profile"], dict) or set(attempt["profile"]) != {"provider", "model"} or
-                attempt["profile"]["provider"] != providers[binding["owner_lane"]] or
-                not isinstance(attempt["profile"]["model"], str) or len(attempt["profile"]["model"]) > 120):
-            raise HostError("native worker must use the original owner lane")
-        if attempt["profile"] != contract["work"].get("profile") or attempt["head"] != binding["plan_commit"]:
-            raise HostError("native profile/head differs from protected scope")
-        if attempt["binding"] != native_digest({'request_id': request, 'canonical': binding,
-                'id': attempt['id'], 'head': attempt['head'], 'profile': attempt['profile']}):
-            raise HostError("native attempt digest does not bind the complete scope")
-        with self.ledger.inflight_lock(exclusive=True):
-            db = self.ledger.connect()
-            try:
-                self._require_table(db); db.execute("BEGIN IMMEDIATE")
-                previous = db.execute("SELECT * FROM native_transfers WHERE request=?", (request,)).fetchone()
-                if previous:
-                    document = parse_json(previous["document"])
-                    if document["request"] != payload: raise HostError("native request reused with different binding")
-                    return self._view(previous)
-                snapshot = self._snapshot(db, binding); transfers = native_rows(db)
-                for row in transfers:
-                    if (row["repository"], row["task"]) == (binding["repository"], binding["task_id"]):
-                        old = parse_json(row["document"])["request"]["binding"]
-                        if old != binding or row["state"] != "TERMINAL":
-                            raise HostError("same canonical target/owner lineage is busy or changed")
-                lane = binding["owner_lane"]
-                active = db.execute(f"SELECT * FROM launches WHERE {ACTIVE_SQL}").fetchall()
-                if (any(r["lane"] == lane for r in active) or any(r["lane"] == lane and r["state"] != "TERMINAL" for r in transfers) or
-                        len(active) + sum(r["state"] != "TERMINAL" for r in transfers) >= self.policy["max_active_sessions"]):
-                    raise HostError("native source lane/capacity is busy")
-                if not any(r["role"] == "WRITER" and r["state"] != "FAILED_PRESTART" for r in snapshot["history"]):
-                    occupied = {r["lane"] for r in active} | {r["lane"] for r in transfers if r["state"] != "TERMINAL"}
-                    first = next((l for l in WRAPPERS if l in self.policy["enabled_builders"] and l not in occupied), None)
-                    if lane != first: raise HostError("first owner must follow existing mechanical lane order")
-                limit = self.policy.get("max_launches_per_24h")
-                if limit is not None:
-                    recent = db.execute("SELECT count(*) FROM launches WHERE admitted=1 AND created>=?", (self.ledger.clock()-86400,)).fetchone()[0]
-                    if recent + sum(r["created"] >= self.ledger.clock()-86400 for r in transfers) >= limit:
-                        raise HostError("native source launch budget reached")
-                if self.quiescence(lane, self.policy): raise HostError("source lane process census is not quiescent")
-                document = {"schema_version": 1, "request": payload, "source_snapshot_sha256": native_digest(snapshot),
-                            "source_authorization": native_policy(self.policy)["authorization"],
-                            "work": snapshot["work"], "reserved_at": self.ledger.clock()}
-                if not math.isfinite(document['reserved_at']) or document['reserved_at'] < 0:
-                    raise HostError("invalid source reservation clock")
-                db.execute("INSERT INTO native_transfers VALUES (?,?,?,?,?,?,?,NULL)",
-                           (request, binding["repository"], binding["task_id"], lane, "RESERVED", canonical(document), self.ledger.clock()))
-                db.commit()
-                return {"state": "RESERVED", **document, "terminal": None}
-            finally: db.close()
-
-    @staticmethod
-    def _view(row):
-        return {"state": row["state"], **parse_json(row["document"]),
-                "terminal": parse_json(row["terminal"]) if row["terminal"] else None}
-
-    def transition(self, operation, payload):
-        if not isinstance(payload, dict) or set(payload) != ({"request_id", "attempt"} if operation != "finish" else {"request_id", "attempt", "terminal"}):
-            raise HostError("invalid native transition")
-        db = self.ledger.connect()
-        try:
-            self._require_table(db); db.execute("BEGIN" if operation == "status" else "BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM native_transfers WHERE request=?", (payload["request_id"],)).fetchone()
-            if row is None: raise HostError("native transfer request not found")
-            document = parse_json(row["document"]); request = document["request"]
-            native_contract(self.policy, request["binding"])
-            if payload["attempt"] != request["attempt"]: raise HostError("native attempt binding mismatch")
-            if operation == "claim":
-                if row["state"] == "TERMINAL": raise HostError("terminal native receipt cannot be replayed")
-                db.execute("UPDATE native_transfers SET state='CLAIMED' WHERE request=? AND state='RESERVED'", (row["request"],))
-            elif operation == "finish":
-                terminal = payload["terminal"]
-                if (not isinstance(terminal, dict) or set(terminal) != {"attempt_id", "binding", "head", "exit_code", "process_group_quiescent", "result_sha256", "session_id"} or
-                        any(terminal.get(k) != request["attempt"][v] for k,v in (("attempt_id", "id"), ("binding", "binding"), ("head", "head"))) or
-                        terminal["process_group_quiescent"] is not True or type(terminal["exit_code"]) is not int or
-                        not isinstance(terminal["result_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", terminal["result_sha256"]) or
-                        (terminal["session_id"] is not None and (not isinstance(terminal["session_id"], str) or not 1 <= len(terminal["session_id"]) <= 200))):
-                    raise HostError("native terminal/fence evidence does not bind the admitted worker")
-                if row["state"] == "RESERVED": raise HostError("native worker was not claimed")
-                if row["state"] == "TERMINAL" and row["terminal"] != canonical(terminal):
-                    raise HostError("native terminal evidence is write-once")
-                db.execute("UPDATE native_transfers SET state='TERMINAL',terminal=? WHERE request=?", (canonical(terminal), row["request"]))
-            elif operation != "status": raise HostError("unknown native operation")
-            db.commit()
-            return self._view(db.execute("SELECT * FROM native_transfers WHERE request=?", (row["request"],)).fetchone())
-        finally: db.close()
-
-
 def adapter_launch(packet, policy, lock_fd):
     # Packet stays within the control-owned directory, never the caller's workspace.
     with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", prefix="packet-",
@@ -1328,8 +1040,6 @@ def main(argv=None):
     commands.add_parser("preflight").add_argument("--builder-id", choices=tuple(WRAPPERS), required=True)
     commands.add_parser("launch")
     commands.add_parser("init")
-    for operation in ("init", "read", "reserve", "status", "claim", "finish"):
-        commands.add_parser("native-transfer-" + operation)
     commands.add_parser("migrate").add_argument("--to", type=int, required=True)
     task_parser = commands.add_parser("task-status")
     for flag in ("repository", "task"):
@@ -1376,34 +1086,14 @@ def main(argv=None):
     args, packet = parser.parse_args(argv), None
     os.umask(0o077)
     try:
-        if (args.command == "launch" or getattr(args, "pin_stdin", False) or
-                args.command.startswith("native-transfer-") and args.command != "native-transfer-init"):
+        if args.command == "launch" or getattr(args, "pin_stdin", False):
             raw = sys.stdin.read(1024 * 1024 + 1)
             if len(raw) > 1024 * 1024:
                 raise HostError("stdin document too large")
             packet = parse_json(raw)
         policy = load_host_policy(args.command)
         ledger = Ledger(policy["ledger_path"])
-        if args.command.startswith("native-transfer-"):
-            operation = args.command.removeprefix("native-transfer-")
-            config = native_policy(policy)
-            native = NativeTransferLedger(ledger, policy)
-            if operation == "init": result = native.initialize()
-            else:
-                if operation == "read": binding = packet
-                elif operation == "reserve": binding = packet.get("binding", {})
-                else:
-                    with ledger.connect() as db:
-                        native._require_table(db)
-                        row = db.execute("SELECT document FROM native_transfers WHERE request=?", (packet.get("request_id"),)).fetchone()
-                        if row is None: raise HostError("native transfer request not found")
-                        binding = parse_json(row[0])["request"]["binding"]
-                # Authentication is a property of the protected caller/channel,
-                # never a JSON field or an arbitrary runner's assertion.
-                if int(os.environ["SUDO_UID"]) != config["targets"].get(binding.get("target_host")):
-                    raise HostError("native operation requires the admitted target custodian")
-                result = native.read(binding) if operation == "read" else native.reserve(packet) if operation == "reserve" else native.transition(operation, packet)
-        elif args.command == "init":
+        if args.command == "init":
             ledger.initialize()
             result = {"status": "INITIALIZED", "schema_version": SCHEMA_VERSION}
         elif args.command == "migrate":
@@ -1451,3 +1141,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
