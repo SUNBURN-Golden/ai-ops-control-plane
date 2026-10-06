@@ -54,6 +54,9 @@ GitHub 조회 후 binding/scope/변경 경로와 실제 파일 bytes를 다시 �
 checkpoint 후와 게시 전에는 실제 commit tree의 AGENTS.md blob·100644 mode와
 원래 plan 대비 단독 변경도 확인한다. Git filter·assume-unchanged·core.filemode가
 working tree를 clean으로 보여도 commit tree 검증을 대신할 수 없다.
+제한된 객체 조회는 `--no-replace-objects`로 replacement 해석을 끄며 실제 원래 plan
+blob과 base ancestry도 재검증한다. 기본 Git 조회와 pack transfer의 replacement
+처리가 다르기 때문이다([Git 공식 문서](https://git-scm.com/docs/git-replace)).
 게시 경로는 repository 조회 후 승인 댓글을 마지막으로 읽고, 이후 정확한 job HEAD·
 clean tree·binding/scope/file을 재검증한다. push source를 이동 가능한 HEAD가 아닌
 그 검증된 SHA로 고정해 뒤의 ref 이동이 다른 commit을 게시하지 못하게 한다.

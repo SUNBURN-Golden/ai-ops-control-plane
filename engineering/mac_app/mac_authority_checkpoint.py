@@ -45,15 +45,21 @@ def decision_verified():
             hashlib.sha256(comment['body'].encode('utf-8')).hexdigest() == pin['body_sha256'])
 
 
+def object_git(checkout, *args):
+    """Read the objects Git will transfer, ignoring local replacement refs."""
+    from gitops import git
+    return git(checkout, '--no-replace-objects', *args)
+
+
 def committed_matches(repos, job, head):
     """Verify the actual commit tree, independently of working-tree Git settings."""
     try:
-        from gitops import git
         if not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}', head): return False
         checkout = repos.path(job)
-        entry = git(checkout, 'ls-tree', '-z', head, '--', PINS['path'])
+        object_git(checkout, 'merge-base', '--is-ancestor', PINS['plan_commit'], head)
+        entry = object_git(checkout, 'ls-tree', '-z', head, '--', PINS['path'])
         expected = '100644 blob ' + PINS['after_blob'] + '\t' + PINS['path'] + '\0'
-        names = git(checkout, 'diff', PINS['plan_commit'], head, '--name-only', '-z')
+        names = object_git(checkout, 'diff', PINS['plan_commit'], head, '--name-only', '-z')
         return (entry == expected and {p for p in names.split('\0') if p} == {PINS['path']} and
                 repos.head(job) == head and repos.clean(job))
     except (KeyError, TypeError, AttributeError, OSError, AppError):
@@ -91,15 +97,17 @@ def approved(repos, job, name, *, publication=False):
                 node.get('user_merge') is not True or node.get('astra_auto_merge') is not False or
                 task['id'] != node['id'] or task['title'] != node['title'] or task['instructions'] != node['spec'] or
                 hashlib.sha256(node['spec'].encode()).hexdigest() != pin['spec_sha256']): return False
-        from gitops import git
-        checkout = repos.path(job); target = checkout / name; info = target.lstat()
+        checkout = repos.path(job)
+        if object_git(checkout, 'rev-parse', pin['plan_commit'] + ':.aiops/program.json') != pin['plan_blob']: return False
+        object_git(checkout, 'merge-base', '--is-ancestor', pin['plan_commit'], 'HEAD')
+        target = checkout / name; info = target.lstat()
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o111 or
                 not target.resolve().is_relative_to(checkout.resolve())): return False
-        names = (git(checkout, 'diff', 'HEAD', '--name-only', '-z') +
-                 git(checkout, 'ls-files', '--others', '--exclude-standard', '-z') +
-                 git(checkout, 'diff', pin['plan_commit'], 'HEAD', '--name-only', '-z'))
+        names = (object_git(checkout, 'diff', 'HEAD', '--name-only', '-z') +
+                 object_git(checkout, 'ls-files', '--others', '--exclude-standard', '-z') +
+                 object_git(checkout, 'diff', pin['plan_commit'], 'HEAD', '--name-only', '-z'))
         if {p for p in names.split('\0') if p} != {pin['path']}: return False
-        return (git(checkout, 'rev-parse', pin['plan_commit'] + ':' + name) == pin['before_blob'] and
-                git(checkout, 'hash-object', '--no-filters', '--', name) == pin['after_blob'])
+        return (object_git(checkout, 'rev-parse', pin['plan_commit'] + ':' + name) == pin['before_blob'] and
+                object_git(checkout, 'hash-object', '--no-filters', '--', name) == pin['after_blob'])
     except (KeyError, TypeError, AttributeError, OSError, AppError):
         return False

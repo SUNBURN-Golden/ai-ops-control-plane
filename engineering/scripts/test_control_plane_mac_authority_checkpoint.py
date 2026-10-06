@@ -47,6 +47,8 @@ class AuthorityCheckpointTests(unittest.TestCase):
         self.names = 'AGENTS.md\0'; self.old_blob = self.pin['before_blob']; self.calls = []
         def git(checkout, *args, **kwargs):
             self.calls.append(args)
+            if args[:1] == ('--no-replace-objects',): args = args[1:]
+            if args == ('rev-parse', self.pin['plan_commit'] + ':.aiops/program.json'): return self.pin['plan_blob']
             if args[:1] == ('status',): return ' M AGENTS.md\0'
             if args[:1] in (('diff',), ('ls-files',)): return self.names
             if args == ('rev-parse', self.pin['plan_commit'] + ':AGENTS.md'): return self.old_blob
@@ -177,8 +179,14 @@ class CommittedPublicationTests(unittest.TestCase):
         self.real_git('init', '-q'); self.real_git('config', 'user.name', 'Source fixture')
         self.real_git('config', 'user.email', 'fixture@example.invalid')
         (self.checkout / 'README.md').write_text('Unchanged fixture scope\n')
-        self.real_git('add', 'AGENTS.md', 'README.md'); self.real_git('commit', '-q', '-m', 'Fixture base')
+        (self.checkout / '.aiops').mkdir()
+        (self.checkout / '.aiops/program.json').write_text(json.dumps({'nodes':[NODE]}))
+        self.real_git('add', 'AGENTS.md', 'README.md', '.aiops/program.json')
+        self.real_git('commit', '-q', '-m', 'Fixture base')
         self.pin['plan_commit'] = self.real_git('rev-parse', 'HEAD')
+        self.pin['plan_blob'] = self.real_git('rev-parse', 'HEAD:.aiops/program.json')
+        self.scope['blob'] = self.pin['plan_blob']; self.job['program_scope'] = copy.deepcopy(self.scope)
+        self.job['native_lineage']['binding']['plan_blob'] = self.pin['plan_blob']
         self.job['base_sha'] = self.pin['plan_commit']
         self.job['native_lineage']['binding']['plan_commit'] = self.pin['plan_commit']
         self.repos.head = lambda job: self.real_git('rev-parse', 'HEAD')
@@ -247,6 +255,20 @@ class CommittedPublicationTests(unittest.TestCase):
         self.real_git('update-index', '--assume-unchanged', 'AGENTS.md')
         self.target.write_bytes(self.after); self.job['head'] = self.repos.head(self.job)
         self.assertTrue(self.repos.clean(self.job)); self.assertEqual(blob(self.target.read_bytes()), self.pin['after_blob'])
+        self.assert_refused_before_push()
+
+    def test_replacement_ref_cannot_hide_the_actual_commit_sent_by_push(self):
+        approved_head = self.checkpoint()
+        self.target.write_bytes(self.after + b'Unapproved original object\n')
+        self.real_git('add', 'AGENTS.md'); self.real_git('commit', '-q', '-m', 'Wrong actual object')
+        self.job['head'] = self.real_git('rev-parse', 'HEAD')
+        self.real_git('replace', self.job['head'], approved_head)
+        self.real_git('read-tree', approved_head); self.target.write_bytes(self.after)
+        self.assertTrue(self.repos.clean(self.job))
+        self.assertEqual(self.real_git('ls-tree', '-z', self.job['head'], '--', 'AGENTS.md'),
+                         '100644 blob ' + self.pin['after_blob'] + '\tAGENTS.md\0')
+        self.assertNotEqual(self.real_git('--no-replace-objects', 'rev-parse', self.job['head'] + ':AGENTS.md'),
+                            self.pin['after_blob'])
         self.assert_refused_before_push()
 
     def test_clean_filter_cannot_make_wrong_commit_a_successful_checkpoint(self):
