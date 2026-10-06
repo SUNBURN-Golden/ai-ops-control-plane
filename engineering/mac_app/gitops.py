@@ -27,7 +27,7 @@ ROADMAP_HEADER = {
 }
 
 
-def execute(argv, cwd=None, timeout=120, allowed=(0,), *, github_access=None):
+def execute(argv, cwd=None, timeout=120, allowed=(0,), *, github_access=None, literal_git_objects=False):
     # Mac verification may read through gh wrappers as well as handoff.api.
     # Import at call time: handoff itself imports this executor.
     github = Path(argv[0]).name == 'gh'
@@ -47,9 +47,15 @@ def execute(argv, cwd=None, timeout=120, allowed=(0,), *, github_access=None):
         from handoff import remaining_api_seconds
         remaining = remaining_api_seconds()
         if remaining is not None: timeout = min(timeout, remaining)
+    command_env = agents.environment()
+    if literal_git_objects:
+        if Path(argv[0]).name != 'git': raise AppError('LITERAL_GIT_COMMAND_REQUIRED')
+        # Only this child reads actual objects/parents; no repository/global config edit.
+        command_env = {**command_env, 'GIT_GRAFT_FILE': os.devnull, 'GIT_NO_REPLACE_OBJECTS': '1'}
+        argv = [argv[0], '-c', 'core.commitGraph=false', *argv[1:]]
     try:
         run = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
-                             timeout=timeout, env=agents.environment())
+                             timeout=timeout, env=command_env)
     except subprocess.TimeoutExpired as exc:
         raise AppError('COMMAND_TIMEOUT') from exc
     if budgeted: remaining_api_seconds()
@@ -236,7 +242,8 @@ class Repositories:
         if job.get('base_sha'): names += git(checkout, 'diff', job.get('verified_base', job['base_sha']), 'HEAD', '--name-only', '-z')
         for name in names.split('\x00'):
             if name == 'AGENTS.md' or name.endswith('/AGENTS.md') or name.startswith(('.aiops/', 'RUNBOOKS/', 'docs/decisions/')):
-                if not self.approved_roadmap_header(job, name):
+                from mac_authority_checkpoint import approved
+                if not self.approved_roadmap_header(job, name) and not approved(self, job, name):
                     raise AppError('AUTHORITY_EDIT_NEEDS_USER', '기준 계약 변경은 별도 결정을 남겨야 합니다: ' + name)
             if name and re.search(r'(^|/)(\.env(\.[^/]+)?|id_rsa|id_ed25519|credentials\.json|[^/]+\.(pem|p12|key))$', name) and not name.endswith(('.example', '.sample', '.template')):
                 raise AppError('SENSITIVE_FILE_CHANGE', '자격증명 파일 변경을 제외해야 합니다: ' + name)
@@ -245,6 +252,9 @@ class Repositories:
             git(checkout, 'commit', '-m', f"AIOPS: {job['current_task']['title'][:120]}", timeout=120)
         head = self.head(job)
         if not self.clean(job): raise AppError('DIRTY_CHECKPOINT')
+        from mac_authority_checkpoint import PINS, committed_matches
+        if job.get('id') == PINS['job'] and not committed_matches(self, job, head):
+            raise AppError('AUTHORITY_EDIT_NEEDS_USER')
         return head
 
     def synchronize_base(self, job):
@@ -271,7 +281,16 @@ class Repositories:
             if not isinstance(metadata,dict) or metadata.get('nameWithOwner','').lower()!=job['repository'].lower() or metadata.get('isPrivate') is not True:
                 raise AppError('MAC_HOST_CANDIDATE_PUBLICATION_SCOPE_REQUIRED')
         checkout = self.path(job)
-        git(checkout, 'push', '--porcelain', 'origin', 'HEAD:refs/heads/' + job['branch'], timeout=180)
+        # The bounded authority approval is the last pre-push network read.
+        from mac_authority_checkpoint import PINS, approved, committed_matches
+        push_source = 'HEAD'
+        if job.get('id') == PINS['job']:
+            if not approved(self, job, PINS['path'], publication=True):
+                raise AppError('AUTHORITY_EDIT_NEEDS_USER')
+            if not committed_matches(self, job, job['head']): raise AppError('STALE_PUBLISH_HEAD')
+            # A concurrent ref move must never substitute an unreviewed commit.
+            push_source = job['head']
+        git(checkout, 'push', '--porcelain', 'origin', push_source + ':refs/heads/' + job['branch'], timeout=180)
         fields='url,state,headRefOid'+(',isDraft,autoMergeRequest' if generation else '')
         prior = parse_json(gh(job['repository'], 'pr', 'list', '--head', job['branch'], '--state', 'all',
                               '--json', fields, '--limit', '10',github_access='READ'))

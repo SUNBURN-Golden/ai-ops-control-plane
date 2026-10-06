@@ -378,6 +378,37 @@ this establishes no cross-host atomic lock. Exact-HEAD review/CI/Astra gates,
 RELEASE reservation and User merge remain required. Product installation,
 ownership operations and execution remain with the product owner.
 
+User explicitly approved the Mac checkpoint source repair in message
+`Sentinel_18579c8bc67c8191a70e193d38fbd27e`, then pinned the actual
+[product approval 6018278031](https://github.com/BeautifulMind-JT/kix-protocol/issues/92#issuecomment-6018278031)
+in message `Sentinel_189daa51ad4481918cf45ff2f1306cc0`. The implemented exception
+permits only `MAC_LOCAL`, `kix/agents-scope-sync`, job `20531604498943e1`, branch
+`aiops/native-2972272cbeb64071`, and the exact AGENTS.md §5 before/after blobs
+at plan commit `7481b0e16ce9b903abbffa62249bb91cd9e63cfe`. The original plan blob
+and spec are additional narrowing constraints, not fields invented in that short
+comment. Exact whole-file bytes and a sole AGENTS.md change are required; other
+authority edits, jobs, revisions, mixed changes and UNKNOWN/active attempts stay
+blocked. The runtime re-reads the immutable User-account approval at checkpoint
+and before push, then rechecks the local binding/scope/file. Checkpoint output
+and publication must match the approved committed blob and non-executable tree
+mode, irrespective of working-tree filters/index flags. Bounded object reads
+disable replacement refs and verify the actual original plan blob/base ancestry.
+Only those read processes ignore legacy graft input and commit-graph cache;
+repository/global settings and other command environments are unchanged. Publication reads the
+approval after other pre-push API reads, checks the exact job HEAD/clean tree,
+and pushes that fixed SHA. Its 348-byte UTF-8
+body SHA-256 is `000fa33005152da022795f01ef3ab91b3d4d085a81454b41907f8fd44488e951`,
+actor `BeautifulMind-JT` / `263336091` / `User`, created/updated
+`2026-10-06T14:18:45Z`. [The exact API body](docs/MAC_AGENTS_SCOPE_APPROVAL_6018278031.md)
+and [metadata](docs/MAC_AGENTS_SCOPE_APPROVAL_6018278031_RECORD.json) are audit
+evidence, never substitutes for live verification. This trusts the designated
+account's approval, not a host signature or Linux ledger observation; a holder
+of its token can forge comments. It grants no general authority override,
+cross-host admission or atomic lock. Existing completed-builder checkpoint
+recovery, A3 audit, exact-HEAD CI/reviews and User merge remain required.
+See [the bounded checkpoint contract](docs/MAC_AGENTS_SCOPE_CHECKPOINT_KO.md).
+Product installation and normal owner recovery remain with the product owner.
+
 Repo-scoped credentials are preferred over one all-repositories write token.
 
 ## 12. Relay and provider outage behavior

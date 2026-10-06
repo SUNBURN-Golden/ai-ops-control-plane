@@ -1,0 +1,1 @@
+agents-scope-sync 승인: job 20531604498943e1, branch aiops/native-2972272cbeb64071, AGENTS.md §5 변경(blob 5ef2f06dcfe35f3a53ea8e7d021aba8bc38f121e → 190bcae4f0c7d60666b942dd7df9e87749a09297, plan 7481b0e16ce9b903abbffa62249bb91cd9e63cfe)을 승인합니다. 커밋·푸시·PR 진행하세요. A3 감사·병합은 그대로. — 박준태
