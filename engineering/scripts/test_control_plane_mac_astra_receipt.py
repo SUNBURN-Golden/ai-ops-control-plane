@@ -232,6 +232,26 @@ class JournalTests(unittest.TestCase):
         with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):
             receipts.Journal(self.store).consume(self.requirement)
 
+    def test_pinned_direct_get_failure_and_confirmed_list_deletion_have_distinct_persistence(self):
+        pinned=self.journal.consume(self.requirement)
+        def temporarily_missing(path,paginate=False):
+            if '/issues/comments/' in path:raise AppError('GITHUB_NOT_FOUND')
+            return self.api(path,paginate=paginate)
+        # An unavailable direct GET with an unchanged list cannot confirm
+        # deletion; it blocks now, without fabricating a permanent observation.
+        with patch('handoff.api',side_effect=temporarily_missing):
+            with self.assertRaisesRegex(AppError,'RECEIPT_UNVERIFIED'):self.journal.consume(self.requirement)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_holds').fetchone()[0],0)
+        self.assertEqual(receipts.Journal(self.store).consume(self.requirement),pinned)
+        # Once the authenticated list confirms the pinned ID disappeared,
+        # the persisted hold survives restoring the old content and a restart.
+        self.pages=[[]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):self.journal.consume(self.requirement)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_holds').fetchone()[0],1)
+        self.pages=[[self.comment]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):
+            receipts.Journal(self.store).consume(self.requirement)
+
     def test_observed_contract_yes_or_shallow_pass_is_a_durable_hold(self):
         for depth,contract in (('A3','YES'),('A2','NO')):
             with self.subTest(depth=depth,contract=contract):
