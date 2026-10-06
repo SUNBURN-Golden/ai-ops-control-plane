@@ -20,7 +20,36 @@
 2. 종료 뒤에도 유지되는 첫 소유자 lane과 전체 실행 계보.
 3. 활성·UNKNOWN·미확정 세션의 실제 호스트 상태와 동일 작업 재개/이관의 원자적 승인.
 
-일반 작업용 별도 브랜치만으로 이 조건을 대체하지 않는다. 프로세스 부재, GitHub 상태, 과거 백업, 사용자의 재시도 답변은 실행 권한 증거가 아니다. 이 수정은 호스트 정책·원장·자격증명·보안 설정을 바꾸거나 기존 소유자를 해제하지 않는다.
+일반 작업용 별도 브랜치만으로 이 조건을 대체하지 않는다. 아래 명시적 Mac 예외 밖에서는 프로세스 부재, GitHub 상태, 과거 백업, 사용자의 재시도 답변은 실행 권한 증거가 아니다. 일반 guard는 호스트 정책·원장·자격증명·보안 설정을 바꾸거나 기존 소유자를 해제하지 않는다.
+
+## 사용자 승인 Mac FAILED_PRESTART 예외
+
+[D-2026-10-06-MAC-FAILED-PRESTART-NONOWNERSHIP](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/81#issuecomment-6016578811)은
+[PR81 공식 A3 DECISION_REQUIRED](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/81#issuecomment-6016559549)의
+A를 승인했다. `authority_kind=MAC_LOCAL` generation의
+`BeautifulMind-JT/kix-protocol#92` 열린 이슈 보류에 한정해, 정확한
+FAILED_PRESTART 제어 기록과 사용자의 직접 확인 전달 댓글을 비소유 근거로 수용한다.
+같은 `KIX-AGENTS-SCOPE-SYNC`, revision `pc85e614245eb-CURSOR`, request
+`077849e0e68f521245e7175f`, CURSOR attempt 1, 명시적 null owner/session,
+유일 control record 및 정확 program/node/materialization 결합을 유지한다.
+UNKNOWN/SUBMITTING/CONFIRMED, 다른 issue/revision/request/attempt,
+program/node 별칭, 누락·변경·충돌·불완전 기록은 계속 차단한다.
+
+이 예외는 인증된 Mac의 Linux 원장 읽기 없이 지정 소유자 계정의 확인을 신뢰한다.
+Linux를 직접 확인했다고 밝힌 주체는 사용자이며, 전달 원출처를 보존한다.
+`USER_DIRECT_CHECK_RELAYED`, `mac_verified_host_read=false`,
+`signed_host_receipt=false`는 기계 증명과 구분되는 증거 속성이다.
+hash는 본문 불변성만 증명하며 계정 토큰 보유자는 댓글을 위조할 수 있다.
+이는 사용자가 승인한 신뢰 한계이고 Linux admission 정책·원장·서명·감사 영수증을
+변경하거나 cross-host 원자적 lock을 만들지 않는다. 일반 native guard와
+다른 작업의 기존 canonical/opaque/UNKNOWN 보류는 그대로 유지한다.
+
+세 댓글의 정확한 인증 API 본문 사본과 직접 계산한 hash는
+[결정 인증 기록](MAC_FAILED_PRESTART_DECISION_20261006_RECORD.md)에 보존한다.
+사본은 감사 입력이며 runtime의 현재 issue/control/confirmation 재검증을 대체하지 않는다.
+자세한 [비소유 판정 및 F3 가용성 한계](../mac_app/MAC_FAILED_PRESTART_ADMISSION_KO.md)를 따른다.
+정확 HEAD의 정상 review/CI/Astra gate와 User merge는 유지하며, 설치·소유권 조작·
+제품 실행 및 기존 거절 intent 재개는 제품 owner가 수행한다.
 
 ## 설치
 

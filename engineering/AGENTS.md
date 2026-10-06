@@ -349,6 +349,35 @@ remain in force. See [the Mac receipt contract](mac_app/MAC_A3_RECEIPT_KO.md)
 for fail-closed conditions and implementation limits. A repository decision copy
 is audit evidence and never replaces the runtime's authenticated live verification.
 
+User decision [D-2026-10-06-MAC-FAILED-PRESTART-NONOWNERSHIP](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/81#issuecomment-6016578811)
+approves option A following the [PR81 A3 DECISION_REQUIRED](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/81#issuecomment-6016559549).
+It records a separate Mac-only `MAC_LOCAL` generation admission exception:
+the open-issue hold for `BeautifulMind-JT/kix-protocol#92`,
+`KIX-AGENTS-SCOPE-SYNC`, revision `pc85e614245eb-CURSOR`, request
+`077849e0e68f521245e7175f`, CURSOR attempt 1 may be removed using the exact
+FAILED_PRESTART control projection with explicit null owner/session together
+with the User's pinned confirmation. Requested and projected program/node
+tuples must both match `kix/agents-scope-sync`; other issues, revisions,
+UNKNOWN/SUBMITTING/CONFIRMED, owners/sessions and conflicting or incomplete
+records remain fenced. This exception amends the otherwise conservative
+[Mac ownership guard](docs/MAC_OWNERSHIP_GUARD_KO.md) only for that implemented scope.
+
+The designated owner-account confirmation is trusted as non-ownership evidence
+without an authenticated Mac read of the Linux ledger. Its original User
+thread/message provenance is retained as `USER_DIRECT_CHECK_RELAYED`,
+`mac_verified_host_read=false`, `signed_host_receipt=false`; GitHub body hashes
+prove unchanged content, not host provenance or a machine signature. User
+accepts this trust limit; a holder of the account token can forge comments.
+Exact API-body copies of control `5956874897`, confirmation `6016190250` and
+decision `6016578811`, including directly recomputed SHA-256, actor and URL
+metadata, are [recorded separately](docs/MAC_FAILED_PRESTART_DECISION_20261006_RECORD.md).
+Decision body SHA-256 is `1fad73dade5435130c0576315939310e7559250d3813359fd21077aaedf103e7`.
+These copies are audit inputs, not replacement runtime observations. Linux
+ledger, signatures, protected fixed tools and audit receipts are unchanged;
+this establishes no cross-host atomic lock. Exact-HEAD review/CI/Astra gates,
+RELEASE reservation and User merge remain required. Product installation,
+ownership operations and execution remain with the product owner.
+
 Repo-scoped credentials are preferred over one all-repositories write token.
 
 ## 12. Relay and provider outage behavior
