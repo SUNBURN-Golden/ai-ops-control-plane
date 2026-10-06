@@ -96,7 +96,7 @@ class AstraPipelineTests(unittest.TestCase):
     def test_constructing_pipeline_does_not_migrate_read_only_source_ledgers(self):
         from mac_pipeline import Pipeline
         with patch('mac_astra_receipt.Journal') as journal:
-            pipeline=Pipeline(self.store,self.repos,self.controller)
+            pipeline=Pipeline(self.store,self.source,self.repos)
             journal.assert_not_called()
             self.assertIsNone(pipeline._astra)
 

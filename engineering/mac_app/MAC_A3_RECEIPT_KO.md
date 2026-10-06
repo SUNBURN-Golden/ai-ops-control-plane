@@ -47,6 +47,9 @@ schema·상충 결과·stale HEAD가 있으면 같은 작업을 보류한다.
 댓글 관측은 private 원장에 보존한다. 관측한 댓글의 수정·삭제 또는 상충은 같은 HEAD의
 지속 보류가 된다. 앱 재시작, 댓글 삭제·원상 복구, 새 revision/request로 해제되지 않는다.
 새 HEAD에서 새 요청·감사를 하거나 이후 명시적 사용자 결정으로 처리해야 한다.
+원장은 private host directory의 별도 `mac-astra.sqlite3`에 동기화해 기록한다. 의존 작업
+read/reserve의 실패가 `app.sqlite3`의 owner/admission 트랜잭션을 롤백해도 감사 관측과
+보류는 지워지지 않으며, 이를 보존하기 위해 바깥 reservation을 commit하지 않는다.
 
 감리는 실제로 검증한 receipt를 host verification snapshot에 포함하며 private request
 digest로 보존한다. 최종 검수는 현재 다시 검증한 receipt와 감리가 본 snapshot이

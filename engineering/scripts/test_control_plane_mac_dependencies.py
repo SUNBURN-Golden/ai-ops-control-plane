@@ -44,14 +44,33 @@ class AcceptedDependencyTests(unittest.TestCase):
             nodes.append({'id':'MISSING','title':'Missing','spec':'No completion',
                           'audit_floor':'A2','astra_gate':'NONE','depends_on':[]})
             nodes[1]['depends_on'].append('MISSING')
+        self.astra_comments=None
+        if self._testMethodName=='test_a3_dependency_negative_hold_survives_child_read_rollback':
+            nodes[0]['audit_floor']='A3';self.astra_comments=[]
+            import mac_astra_receipt
+            decision=patch('mac_astra_receipt.decision_evidence',return_value=copy.deepcopy(mac_astra_receipt.DECISION))
+            decision.start();self.addCleanup(decision.stop)
         self.latest=authority.snapshot(tasks=self.latest['tasks'],nodes=nodes)
         self.repo_patch=patch.object(delivery,'FixtureRepositories',DependencyRepositories)
         self.repo_patch.start();self.addCleanup(self.repo_patch.stop)
-        self.job=self.inspected_delivery()
+        if self.astra_comments is None:self.job=self.inspected_delivery()
+        else:
+            from test_control_plane_mac_astra_receipt import audit_comment
+            step=core.Engine.step
+            def audited_step(engine,job):
+                try:return step(engine,job)
+                except common.AppError as exc:
+                    if exc.code!='MAC_HOST_ASTRA_AUDIT_REQUIRED':raise
+                    request=self.store.get(job['id'])['audit_requirement']
+                    self.astra_comments=[audit_comment(request)]
+                    return step(engine,self.store.get(job['id']))
+            with patch('handoff.api',side_effect=self.api),patch.object(core.Engine,'step',audited_step):
+                self.job=self.inspected_delivery()
         self.repos=DependencyRepositories(self.store.directory/'workspaces')
         self.engine=core.Engine(self.store,self.repos,self.controller)
         self.bound=self.job['native_lineage']['binding']
-        self.engine.pipeline.reconcile_accepted('owner/kix',self.bound['task_id'])
+        with patch('handoff.api',side_effect=self.api):
+            self.engine.pipeline.reconcile_accepted('owner/kix',self.bound['task_id'])
         self.latest['source']['head']='d'*40
         self.api_values={}
         self.api_values[mac_generation.DECISION_API]=generation.decision_fixture()
@@ -65,12 +84,37 @@ class AcceptedDependencyTests(unittest.TestCase):
                 'steps':[{'number':1,'name':'Fixture required verification','status':'completed','conclusion':'success'}]}
         self.git_values={('merge-base','d'*40,'d'*40):'d'*40,('rev-parse','d'*40+'^1'):'a'*40,
                          ('rev-parse','d'*40+'^{tree}'):'e'*40,('rev-parse','c'*40+'^{tree}'):'e'*40}
-        self.api_patch=patch('handoff.api',side_effect=lambda target, **kwargs:copy.deepcopy(self.api_values[target]))
+        self.api_patch=patch('handoff.api',side_effect=self.api)
         self.api_patch.start();self.addCleanup(self.api_patch.stop)
         self.git_patch=patch('gitops.git',side_effect=lambda checkout,*args:self.git_values[args])
         self.git_patch.start();self.addCleanup(self.git_patch.stop)
         self.factory=patch('gitops.Repositories',side_effect=lambda directory:self.repos)
         self.factory.start();self.addCleanup(self.factory.stop)
+
+    def api(self,target,**kwargs):
+        if target==mac_generation.DECISION_API:
+            return copy.deepcopy(self.api_values[target]) if hasattr(self,'api_values') else generation.decision_fixture()
+        if self.astra_comments is not None:
+            if target.endswith('/pulls/2'):
+                job=self.store.jobs()[0]
+                return {'number':2,'html_url':job['pr_url'],'head':{'sha':job['head'],'ref':job['branch'],
+                        'repo':{'full_name':job['repository']}},'base':{'repo':{'full_name':job['repository']}}}
+            if '/issues/2/comments?' in target:return [copy.deepcopy(self.astra_comments)]
+            if '/issues/comments/' in target:
+                cid=int(target.rsplit('/',1)[1]);return copy.deepcopy(next(c for c in self.astra_comments if c['id']==cid))
+        return copy.deepcopy(self.api_values[target]) if hasattr(self,'api_values') else generation.decision_fixture()
+
+    def test_a3_dependency_negative_hold_survives_child_read_rollback(self):
+        from test_control_plane_mac_astra_receipt import audit_comment
+        bound=self.child();before=list(self.store.db.iterdump());launched=self.worker.launched
+        self.astra_comments.append(audit_comment(self.job['audit_requirement'],cid=124,result='FAIL'))
+        with self.assertRaisesRegex(common.AppError,'AUDIT_CONFLICT'):self.source.call('read',bound)
+        self.assertFalse(self.store.db.in_transaction)
+        self.assertEqual(list(self.store.db.iterdump()),before)
+        self.astra_comments=self.astra_comments[:1]
+        with self.assertRaisesRegex(common.AppError,'AUDIT_CONFLICT'):self.source.call('read',bound)
+        self.assertEqual(list(self.store.db.iterdump()),before)
+        self.assertEqual(self.worker.launched,launched)
 
     def child(self,**changes):return self.source.generation(self.value(2,node='NEXT',**changes))
     def unchanged_failure(self):

@@ -93,7 +93,11 @@ class Store:
         ''')
         self.db.execute('INSERT OR IGNORE INTO settings VALUES (1,?)', (encoded(DEFAULTS),))
 
-    def close(self): self.db.close()
+    def close(self):
+        audit=getattr(self,'_mac_astra_db',None)
+        if audit is not None:
+            audit.close();self._mac_astra_db=None
+        self.db.close()
 
     def settings(self):
         with self.lock:

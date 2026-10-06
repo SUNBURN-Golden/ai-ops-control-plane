@@ -151,8 +151,8 @@ class JournalTests(unittest.TestCase):
     def test_request_is_durable_before_audit_and_pinned_consumption_is_idempotent(self):
         self.pages=[[]]
         with self.assertRaisesRegex(AppError,'ASTRA_AUDIT_REQUIRED'):self.journal.consume(self.requirement)
-        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM mac_host_astra_requests').fetchone()[0],1)
-        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM mac_host_astra_receipts').fetchone()[0],0)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_requests').fetchone()[0],1)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_receipts').fetchone()[0],0)
         self.pages=[[self.comment]]
         first=self.journal.consume(self.requirement)
         self.assertEqual(receipts.Journal(self.store).consume(self.requirement),first)
@@ -201,10 +201,10 @@ class JournalTests(unittest.TestCase):
     def test_audit_start_in_request_second_is_not_proven_after_request(self):
         document=self.journal.request(self.requirement)
         document['created_at']='2030-01-01T00:00:00Z'
-        self.store.db.execute('UPDATE mac_host_astra_requests SET document=? WHERE request_sha256=?',
+        self.journal.db.execute('UPDATE mac_host_astra_requests SET document=? WHERE request_sha256=?',
                              (common.encoded(document),self.requirement['request_sha256']))
         with self.assertRaisesRegex(AppError,'RECEIPT_REPLAY'):self.journal.consume(self.requirement)
-        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM mac_host_astra_receipts').fetchone()[0],0)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_receipts').fetchone()[0],0)
 
     def test_observed_failure_survives_deletion_restart_and_new_same_head_request(self):
         self.pages=[[audit_comment(self.requirement,cid=124,result='FAIL')]]
@@ -215,7 +215,7 @@ class JournalTests(unittest.TestCase):
         for requirement in (self.requirement,changed):
             with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):
                 receipts.Journal(self.store).consume(requirement)
-        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM mac_host_astra_receipts').fetchone()[0],0)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_receipts').fetchone()[0],0)
 
     def test_observed_conflict_cannot_be_deleted_before_a_receipt_is_pinned(self):
         self.pages=[[self.comment,audit_comment(self.requirement,cid=124,result='FAIL')]]
@@ -256,7 +256,34 @@ class JournalTests(unittest.TestCase):
         self.pull['head']['sha']='a'*40
         self.comment['body']+='\nChanged';self.pages=[[self.comment,audit_comment(self.requirement,cid=124)]]
         with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):self.journal.consume(self.requirement)
-        self.assertEqual(self.store.db.execute('SELECT comment_id FROM mac_host_astra_receipts').fetchone()[0],123)
+        self.assertEqual(self.journal.db.execute('SELECT comment_id FROM mac_host_astra_receipts').fetchone()[0],123)
+
+    def test_outer_owner_rollback_and_process_restart_preserve_audit_hold(self):
+        self.pages=[[audit_comment(self.requirement,result='FAIL')]]
+        self.store.db.execute('BEGIN IMMEDIATE')
+        self.store.db.execute('INSERT INTO events(job_id,created,kind,message) VALUES (?,?,?,?)',('fixture',0,'fixture','rollback'))
+        with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):self.journal.consume(self.requirement)
+        self.assertTrue(self.store.db.in_transaction);self.store.db.rollback()
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
+        self.store.close();self.store=core.Store(Path(self.temp.name)/'app');self.addCleanup(self.store.close)
+        self.pages=[[self.comment]]
+        with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):
+            receipts.Journal(self.store).consume(self.requirement)
+
+    def test_second_authenticated_scan_preserves_new_edited_comment_observation(self):
+        edited=audit_comment(self.requirement,cid=124);edited['updated_at']='2030-01-01T00:01:00Z'
+        count=0
+        def changing_api(path,paginate=False):
+            nonlocal count
+            if '/issues/2/comments?' in path:
+                count+=1
+                return [[copy.deepcopy(self.comment)]] if count==1 else [[copy.deepcopy(self.comment),edited]]
+            return self.api(path,paginate=paginate)
+        with patch('handoff.api',side_effect=changing_api):
+            with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):self.journal.consume(self.requirement)
+        self.pages=[[self.comment]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):
+            receipts.Journal(self.store).consume(self.requirement)
 
 
 if __name__ == '__main__': unittest.main()

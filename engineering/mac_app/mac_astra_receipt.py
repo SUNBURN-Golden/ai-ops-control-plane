@@ -8,8 +8,10 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import hashlib
+import os
 import re
 import sqlite3
+import stat
 
 from common import AppError, digest, encoded, parse_json, repository
 import handoff
@@ -138,18 +140,27 @@ def parse_comment(comment, requirement):
             'audit_request_id': field(body, 'AUDIT_REQUEST_ID'), 'contract_change_required': contract}
 
 
-def read_receipt(requirement, comment_id, *, expected=None):
+def read_receipt(requirement, comment_id, *, expected=None, journal=None):
     require(type(comment_id) is int and comment_id > 0)
     decision_evidence(); live_pr(requirement)
     repo, number, request = context(requirement)
     comment = api('repos/' + repo + '/issues/comments/' + str(comment_id))
-    evidence = parse_comment(comment, requirement)
+    try:evidence = parse_comment(comment, requirement)
+    except AppError:
+        if journal is not None:journal.hold(requirement,'MAC_HOST_ASTRA_RECEIPT_CHANGED')
+        raise
     require(evidence['comment_id'] == comment_id and evidence['result'] in ('PASS', 'PASS_WITH_NOTES') and
             DEPTHS.index(evidence['depth']) >= DEPTHS.index(request['requested_depth']) and
-            evidence['contract_change_required'] == 'NO')
+            evidence['contract_change_required'] == 'NO','MAC_HOST_ASTRA_RECEIPT_CHANGED')
     if expected is not None:
         require(evidence == expected, 'MAC_HOST_ASTRA_RECEIPT_CHANGED')
     # A later same-HEAD FAIL/decision cannot be hidden by selecting an older PASS.
+    if journal is not None:
+        observed=journal.observe(requirement)
+        if not any(item==evidence for item in observed):
+            journal.hold(requirement,'MAC_HOST_ASTRA_RECEIPT_CHANGED',evidence)
+        live_pr(requirement)
+        return evidence
     pages = api('repos/' + repo + '/issues/' + str(number) + '/comments?per_page=100', paginate=True)
     require(isinstance(pages, list) and pages and all(isinstance(page, list) for page in pages) and
             sum(len(page) for page in pages) <= 4096)
@@ -192,19 +203,34 @@ class Journal:
     def __init__(self, store):
         self.store = store
         with store.lock:
-            # Pipeline is also constructed inside admission transactions.
-            # executescript would implicitly commit their single-owner fence.
-            store.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_requests(
+            # Independent durable authority: a rejected child admission rolls
+            # back app.sqlite3, but must not erase an observed negative audit.
+            if getattr(store,'_mac_astra_db',None) is None:
+                path=store.directory/'mac-astra.sqlite3'
+                try:
+                    fd=os.open(path,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+                    try:info=os.fstat(fd)
+                    finally:os.close(fd)
+                    require(stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and
+                            not info.st_mode & 0o077 and info.st_nlink==1)
+                    db=sqlite3.connect(path,isolation_level=None,check_same_thread=False,timeout=10)
+                    db.row_factory=sqlite3.Row
+                    db.execute('PRAGMA journal_mode=WAL');db.execute('PRAGMA synchronous=FULL')
+                    store._mac_astra_db=db
+                except (OSError,sqlite3.Error):
+                    raise AppError('MAC_HOST_ASTRA_RECEIPT_UNVERIFIED') from None
+            self.db=store._mac_astra_db
+            self.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_requests(
                 request_sha256 TEXT PRIMARY KEY, document TEXT NOT NULL)''')
-            store.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_receipts(
+            self.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_receipts(
                 request_sha256 TEXT PRIMARY KEY, repository TEXT NOT NULL,
                 comment_id INTEGER NOT NULL, audit_request_id TEXT NOT NULL, document TEXT NOT NULL,
                 UNIQUE(repository, comment_id), UNIQUE(repository, audit_request_id))''')
-            store.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_observations(
+            self.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_observations(
                 repository TEXT NOT NULL, pr INTEGER NOT NULL, head TEXT NOT NULL,
                 comment_id INTEGER NOT NULL, document TEXT NOT NULL,
                 PRIMARY KEY(repository, pr, head, comment_id))''')
-            store.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_holds(
+            self.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_holds(
                 repository TEXT NOT NULL, pr INTEGER NOT NULL, head TEXT NOT NULL,
                 code TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(repository, pr, head))''')
 
@@ -213,7 +239,7 @@ class Journal:
         document={'request_sha256':requirement['request_sha256'],'head':request['head'],
                   'code':code,'evidence':evidence}
         with self.store.lock:
-            self.store.db.execute('INSERT OR IGNORE INTO mac_host_astra_holds VALUES (?,?,?,?,?)',
+            self.db.execute('INSERT OR IGNORE INTO mac_host_astra_holds VALUES (?,?,?,?,?)',
                                   (repo.lower(),number,request['head'],code,encoded(document)))
         raise AppError(code)
 
@@ -221,7 +247,7 @@ class Journal:
         repo,number,request=context(requirement)
         key=(repo.lower(),number,request['head'])
         with self.store.lock:
-            held=self.store.db.execute('SELECT code FROM mac_host_astra_holds WHERE repository=? AND pr=? AND head=?',key).fetchone()
+            held=self.db.execute('SELECT code FROM mac_host_astra_holds WHERE repository=? AND pr=? AND head=?',key).fetchone()
         if held: raise AppError(held[0])
         live_pr(requirement)
         pages=api('repos/'+repo+'/issues/'+str(number)+'/comments?per_page=100',paginate=True)
@@ -241,12 +267,12 @@ class Journal:
                 except AppError:self.hold(requirement,'MAC_HOST_ASTRA_RECEIPT_CHANGED')
                 observed[value['comment_id']]=value
         with self.store.lock:
-            old={row['comment_id']:parse_json(row['document']) for row in self.store.db.execute(
+            old={row['comment_id']:parse_json(row['document']) for row in self.db.execute(
                 'SELECT comment_id,document FROM mac_host_astra_observations WHERE repository=? AND pr=? AND head=?',key)}
             for cid,value in old.items():
                 if observed.get(cid)!=value:self.hold(requirement,'MAC_HOST_ASTRA_RECEIPT_CHANGED',value)
             for cid,value in observed.items():
-                self.store.db.execute('INSERT OR IGNORE INTO mac_host_astra_observations VALUES (?,?,?,?,?)',
+                self.db.execute('INSERT OR IGNORE INTO mac_host_astra_observations VALUES (?,?,?,?,?)',
                                       (*key,cid,encoded(value)))
         values=list(observed.values())
         if len({value['result'] for value in values})>1:
@@ -267,7 +293,7 @@ class Journal:
                 request['canonical_binding'].get('task_revision') == request['task_revision'])
         decision_evidence()
         with self.store.lock:
-            row = self.store.db.execute('SELECT document FROM mac_host_astra_requests WHERE request_sha256=?', (sha,)).fetchone()
+            row = self.db.execute('SELECT document FROM mac_host_astra_requests WHERE request_sha256=?', (sha,)).fetchone()
             if row:
                 document = parse_json(row[0])
                 require(document['request'] == request and document['decision'] == DECISION)
@@ -275,7 +301,7 @@ class Journal:
                 document = {'schema_version': 1, 'request_sha256': sha, 'request': copy.deepcopy(request),
                             'decision': copy.deepcopy(DECISION),
                             'created_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
-                self.store.db.execute('INSERT INTO mac_host_astra_requests VALUES (?,?)', (sha, encoded(document)))
+                self.db.execute('INSERT INTO mac_host_astra_requests VALUES (?,?)', (sha, encoded(document)))
         return document
 
     def consume(self, requirement):
@@ -283,12 +309,12 @@ class Journal:
         repo, number, request = context(requirement)
         observed=self.observe(requirement)
         with self.store.lock:
-            row = self.store.db.execute('SELECT document FROM mac_host_astra_receipts WHERE request_sha256=?', (sha,)).fetchone()
+            row = self.db.execute('SELECT document FROM mac_host_astra_receipts WHERE request_sha256=?', (sha,)).fetchone()
             pinned = parse_json(row[0]) if row else None
         if pinned:
             require(pinned.get('request_sha256') == sha and pinned.get('request') == document['request'] and
                     pinned.get('decision') == DECISION)
-            try:evidence = read_receipt(requirement, pinned['comment']['comment_id'], expected=pinned['comment'])
+            try:evidence = read_receipt(requirement, pinned['comment']['comment_id'], expected=pinned['comment'],journal=self)
             except AppError as exc:
                 if exc.code in ('MAC_HOST_ASTRA_RECEIPT_CHANGED','MAC_HOST_ASTRA_AUDIT_CONFLICT'):
                     self.hold(requirement,exc.code,pinned['comment'])
@@ -296,7 +322,7 @@ class Journal:
         else:
             candidates=[value['comment_id'] for value in observed if value['created_at']>=document['created_at']]
             require(candidates, 'MAC_HOST_ASTRA_AUDIT_REQUIRED')
-            try:evidence = read_receipt(requirement, min(candidates))
+            try:evidence = read_receipt(requirement, min(candidates),journal=self)
             except AppError as exc:
                 if exc.code in ('MAC_HOST_ASTRA_RECEIPT_CHANGED','MAC_HOST_ASTRA_AUDIT_CONFLICT'):
                     self.hold(requirement,exc.code)
@@ -313,12 +339,12 @@ class Journal:
                   'request_sha256': sha, 'request': copy.deepcopy(document['request']),
                   'decision': copy.deepcopy(DECISION), 'comment': evidence}
         with self.store.lock:
-            old = self.store.db.execute('SELECT document FROM mac_host_astra_receipts WHERE request_sha256=?', (sha,)).fetchone()
+            old = self.db.execute('SELECT document FROM mac_host_astra_receipts WHERE request_sha256=?', (sha,)).fetchone()
             if old:
                 require(parse_json(old[0]) == result, 'MAC_HOST_ASTRA_RECEIPT_CHANGED')
             else:
                 try:
-                    self.store.db.execute('INSERT INTO mac_host_astra_receipts VALUES (?,?,?,?,?)',
+                    self.db.execute('INSERT INTO mac_host_astra_receipts VALUES (?,?,?,?,?)',
                                           (sha, repo.lower(), evidence['comment_id'], evidence['audit_request_id'], encoded(result)))
                 except sqlite3.IntegrityError:
                     raise AppError('MAC_HOST_ASTRA_RECEIPT_REPLAY') from None
