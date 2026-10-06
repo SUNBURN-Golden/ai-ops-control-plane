@@ -46,9 +46,9 @@ def decision_verified():
 
 
 def object_git(checkout, *args):
-    """Read the objects Git will transfer, ignoring local replacement refs."""
+    """Read actual objects/parents without replacement, graft or graph overrides."""
     from gitops import git
-    return git(checkout, '--no-replace-objects', *args)
+    return git(checkout, '--no-replace-objects', *args, literal_git_objects=True)
 
 
 def committed_matches(repos, job, head):

@@ -164,12 +164,17 @@ class CommittedPublicationTests(unittest.TestCase):
     def setUp(self):
         AuthorityCheckpointTests.setUp(self)
         self.git_env = {**os.environ, 'GIT_CONFIG_GLOBAL':'/dev/null', 'GIT_CONFIG_NOSYSTEM':'1'}
+        env_patch = patch('gitops.agents.environment', side_effect=lambda:dict(self.git_env))
+        env_patch.start(); self.addCleanup(env_patch.stop)
         self.push_hook = None
         def real_git(checkout, *args, **kwargs):
             self.calls.append(args)
             if args[:1] == ('push',):
                 if self.push_hook: self.push_hook()
                 return ''
+            if kwargs.get('literal_git_objects'):
+                return gitops.execute(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+                                       *args], cwd=checkout, literal_git_objects=True)
             run = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
                                   *args], cwd=checkout, env=self.git_env, capture_output=True, text=True, check=True)
             return run.stdout.rstrip('\n')
@@ -270,6 +275,19 @@ class CommittedPublicationTests(unittest.TestCase):
         self.assertNotEqual(self.real_git('--no-replace-objects', 'rev-parse', self.job['head'] + ':AGENTS.md'),
                             self.pin['after_blob'])
         self.assert_refused_before_push()
+
+    def test_graft_fake_parent_cannot_make_an_orphan_commit_publishable(self):
+        head = self.checkpoint(); tree = self.real_git('rev-parse', head + '^{tree}')
+        orphan = self.real_git('commit-tree', tree, '-m', 'Orphan with approved tree')
+        self.real_git('reset', '--hard', orphan); self.job['head'] = orphan
+        (self.checkout / '.git/info/grafts').write_text(orphan + ' ' + self.pin['plan_commit'] + '\n')
+        self.assertTrue(self.repos.clean(self.job))
+        self.real_git('--no-replace-objects', 'merge-base', '--is-ancestor', self.pin['plan_commit'], orphan)
+        # This read uses the production executor's private child environment.
+        with self.assertRaises(common.AppError):
+            authority.object_git(self.checkout, 'merge-base', '--is-ancestor', self.pin['plan_commit'], orphan)
+        self.assert_refused_before_push()
+        self.assertNotIn('GIT_GRAFT_FILE', self.git_env)
 
     def test_clean_filter_cannot_make_wrong_commit_a_successful_checkpoint(self):
         (self.checkout / '.git/info/attributes').write_text('AGENTS.md filter=fixture\n')

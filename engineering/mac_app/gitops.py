@@ -27,7 +27,7 @@ ROADMAP_HEADER = {
 }
 
 
-def execute(argv, cwd=None, timeout=120, allowed=(0,), *, github_access=None):
+def execute(argv, cwd=None, timeout=120, allowed=(0,), *, github_access=None, literal_git_objects=False):
     # Mac verification may read through gh wrappers as well as handoff.api.
     # Import at call time: handoff itself imports this executor.
     github = Path(argv[0]).name == 'gh'
@@ -47,9 +47,15 @@ def execute(argv, cwd=None, timeout=120, allowed=(0,), *, github_access=None):
         from handoff import remaining_api_seconds
         remaining = remaining_api_seconds()
         if remaining is not None: timeout = min(timeout, remaining)
+    command_env = agents.environment()
+    if literal_git_objects:
+        if Path(argv[0]).name != 'git': raise AppError('LITERAL_GIT_COMMAND_REQUIRED')
+        # Only this child reads actual objects/parents; no repository/global config edit.
+        command_env = {**command_env, 'GIT_GRAFT_FILE': os.devnull, 'GIT_NO_REPLACE_OBJECTS': '1'}
+        argv = [argv[0], '-c', 'core.commitGraph=false', *argv[1:]]
     try:
         run = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
-                             timeout=timeout, env=agents.environment())
+                             timeout=timeout, env=command_env)
     except subprocess.TimeoutExpired as exc:
         raise AppError('COMMAND_TIMEOUT') from exc
     if budgeted: remaining_api_seconds()

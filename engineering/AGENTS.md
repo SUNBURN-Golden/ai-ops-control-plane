@@ -392,7 +392,9 @@ blocked. The runtime re-reads the immutable User-account approval at checkpoint
 and before push, then rechecks the local binding/scope/file. Checkpoint output
 and publication must match the approved committed blob and non-executable tree
 mode, irrespective of working-tree filters/index flags. Bounded object reads
-disable replacement refs and verify the actual original plan blob/base ancestry. Publication reads the
+disable replacement refs and verify the actual original plan blob/base ancestry.
+Only those read processes ignore legacy graft input and commit-graph cache;
+repository/global settings and other command environments are unchanged. Publication reads the
 approval after other pre-push API reads, checks the exact job HEAD/clean tree,
 and pushes that fixed SHA. Its 348-byte UTF-8
 body SHA-256 is `000fa33005152da022795f01ef3ab91b3d4d085a81454b41907f8fd44488e951`,

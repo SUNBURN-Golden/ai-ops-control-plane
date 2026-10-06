@@ -55,7 +55,12 @@ checkpoint 후와 게시 전에는 실제 commit tree의 AGENTS.md blob·100644 
 원래 plan 대비 단독 변경도 확인한다. Git filter·assume-unchanged·core.filemode가
 working tree를 clean으로 보여도 commit tree 검증을 대신할 수 없다.
 제한된 객체 조회는 `--no-replace-objects`로 replacement 해석을 끄며 실제 원래 plan
-blob과 base ancestry도 재검증한다. 기본 Git 조회와 pack transfer의 replacement
+blob과 base ancestry도 재검증한다. 해당 읽기 child에만 GIT_GRAFT_FILE=/dev/null,
+GIT_NO_REPLACE_OBJECTS=1과 core.commitGraph=false를 적용해 legacy graft의 가짜 부모나
+commit graph cache로 실제 parent 검증을 대체하지 못하게 한다. Git 설정 파일과
+전역 환경을 수정하지 않는다. graft의 가짜 ancestry는
+[Git 저장소 문서](https://git-scm.com/docs/gitrepository-layout#_info_grafts)에 설명된다.
+기본 Git 조회와 pack transfer의 replacement
 처리가 다르기 때문이다([Git 공식 문서](https://git-scm.com/docs/git-replace)).
 게시 경로는 repository 조회 후 승인 댓글을 마지막으로 읽고, 이후 정확한 job HEAD·
 clean tree·binding/scope/file을 재검증한다. push source를 이동 가능한 HEAD가 아닌
