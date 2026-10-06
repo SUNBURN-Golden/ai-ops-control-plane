@@ -326,9 +326,28 @@ Since M5, Astra has no GitHub identity: `aiops-fable` posts the Astra result wit
 operator's token, and the model never holds a GitHub credential.
 Program mode decision M4 (User, 2026-09-29) departs from this: lanes do not get
 separate GitHub identities, so a lane token can merge or push directly. User
-accepts that residual (`docs/PROGRAM_MODE.md` §13). No gate reads GitHub text
-as authority; gates read host pins, the host-recorded plan and live PR state
+accepts that residual (`docs/PROGRAM_MODE.md` §13). Linux program gates do not read GitHub text
+as authority; those gates read host pins, the host-recorded plan and live PR state
 (`docs/PROGRAM_MODE.md` §4.2).
+
+User decision [D-2026-10-06-MAC-A3-RECEIPT](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/78#issuecomment-6011271646)
+records a Mac-only exception for `authority_kind=MAC_LOCAL`. Its exact UTF-8
+decision body is [recorded in the repository](docs/MAC_A3_RECEIPT_DECISION_20261006.md):
+SHA-256 `46dc2cf0fdd02eeabbc2ac234ffcda0d410820f169d6e87f2f904d7ad939f132`,
+comment ID `6011271646`, actor `BeautifulMind-JT` / numeric ID `263336091`,
+created/updated `2026-10-06T07:10:27Z`. The Linux protected fixed `aiops-fable`
+remains the producer. Mac re-reads that decision and the tool's marked PR comment
+through authenticated GitHub API, verifies actor, exact repo/PR/delivery HEAD,
+result/depth/schema and immutable body hash, and binds the receipt to its private
+task/revision/request before consumption, supervision, inspection and User merge.
+This exception trusts the designated operator-account comment as fixed-tool output:
+a holder of that account's token can forge a matching comment; the body hash proves
+unchanged content, not protected-producer identity. It establishes no new key,
+credential, actor, cross-host admission authority or Linux gate exception.
+Existing review, current-HEAD CI, RELEASE reservation and User merge requirements
+remain in force. See [the Mac receipt contract](mac_app/MAC_A3_RECEIPT_KO.md)
+for fail-closed conditions and implementation limits. A repository decision copy
+is audit evidence and never replaces the runtime's authenticated live verification.
 
 Repo-scoped credentials are preferred over one all-repositories write token.
 
