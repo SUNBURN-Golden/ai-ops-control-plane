@@ -246,6 +246,9 @@ class Repositories:
             git(checkout, 'commit', '-m', f"AIOPS: {job['current_task']['title'][:120]}", timeout=120)
         head = self.head(job)
         if not self.clean(job): raise AppError('DIRTY_CHECKPOINT')
+        from mac_authority_checkpoint import PINS, committed_matches
+        if job.get('id') == PINS['job'] and not committed_matches(self, job, head):
+            raise AppError('AUTHORITY_EDIT_NEEDS_USER')
         return head
 
     def synchronize_base(self, job):
@@ -267,16 +270,21 @@ class Repositories:
             if job.get('generation_policy') != POLICY: raise AppError('MAC_GENERATION_PUBLICATION_POLICY_REQUIRED')
         self.assert_binding(job)
         if self.head(job) != job['head'] or not self.clean(job): raise AppError('STALE_PUBLISH_HEAD')
-        # This exact authority-edit approval must still exist before any push.
-        from mac_authority_checkpoint import PINS, approved
-        if job.get('id') == PINS['job'] and not approved(self, job, PINS['path']):
-            raise AppError('AUTHORITY_EDIT_NEEDS_USER')
         if job.get('native_lineage'):
             metadata=parse_json(gh(job['repository'],'repo','view','--json','nameWithOwner,isPrivate',github_access='READ'))
             if not isinstance(metadata,dict) or metadata.get('nameWithOwner','').lower()!=job['repository'].lower() or metadata.get('isPrivate') is not True:
                 raise AppError('MAC_HOST_CANDIDATE_PUBLICATION_SCOPE_REQUIRED')
         checkout = self.path(job)
-        git(checkout, 'push', '--porcelain', 'origin', 'HEAD:refs/heads/' + job['branch'], timeout=180)
+        # The bounded authority approval is the last pre-push network read.
+        from mac_authority_checkpoint import PINS, approved, committed_matches
+        push_source = 'HEAD'
+        if job.get('id') == PINS['job']:
+            if not approved(self, job, PINS['path'], publication=True):
+                raise AppError('AUTHORITY_EDIT_NEEDS_USER')
+            if not committed_matches(self, job, job['head']): raise AppError('STALE_PUBLISH_HEAD')
+            # A concurrent ref move must never substitute an unreviewed commit.
+            push_source = job['head']
+        git(checkout, 'push', '--porcelain', 'origin', push_source + ':refs/heads/' + job['branch'], timeout=180)
         fields='url,state,headRefOid'+(',isDraft,autoMergeRequest' if generation else '')
         prior = parse_json(gh(job['repository'], 'pr', 'list', '--head', job['branch'], '--state', 'all',
                               '--json', fields, '--limit', '10',github_access='READ'))

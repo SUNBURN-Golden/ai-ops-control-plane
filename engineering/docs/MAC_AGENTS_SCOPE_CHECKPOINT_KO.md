@@ -51,6 +51,12 @@ User 메시지 `Sentinel_189daa51ad4481918cf45ff2f1306cc0`은 이 실제 댓글 
 
 GitHub 조회 후 binding/scope/변경 경로와 실제 파일 bytes를 다시 확인해 네트워크
 대기 중 추가된 변경을 수용하지 않는다. 30초 공유 API read budget을 사용한다.
+checkpoint 후와 게시 전에는 실제 commit tree의 AGENTS.md blob·100644 mode와
+원래 plan 대비 단독 변경도 확인한다. Git filter·assume-unchanged·core.filemode가
+working tree를 clean으로 보여도 commit tree 검증을 대신할 수 없다.
+게시 경로는 repository 조회 후 승인 댓글을 마지막으로 읽고, 이후 정확한 job HEAD·
+clean tree·binding/scope/file을 재검증한다. push source를 이동 가능한 HEAD가 아닌
+그 검증된 SHA로 고정해 뒤의 ref 이동이 다른 commit을 게시하지 못하게 한다.
 이 read는 기존 checkpoint/게시 경로이며 모든 변경·예약과 GitHub 댓글을 원자적으로
 잠그는 새 장치가 아니다. checkpoint 성공이 실제 GitHub 게시 완료나 감사 PASS를 뜻하지 않는다.
 

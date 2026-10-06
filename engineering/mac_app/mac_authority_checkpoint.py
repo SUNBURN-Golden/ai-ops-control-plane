@@ -45,8 +45,23 @@ def decision_verified():
             hashlib.sha256(comment['body'].encode('utf-8')).hexdigest() == pin['body_sha256'])
 
 
+def committed_matches(repos, job, head):
+    """Verify the actual commit tree, independently of working-tree Git settings."""
+    try:
+        from gitops import git
+        if not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}', head): return False
+        checkout = repos.path(job)
+        entry = git(checkout, 'ls-tree', '-z', head, '--', PINS['path'])
+        expected = '100644 blob ' + PINS['after_blob'] + '\t' + PINS['path'] + '\0'
+        names = git(checkout, 'diff', PINS['plan_commit'], head, '--name-only', '-z')
+        return (entry == expected and {p for p in names.split('\0') if p} == {PINS['path']} and
+                repos.head(job) == head and repos.clean(job))
+    except (KeyError, TypeError, AttributeError, OSError, AppError):
+        return False
+
+
 @handoff.bounded_api_reads
-def approved(repos, job, name):
+def approved(repos, job, name, *, publication=False):
     """Re-read the User decision, then recheck all local pins before staging.
 
     A failed read/changed/deleted decision retains AUTHORITY_EDIT_NEEDS_USER so
@@ -63,6 +78,7 @@ def approved(repos, job, name):
                 bound.get('plan_commit') != pin['plan_commit'] or bound.get('plan_blob') != pin['plan_blob'] or
                 job.get('base_sha') != pin['plan_commit'] or job['program_scope']['blob'] != pin['plan_blob']): return False
         if not decision_verified(): return False
+        if publication and not committed_matches(repos, job, job.get('head')): return False
         # Network time must not create a window for a different local scope/file.
         repos.assert_binding(job); repos.assert_scope(job)
         scope = repos.program_scope(job)
