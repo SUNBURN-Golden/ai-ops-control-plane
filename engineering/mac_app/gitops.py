@@ -236,7 +236,8 @@ class Repositories:
         if job.get('base_sha'): names += git(checkout, 'diff', job.get('verified_base', job['base_sha']), 'HEAD', '--name-only', '-z')
         for name in names.split('\x00'):
             if name == 'AGENTS.md' or name.endswith('/AGENTS.md') or name.startswith(('.aiops/', 'RUNBOOKS/', 'docs/decisions/')):
-                if not self.approved_roadmap_header(job, name):
+                from mac_authority_checkpoint import approved
+                if not self.approved_roadmap_header(job, name) and not approved(self, job, name):
                     raise AppError('AUTHORITY_EDIT_NEEDS_USER', '기준 계약 변경은 별도 결정을 남겨야 합니다: ' + name)
             if name and re.search(r'(^|/)(\.env(\.[^/]+)?|id_rsa|id_ed25519|credentials\.json|[^/]+\.(pem|p12|key))$', name) and not name.endswith(('.example', '.sample', '.template')):
                 raise AppError('SENSITIVE_FILE_CHANGE', '자격증명 파일 변경을 제외해야 합니다: ' + name)
@@ -266,6 +267,10 @@ class Repositories:
             if job.get('generation_policy') != POLICY: raise AppError('MAC_GENERATION_PUBLICATION_POLICY_REQUIRED')
         self.assert_binding(job)
         if self.head(job) != job['head'] or not self.clean(job): raise AppError('STALE_PUBLISH_HEAD')
+        # This exact authority-edit approval must still exist before any push.
+        from mac_authority_checkpoint import PINS, approved
+        if job.get('id') == PINS['job'] and not approved(self, job, PINS['path']):
+            raise AppError('AUTHORITY_EDIT_NEEDS_USER')
         if job.get('native_lineage'):
             metadata=parse_json(gh(job['repository'],'repo','view','--json','nameWithOwner,isPrivate',github_access='READ'))
             if not isinstance(metadata,dict) or metadata.get('nameWithOwner','').lower()!=job['repository'].lower() or metadata.get('isPrivate') is not True:
