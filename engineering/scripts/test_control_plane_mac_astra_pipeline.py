@@ -86,6 +86,20 @@ class AstraPipelineTests(unittest.TestCase):
         self.assertEqual(self.store.get(job['id'])['state'],'accepted');self.assertEqual(self.repos.merge_count,0)
         self.assertEqual(self.worker.launched,1)
 
+    def test_live_reverification_preserves_private_job_digest_for_dependencies(self):
+        job=self.inspected();self.app.action(job['id'],'accept',{})
+        before=self.store.get(job['id']);reads=self.reads
+        self.engine.pipeline.validate_inspection(before,refresh=False)
+        self.assertGreater(self.reads,reads)
+        self.assertEqual(self.store.get(job['id']),before)
+
+    def test_constructing_pipeline_does_not_migrate_read_only_source_ledgers(self):
+        from mac_pipeline import Pipeline
+        with patch('mac_astra_receipt.Journal') as journal:
+            pipeline=Pipeline(self.store,self.repos,self.controller)
+            journal.assert_not_called()
+            self.assertIsNone(pipeline._astra)
+
     def test_changed_or_deleted_audit_blocks_supervisor_start_before_any_model(self):
         job=self.audited();self.deleted=True
         with patch('core.subprocess.Popen') as spawn:

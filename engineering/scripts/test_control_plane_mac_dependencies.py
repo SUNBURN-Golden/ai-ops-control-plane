@@ -65,7 +65,7 @@ class AcceptedDependencyTests(unittest.TestCase):
                 'steps':[{'number':1,'name':'Fixture required verification','status':'completed','conclusion':'success'}]}
         self.git_values={('merge-base','d'*40,'d'*40):'d'*40,('rev-parse','d'*40+'^1'):'a'*40,
                          ('rev-parse','d'*40+'^{tree}'):'e'*40,('rev-parse','c'*40+'^{tree}'):'e'*40}
-        self.api_patch=patch('handoff.api',side_effect=lambda target:copy.deepcopy(self.api_values[target]))
+        self.api_patch=patch('handoff.api',side_effect=lambda target, **kwargs:copy.deepcopy(self.api_values[target]))
         self.api_patch.start();self.addCleanup(self.api_patch.stop)
         self.git_patch=patch('gitops.git',side_effect=lambda checkout,*args:self.git_values[args])
         self.git_patch.start();self.addCleanup(self.git_patch.stop)
@@ -191,7 +191,8 @@ class AcceptedDependencyTests(unittest.TestCase):
         with self.assertRaisesRegex(common.AppError,'BINDING_INVALID'):self.source.call('read',bound)
         plan=common.parse_json(self.latest['source']['raw_program']);plan['nodes'][1]['audit_floor']='A3'
         self.latest=authority.snapshot(nodes=plan['nodes']);self.latest['source']['head']='d'*40
-        with self.assertRaisesRegex(common.AppError,'ASTRA_GATE_REQUIRED'):self.child(generation_id=f'{3:032x}')
+        with patch('mac_astra_receipt.decision_evidence',side_effect=common.AppError('MAC_HOST_ASTRA_DECISION_UNVERIFIED')):
+            with self.assertRaisesRegex(common.AppError,'ASTRA_DECISION_UNVERIFIED'):self.child(generation_id=f'{3:032x}')
 
 
 if __name__=='__main__':unittest.main()

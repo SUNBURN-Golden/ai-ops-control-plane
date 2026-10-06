@@ -18,8 +18,15 @@ class Pipeline:
     def __init__(self,store,source,repos,*,failure=None):
         self.store,self.source,self.repos=store,source,repos
         self.failure=failure
-        from mac_astra_receipt import Journal
-        self.astra=Journal(store)
+        self._astra=None
+
+    @property
+    def astra(self):
+        # Read-only legacy inspections/install checks must not migrate a ledger.
+        if self._astra is None:
+            from mac_astra_receipt import Journal
+            self._astra=Journal(self.store)
+        return self._astra
 
     def _document(self,request):
         row=self.store.db.execute('SELECT * FROM mac_host_deliveries WHERE request=?',(request,)).fetchone()
@@ -166,7 +173,12 @@ class Pipeline:
                 job['ci'].get('source')=='GITHUB_ACTIONS_API','MAC_HOST_LIVE_CI_REQUIRED')
         request=self.astra.request(requirement)
         requirement={**requirement,'request_recorded_at':request['created_at']}
-        self.store.update(job['id'],audit_requirement=requirement)
+        with self.store.lock:
+            recorded=self.store.get(job['id']).get('audit_requirement')
+            # Live verification must not rewrite an unchanged accepted job:
+            # dependency proofs bind its complete private document digest.
+            if not isinstance(recorded,dict) or {**recorded,'audit_receipt':None}!=requirement:
+                self.store.update(job['id'],audit_requirement=requirement)
         receipt=self.astra.consume(requirement)
         require(receipt['comment']['auditor_session'] not in
                 self.writer_sessions(job)+[job['review']['provider_evidence']['session_id']],
@@ -177,7 +189,8 @@ class Pipeline:
                     self.repos.head(current)==job['head'] and self.repos.clean(current),
                     'MAC_HOST_ASTRA_RECEIPT_CHANGED')
             requirement={**requirement,'audit_receipt':receipt}
-            self.store.update(job['id'],audit_requirement=requirement)
+            if current.get('audit_requirement')!=requirement:
+                self.store.update(job['id'],audit_requirement=requirement)
         return requirement
 
     def validate_candidate(self,job,*,refresh=True):

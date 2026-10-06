@@ -200,6 +200,62 @@ class Journal:
                 request_sha256 TEXT PRIMARY KEY, repository TEXT NOT NULL,
                 comment_id INTEGER NOT NULL, audit_request_id TEXT NOT NULL, document TEXT NOT NULL,
                 UNIQUE(repository, comment_id), UNIQUE(repository, audit_request_id))''')
+            store.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_observations(
+                repository TEXT NOT NULL, pr INTEGER NOT NULL, head TEXT NOT NULL,
+                comment_id INTEGER NOT NULL, document TEXT NOT NULL,
+                PRIMARY KEY(repository, pr, head, comment_id))''')
+            store.db.execute('''CREATE TABLE IF NOT EXISTS mac_host_astra_holds(
+                repository TEXT NOT NULL, pr INTEGER NOT NULL, head TEXT NOT NULL,
+                code TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(repository, pr, head))''')
+
+    def hold(self, requirement, code, evidence=None):
+        repo, number, request=context(requirement)
+        document={'request_sha256':requirement['request_sha256'],'head':request['head'],
+                  'code':code,'evidence':evidence}
+        with self.store.lock:
+            self.store.db.execute('INSERT OR IGNORE INTO mac_host_astra_holds VALUES (?,?,?,?,?)',
+                                  (repo.lower(),number,request['head'],code,encoded(document)))
+        raise AppError(code)
+
+    def observe(self, requirement):
+        repo,number,request=context(requirement)
+        key=(repo.lower(),number,request['head'])
+        with self.store.lock:
+            held=self.store.db.execute('SELECT code FROM mac_host_astra_holds WHERE repository=? AND pr=? AND head=?',key).fetchone()
+        if held: raise AppError(held[0])
+        live_pr(requirement)
+        pages=api('repos/'+repo+'/issues/'+str(number)+'/comments?per_page=100',paginate=True)
+        require(isinstance(pages,list) and pages and all(isinstance(page,list) for page in pages) and
+                sum(len(page) for page in pages)<=4096)
+        observed={};seen=set()
+        for page in pages:
+            for item in page:
+                require(isinstance(item,dict) and type(item.get('id')) is int and item['id'] not in seen)
+                seen.add(item['id'])
+                if not trusted_actor(item) or not isinstance(item.get('body'),str) or not item['body'].startswith(MARK):continue
+                lines=item['body'].splitlines()
+                header=HEADER.fullmatch(lines[1]) if len(lines)>=2 else None
+                if header is None:self.hold(requirement,'MAC_HOST_ASTRA_RECEIPT_UNVERIFIED')
+                if header[2]!=request['head']:continue
+                try:value=parse_comment(item,requirement)
+                except AppError:self.hold(requirement,'MAC_HOST_ASTRA_RECEIPT_CHANGED')
+                observed[value['comment_id']]=value
+        with self.store.lock:
+            old={row['comment_id']:parse_json(row['document']) for row in self.store.db.execute(
+                'SELECT comment_id,document FROM mac_host_astra_observations WHERE repository=? AND pr=? AND head=?',key)}
+            for cid,value in old.items():
+                if observed.get(cid)!=value:self.hold(requirement,'MAC_HOST_ASTRA_RECEIPT_CHANGED',value)
+            for cid,value in observed.items():
+                self.store.db.execute('INSERT OR IGNORE INTO mac_host_astra_observations VALUES (?,?,?,?,?)',
+                                      (*key,cid,encoded(value)))
+        values=list(observed.values())
+        if len({value['result'] for value in values})>1:
+            self.hold(requirement,'MAC_HOST_ASTRA_AUDIT_CONFLICT',values)
+        for value in values:
+            if value['result'] not in ('PASS','PASS_WITH_NOTES') or value['contract_change_required']!='NO' or \
+                    DEPTHS.index(value['depth'])<DEPTHS.index(request['requested_depth']):
+                self.hold(requirement,'MAC_HOST_ASTRA_AUDIT_CONFLICT',value)
+        return values
 
     def request(self, requirement):
         _, _, request = context(requirement)
@@ -225,40 +281,34 @@ class Journal:
     def consume(self, requirement):
         document = self.request(requirement); sha = document['request_sha256']
         repo, number, request = context(requirement)
+        observed=self.observe(requirement)
         with self.store.lock:
             row = self.store.db.execute('SELECT document FROM mac_host_astra_receipts WHERE request_sha256=?', (sha,)).fetchone()
             pinned = parse_json(row[0]) if row else None
         if pinned:
             require(pinned.get('request_sha256') == sha and pinned.get('request') == document['request'] and
                     pinned.get('decision') == DECISION)
-            evidence = read_receipt(requirement, pinned['comment']['comment_id'], expected=pinned['comment'])
+            try:evidence = read_receipt(requirement, pinned['comment']['comment_id'], expected=pinned['comment'])
+            except AppError as exc:
+                if exc.code in ('MAC_HOST_ASTRA_RECEIPT_CHANGED','MAC_HOST_ASTRA_AUDIT_CONFLICT'):
+                    self.hold(requirement,exc.code,pinned['comment'])
+                raise
         else:
-            live_pr(requirement)
-            pages = api('repos/' + repo + '/issues/' + str(number) + '/comments?per_page=100', paginate=True)
-            require(isinstance(pages, list) and pages and all(isinstance(page, list) for page in pages) and
-                    sum(len(page) for page in pages) <= 4096)
-            candidates = []; seen = set()
-            for page in pages:
-                for item in page:
-                    require(isinstance(item, dict) and type(item.get('id')) is int and item['id'] not in seen)
-                    seen.add(item['id'])
-                    if not trusted_actor(item) or not isinstance(item.get('body'), str) or not item['body'].startswith(MARK):
-                        continue
-                    lines = item['body'].splitlines(); require(len(lines) >= 2)
-                    header = HEADER.fullmatch(lines[1]); require(header is not None)
-                    if header[2] != request['head']:
-                        continue
-                    value = parse_comment(item, requirement)
-                    if value['created_at'] >= document['created_at'] and value['result'] in ('PASS', 'PASS_WITH_NOTES'):
-                        candidates.append(value['comment_id'])
+            candidates=[value['comment_id'] for value in observed if value['created_at']>=document['created_at']]
             require(candidates, 'MAC_HOST_ASTRA_AUDIT_REQUIRED')
-            evidence = read_receipt(requirement, min(candidates))
+            try:evidence = read_receipt(requirement, min(candidates))
+            except AppError as exc:
+                if exc.code in ('MAC_HOST_ASTRA_RECEIPT_CHANGED','MAC_HOST_ASTRA_AUDIT_CONFLICT'):
+                    self.hold(requirement,exc.code)
+                raise
         require(evidence['created_at'] >= document['created_at'], 'MAC_HOST_ASTRA_RECEIPT_REPLAY')
         try:
             invoked_at=datetime.strptime(evidence['audit_request_id'].split('-')[0],'%Y%m%dT%H%M%SZ').strftime('%Y-%m-%dT%H:%M:%SZ')
         except ValueError:
             raise AppError('MAC_HOST_ASTRA_RECEIPT_UNVERIFIED') from None
-        require(document['created_at'] <= invoked_at <= evidence['created_at'],'MAC_HOST_ASTRA_RECEIPT_REPLAY')
+        # Equal seconds do not prove ordering; the audit could have started
+        # before a later request in that same second. Refuse that ambiguity.
+        require(document['created_at'] < invoked_at <= evidence['created_at'],'MAC_HOST_ASTRA_RECEIPT_REPLAY')
         result = {'schema_version': 1, 'source': 'AUTHENTICATED_GITHUB_AUDIT_COMMENT',
                   'request_sha256': sha, 'request': copy.deepcopy(document['request']),
                   'decision': copy.deepcopy(DECISION), 'comment': evidence}

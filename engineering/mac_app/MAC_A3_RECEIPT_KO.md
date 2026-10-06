@@ -32,7 +32,8 @@ Mac이 별도 서명이나 Linux 원장을 확인했다고 주장하지 않는�
 5. 원장은 댓글 ID/URL/본문 SHA-256/생성·수정 시각 및 검증된 좁은 필드를 정확한 요청에
    한 번만 묶는다. 같은 댓글 또는 audit request/run ID는 다른 revision/job/native
    attempt/writer/review 요청에 재사용할 수 없다. 도구 run 시작도 요청 기록 이후여야
-   하므로 과거 본문을 새 댓글로 다시 게시해 승격할 수 없다. raw 댓글·모델 transcript·
+   한다. 같은 초는 선후를 증명하지 못하므로 거절하며, 과거 본문을 새 댓글로 다시
+   게시해 승격할 수 없다. raw 댓글·모델 transcript·
    비밀은 영수증에 저장하지 않는다.
 
 ## 재검증과 상태 전이
@@ -41,6 +42,11 @@ Mac이 별도 서명이나 Linux 원장을 확인했다고 주장하지 않는�
 직접 댓글 GET, 전체 댓글 목록, PR HEAD를 다시 조회한다. 기존 영수증은 같은 ID와
 불변 본문 해시로 검증하며 새 댓글로 덮어쓰지 않는다. 수정·삭제·조회 실패·모호한
 schema·상충 결과·stale HEAD가 있으면 같은 작업을 보류한다.
+
+인증 조회로 확인한 같은 repo/PR/HEAD의 부정적 결과·contract YES·낮은 depth와
+댓글 관측은 private 원장에 보존한다. 관측한 댓글의 수정·삭제 또는 상충은 같은 HEAD의
+지속 보류가 된다. 앱 재시작, 댓글 삭제·원상 복구, 새 revision/request로 해제되지 않는다.
+새 HEAD에서 새 요청·감사를 하거나 이후 명시적 사용자 결정으로 처리해야 한다.
 
 감리는 실제로 검증한 receipt를 host verification snapshot에 포함하며 private request
 digest로 보존한다. 최종 검수는 현재 다시 검증한 receipt와 감리가 본 snapshot이

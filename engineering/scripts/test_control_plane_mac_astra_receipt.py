@@ -185,16 +185,68 @@ class JournalTests(unittest.TestCase):
         self.requirement['audit_receipt']={'result':'PASS','comment_id':123}
         with self.assertRaisesRegex(AppError,'ASTRA_AUDIT_REQUIRED'):self.journal.consume(self.requirement)
 
-    def test_reposted_old_run_and_same_run_under_new_comment_id_are_rejected(self):
-        original=copy.deepcopy(self.comment)
+    def test_reposted_old_run_is_rejected(self):
         self.comment['body']=self.comment['body'].replace('20300101T000000Z-12345678','20200101T000000Z-12345678')
         self.pages=[[self.comment]]
         with self.assertRaisesRegex(AppError,'RECEIPT_REPLAY'):self.journal.consume(self.requirement)
-        self.comment=original;self.pages=[[self.comment]];self.journal.consume(self.requirement)
+
+    def test_same_run_under_new_comment_id_and_head_is_rejected(self):
+        self.journal.consume(self.requirement)
         changed=copy.deepcopy(self.requirement);changed['request_binding']['native_attempt_id']='new-attempt'
+        changed['request_binding']['head']='f'*40;self.pull['head']['sha']='f'*40
         changed['request_sha256']=common.digest(changed['request_binding'])
         self.comment=audit_comment(changed,cid=124);self.pages=[[self.comment]]
         with self.assertRaisesRegex(AppError,'RECEIPT_REPLAY'):self.journal.consume(changed)
+
+    def test_audit_start_in_request_second_is_not_proven_after_request(self):
+        document=self.journal.request(self.requirement)
+        document['created_at']='2030-01-01T00:00:00Z'
+        self.store.db.execute('UPDATE mac_host_astra_requests SET document=? WHERE request_sha256=?',
+                             (common.encoded(document),self.requirement['request_sha256']))
+        with self.assertRaisesRegex(AppError,'RECEIPT_REPLAY'):self.journal.consume(self.requirement)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM mac_host_astra_receipts').fetchone()[0],0)
+
+    def test_observed_failure_survives_deletion_restart_and_new_same_head_request(self):
+        self.pages=[[audit_comment(self.requirement,cid=124,result='FAIL')]]
+        with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):self.journal.consume(self.requirement)
+        self.pages=[[self.comment]]
+        changed=copy.deepcopy(self.requirement);changed['request_binding']['native_attempt_id']='new-attempt'
+        changed['request_sha256']=common.digest(changed['request_binding'])
+        for requirement in (self.requirement,changed):
+            with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):
+                receipts.Journal(self.store).consume(requirement)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM mac_host_astra_receipts').fetchone()[0],0)
+
+    def test_observed_conflict_cannot_be_deleted_before_a_receipt_is_pinned(self):
+        self.pages=[[self.comment,audit_comment(self.requirement,cid=124,result='FAIL')]]
+        with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):self.journal.consume(self.requirement)
+        self.pages=[[self.comment]]
+        with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):
+            receipts.Journal(self.store).consume(self.requirement)
+
+    def test_observed_positive_deletion_and_negative_depth_or_contract_persist(self):
+        self.pages=[[self.comment,audit_comment(self.requirement,cid=124)]]
+        self.journal.consume(self.requirement);self.pages=[[self.comment]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):self.journal.consume(self.requirement)
+        self.pages=[[self.comment,audit_comment(self.requirement,cid=124)]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):
+            receipts.Journal(self.store).consume(self.requirement)
+
+    def test_observed_contract_yes_or_shallow_pass_is_a_durable_hold(self):
+        for depth,contract in (('A3','YES'),('A2','NO')):
+            with self.subTest(depth=depth,contract=contract):
+                changed=copy.deepcopy(self.requirement)
+                changed['request_binding']['head']=('e' if contract=='YES' else 'f')*40
+                changed['request_sha256']=common.digest(changed['request_binding'])
+                self.pull['head']['sha']=changed['request_binding']['head']
+                self.comment=audit_comment(changed,depth=depth)
+                self.comment['body']=self.comment['body'].replace('VERIFIED_CONTRACT_CHANGE_REQUIRED: NO',
+                                                                 'VERIFIED_CONTRACT_CHANGE_REQUIRED: '+contract)
+                self.pages=[[self.comment]]
+                with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):self.journal.consume(changed)
+                self.pages=[[audit_comment(changed,cid=124)]]
+                with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):
+                    receipts.Journal(self.store).consume(changed)
 
     def test_new_head_or_pr_requires_a_new_audit_and_pinned_edits_do_not_get_replaced(self):
         self.journal.consume(self.requirement)
