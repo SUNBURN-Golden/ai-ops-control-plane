@@ -13,7 +13,7 @@ import re
 import time
 
 from common import TERMINAL, digest, encoded, parse_json, repository
-from mac_authority import require
+from mac_authority import require, original_task_key
 from program_scope import load_scope
 import handoff
 import transport_guard
@@ -103,7 +103,7 @@ def require_unowned_original(snapshot, program, node):
         # in a protected control record/comment. Missing task keys also hold.
         if task['state'] == 'open':
             require(task.get('program') and task.get('node') and
-                    (task['program'].upper(), task['node'].upper()) != (program.upper(), node.upper()),
+                    original_task_key(task['program'],task['node']) != original_task_key(program,node),
                     'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
 
 
@@ -208,8 +208,8 @@ def adopt(source, value):
                     'MAC_HOST_LOCAL_WORK_BUSY')
             for row in db.execute('SELECT binding FROM mac_host_tasks WHERE repository=?', (repo,)):
                 owner = parse_json(row['binding'])
-                require((str(owner.get('program','')).upper(), str(owner.get('node','')).upper()) !=
-                        (scope['program'].upper(), node['id'].upper()),
+                require(original_task_key(owner.get('program'),owner.get('node')) !=
+                        original_task_key(scope['program'],node['id']),
                         'MAC_GENERATION_ORIGINAL_TASK_ALREADY_OWNED')
             if dependencies:
                 from mac_pipeline import Pipeline

@@ -165,6 +165,22 @@ class MacGenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(common.AppError,'ORIGINAL_TASK_ALREADY_OWNED'):
             self.source.register(self.latest)
         self.assertEqual(list(self.store.db.iterdump()),before);self.assertEqual(self.worker.launched,0)
+    def test_hyphen_alias_cannot_duplicate_or_override_one_original_task_id(self):
+        def plan(program,node):
+            raw=common.parse_json(self.latest['source']['raw_program']);raw['program']=program
+            raw['nodes'][0]['id']=node;data=common.encoded(raw)
+            self.latest['source']['raw_program']=data
+            self.latest['source']['blob']=hashlib.sha1(b'blob '+str(len(data.encode())).encode()+b'\0'+data.encode()).hexdigest()
+        plan('A-B','C');self.source.generation(self.value(node='C'))
+        plan('A','B-C');self.latest['source']['head']='d'*40;before=list(self.store.db.iterdump())
+        with self.assertRaisesRegex(common.AppError,'ORIGINAL_TASK_ALREADY_OWNED'):
+            self.source.generation(self.value(2,node='B-C'))
+        with self.assertRaisesRegex(common.AppError,'ORIGINAL_TASK_ALREADY_OWNED'):
+            self.source.register(self.latest)
+        self.latest['tasks']=[{'number':108,'state':'open','program':'A-B','node':'C','declared_owners':['CURSOR']}]
+        with self.assertRaisesRegex(common.AppError,'LINUX_OWNER_UNRESOLVED'):
+            self.source.generation(self.value(2,node='B-C'))
+        self.assertEqual(list(self.store.db.iterdump()),before);self.assertEqual(self.worker.launched,0)
     def test_generation_replay_is_read_only_and_cannot_repin_or_change_decision(self):
         value=self.value();bound=self.source.generation(value)
         before=[tuple(r) for r in self.store.db.execute('SELECT * FROM mac_host_generations')]

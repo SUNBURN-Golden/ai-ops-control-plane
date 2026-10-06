@@ -23,6 +23,12 @@ def require(test, code):
     if not test: raise AppError(code)
 
 
+def original_task_key(program, node):
+    require(isinstance(program,str) and program and isinstance(node,str) and node,
+            'MAC_HOST_CANONICAL_BINDING_MISMATCH')
+    return (program+'-'+node).upper()
+
+
 class LocalSource:
     mode = 'MAC'
 
@@ -125,8 +131,8 @@ class LocalSource:
                 # original node. Serialize both directions of admission.
                 for owned in self.store.db.execute('SELECT binding FROM mac_host_tasks WHERE repository=?',(repo,)):
                     owner=parse_json(owned['binding'])
-                    require(not('generation_id' in owner and str(owner.get('program','')).upper()==scope['program'].upper() and
-                                str(owner.get('node','')).upper() in {n.upper() for n in scope['node_ids']}),
+                    require(not('generation_id' in owner and original_task_key(owner.get('program'),owner.get('node')) in
+                                {original_task_key(scope['program'],n) for n in scope['node_ids']}),
                             'MAC_HOST_ORIGINAL_TASK_ALREADY_OWNED')
                 previous=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',(repo,)).fetchone()
                 if previous:

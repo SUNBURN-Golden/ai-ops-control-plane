@@ -20,7 +20,8 @@ MAC-* generation의 `decision`에는 위 결정 댓글의 정확 URL을 넣어�
 본문 밖의 보호 원장·댓글에 있거나 node를 판별할 수 없는 열린 이슈도 fail-closed로
 거절한다. adoption, 시작 전, checkout 준비 후 claim 전에 전체 GitHub 관측을 대조한다.
 같은 원래 노드에 두 번째 Mac generation/등록 task도 SQLite single-writer transaction
-안에서 canonical 대소문자를 정규화해 양쪽 등록 순서 모두 거절한다.
+안에서 `(program + '-' + node).upper()` canonical TASK_ID로 양쪽 등록 순서 모두 거절한다.
+대소문자 변경과 구분자 alias도 같은 TASK_ID라면 두 번째 소유 기록을 만들 수 없다.
 GitHub 관측은 cross-host atomic lock 증거가 아니며 공유 admission authority를
 구현했다고 주장하지 않는다. 이 검사는 명시적 Linux 이관·기존 실행 종료 증거를 만들지 않는다.
 
