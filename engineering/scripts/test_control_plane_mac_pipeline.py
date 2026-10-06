@@ -86,6 +86,55 @@ class FixtureRepositories(gitops.Repositories):
 
 
 class MacPipelineTests(unittest.TestCase):
+    def timed_reads(self,costs):
+        clock=[0.0];durations=iter(costs)
+        def execute(args,**kwargs):
+            clock[0]+=next(durations)
+            return '{}'
+        def read(*args,**kwargs):return core.handoff.api('fixture/budget-read')
+        return clock,execute,read
+
+    def test_supervisor_preflight_and_host_reads_share_budget_without_launch(self):
+        job=self.seed();job=self.store.update(job['id'],state='supervising',phase='supervising',
+            pr_url='https://github.com/owner/kix/pull/2',candidate_published_head=job['head'],ci=self.repos.hosted_checks(job,job['head']))
+        clock,execute,read=self.timed_reads([16,16])
+        with patch('handoff.time.monotonic',side_effect=lambda:clock[0]),patch('handoff.execute',side_effect=execute), \
+             patch.object(self.source,'preflight',side_effect=read),patch.object(self.repos,'supervision_evidence',side_effect=read), \
+             patch('core.subprocess.Popen') as spawn:
+            with self.assertRaises(common.AppError) as error:self.engine.launch(job,'supervisor')
+        self.assertEqual(error.exception.code,'COMMAND_TIMEOUT');spawn.assert_not_called()
+        current=self.store.get(job['id']);self.assertEqual(current['calls'],job['calls']);self.assertIsNone(current['attempt'])
+
+    def test_reconcile_reads_share_budget_and_cannot_write_accepted_on_timeout(self):
+        job=self.ready();self.app.action(job['id'],'accept',{});before=list(self.store.db.iterdump())
+        clock,execute,read=self.timed_reads([8,8,16])
+        with patch('handoff.time.monotonic',side_effect=lambda:clock[0]),patch('handoff.execute',side_effect=execute), \
+             patch.object(self.source,'preflight',side_effect=read),patch.object(self.engine.pipeline,'validate_inspection',side_effect=read), \
+             patch.object(self.repos,'merged',side_effect=read):
+            with self.assertRaises(common.AppError) as error:self.engine.pipeline.reconcile_accepted('owner/kix','KIX-P-SDK-0')
+        self.assertEqual(error.exception.code,'COMMAND_TIMEOUT');self.assertEqual(list(self.store.db.iterdump()),before)
+
+    def test_owner_acceptance_reads_share_budget_without_approval_or_acceptance(self):
+        job=self.ready();self.repos.remote_merged=True;clock,execute,read=self.timed_reads([8,8,8,8])
+        ci=self.repos.hosted_checks(job,job['head'])
+        def checks(*args,**kwargs):read();return ci
+        with patch('handoff.time.monotonic',side_effect=lambda:clock[0]),patch('handoff.execute',side_effect=execute), \
+             patch.object(self.source,'preflight',side_effect=read),patch.object(self.engine.pipeline,'validate_inspection',side_effect=read), \
+             patch.object(self.repos,'hosted_checks',side_effect=checks),patch.object(self.repos,'merged',side_effect=read):
+            with self.assertRaises(common.AppError) as error:self.engine.validate_acceptance(job,{'head':job['head'],'approval':'Fixture only'})
+        self.assertEqual(error.exception.code,'COMMAND_TIMEOUT');current=self.store.get(job['id'])
+        self.assertEqual(current['state'],'ready');self.assertIsNone(current.get('post_merge_owner_approval'))
+
+    def test_user_merge_reads_share_budget_before_remote_merge_submission(self):
+        job=self.ready();self.app.action(job['id'],'accept',{});self.repos.remote_draft=False
+        pull=self.repos.merge_candidate(job);clock,execute,read=self.timed_reads([12,12,12])
+        def candidate(*args,**kwargs):read();return pull
+        with patch('handoff.time.monotonic',side_effect=lambda:clock[0]),patch('handoff.execute',side_effect=execute), \
+             patch.object(self.engine.pipeline,'validate_inspection',side_effect=read),patch.object(self.repos,'merge_candidate',side_effect=candidate):
+            with self.assertRaises(common.AppError) as error:self.engine.user_merge(job['id'],{'head':job['head'],'approval':'Fixture only'})
+        self.assertEqual(error.exception.code,'COMMAND_TIMEOUT');self.assertEqual(self.repos.merge_count,0)
+        self.assertEqual(self.store.get(job['id'])['user_merge']['state'],'READY')
+
     def test_supervisor_request_binds_host_observations_without_persisting_a_verdict(self):
         job=self.seed()
         job=self.store.update(job['id'],state='supervising',phase='supervising',pr_url='https://github.com/owner/kix/pull/2',

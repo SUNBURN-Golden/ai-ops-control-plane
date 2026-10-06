@@ -10,6 +10,7 @@ import re
 import time
 
 import agents
+import handoff
 from common import AppError, TERMINAL, digest, encoded, parse_json
 from mac_authority import require
 
@@ -163,6 +164,7 @@ class Pipeline:
         bound=job['native_lineage']['binding']
         return mac_astra.audit_requirement(job,self.source.program(bound)['scope'])
 
+    @handoff.bounded_api_reads
     def validate_audit(self,job):
         requirement=self.audit_requirement(job)
         if not requirement['required']: return requirement
@@ -199,6 +201,7 @@ class Pipeline:
         require(self.repos.head(job)==job['head'] and self.repos.clean(job),'MAC_HOST_INSPECTION_CHANGED')
         self.validate_reviews(job,('review',))
 
+    @handoff.bounded_api_reads
     def validate_inspection(self,job,*,refresh=True):
         self.assert_job(job,refresh=refresh)
         require(job['pr_url'] and job['ci'] and job['ci']['state']=='passed' and job['ci']['checks'] and
@@ -320,6 +323,7 @@ class Pipeline:
             self.store.db.execute("UPDATE mac_host_tasks SET state='REWORK_REQUIRED' WHERE repository=? AND task=?",(repo.lower(),bound['task_id']))
         return {'task_id':bound['task_id'],'state':'REWORK_REQUIRED','same_lineage':True}
 
+    @handoff.bounded_api_reads
     def accepted_dependency(self,bound,plan_commit,*,current=True):
         """Read a normal ACCEPTED delivery and its actual private/live proof.
 
@@ -383,6 +387,7 @@ class Pipeline:
                  'native_sha256':digest(dict(native)),'job_sha256':digest(self.store.get(evidence['job_id']))}==evidence['local'],
                 'MAC_HOST_DEPENDENCY_COMPLETION_CHANGED')
 
+    @handoff.bounded_api_reads
     def reconcile_accepted(self,repo,task):
         bound=self.source.select(repo,task)
         self.source.preflight(bound,allow_base_advance=True)

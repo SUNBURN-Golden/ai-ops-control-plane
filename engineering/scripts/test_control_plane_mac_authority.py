@@ -100,6 +100,23 @@ class MacAuthorityTests(unittest.TestCase):
         self.store.create({'repository':'owner/old','request_id':'old-request','goal':'old goal'})
         with self.assertRaisesRegex(common.AppError,'LOCAL_WORK_BUSY'): self.configure()
         self.assertIsNone(self.source.meta())
+    def test_total_read_timeout_rolls_back_outer_write_transaction_without_launch(self):
+        self.configure();bound=self.request()['binding'];before=list(self.store.db.iterdump());clock=[0.0]
+        def read(db,payload):
+            self.assertTrue(db.in_transaction)
+            db.execute("UPDATE mac_host_tasks SET state='REWORK_REQUIRED'")
+            mac_authority.handoff.api('fixture/first')
+            mac_authority.handoff.api('fixture/second')
+        def execute(args,**kwargs):
+            clock[0]+=16
+            return '{}'
+        with patch.object(self.source,'_read',side_effect=read),patch('handoff.time.monotonic',side_effect=lambda:clock[0]),patch('handoff.execute',side_effect=execute):
+            with self.assertRaises(common.AppError) as error:self.source.call('read',bound)
+        self.assertEqual(error.exception.code,'COMMAND_TIMEOUT')
+        self.assertFalse(self.store.db.in_transaction)
+        self.assertEqual(list(self.store.db.iterdump()),before)
+        self.assertEqual(self.worker.launched,0)
+
     def test_fresh_task_reserves_on_mac_without_protected_transport(self):
         self.configure()
         with patch('transport_guard.require_clear',side_effect=AssertionError('VM/old global gate must not be used')):

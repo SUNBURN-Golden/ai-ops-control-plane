@@ -8,6 +8,9 @@ from __future__ import annotations
 import base64
 import binascii
 import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 import hashlib
 import re
 import time
@@ -22,6 +25,36 @@ IDENTIFIER = r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}'
 TASK_KEY = re.compile(r'^<!-- ASTRA_TASK_KEY_V1 program=(' + IDENTIFIER +
                       r') node=(' + IDENTIFIER + r') request=([0-9a-f]{24}) -->$', re.MULTILINE)
 UNRESOLVED = {'NOT_STARTED', 'SUBMITTING', 'CONFIRMED', 'UNKNOWN'}
+API_READ_SECONDS = 30
+_API_DEADLINE = ContextVar('mac_api_read_deadline', default=None)
+
+
+@contextmanager
+def api_read_budget():
+    """Nested Mac reads share one monotonic budget, including lock wait time."""
+    deadline = time.monotonic() + API_READ_SECONDS
+    previous = _API_DEADLINE.get()
+    token = _API_DEADLINE.set(min(previous, deadline) if previous is not None else deadline)
+    try:
+        yield
+    finally:
+        _API_DEADLINE.reset(token)
+
+
+def bounded_api_reads(function):
+    @wraps(function)
+    def bounded(*args, **kwargs):
+        with api_read_budget():
+            return function(*args, **kwargs)
+    return bounded
+
+
+def remaining_api_seconds():
+    deadline = _API_DEADLINE.get()
+    if deadline is None: return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0: raise AppError('COMMAND_TIMEOUT')
+    return remaining
 
 
 def request(value, inspect=False):
@@ -50,12 +83,15 @@ def api(path, paginate=False):
     args = ['gh', 'api', '--method', 'GET']
     if paginate: args += ['--paginate', '--slurp']
     try:
-        raw = execute([*args, path])
+        remaining = remaining_api_seconds()
+        raw = execute([*args, path], github_access='READ', **({'timeout': remaining} if remaining is not None else {}))
+        remaining_api_seconds()
     except OSError as exc:
         raise AppError('CLI_SETUP_REQUIRED', 'GitHub CLI 실행 경로와 권한을 확인해 주세요.') from exc
     return parse_json(raw, LIMIT)
 
 
+@bounded_api_reads
 def inspect_repository(value):
     repo = repository(value)
     root = 'repos/' + repo

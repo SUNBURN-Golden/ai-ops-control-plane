@@ -56,6 +56,98 @@ def snapshot():
         return handoff.inspect_repository(REPO)
 
 
+class ApiBudgetTests(unittest.TestCase):
+    def test_unclassified_github_calls_are_rejected_before_any_remote_execution(self):
+        commands=[['gh','api','fixture','-f','value=1'],['gh','api','fixture','-F','value=1'],
+                  ['gh','api','fixture','--input','fixture.json'],['gh','pr','merge','80'],
+                  ['gh','pr','comment','80'],['gh','pr','edit','80']]
+        with mock.patch.object(gitops.subprocess,'run') as run:
+            for args in commands:
+                with self.subTest(args=args),self.assertRaises(common.AppError) as error:gitops.execute(args)
+                self.assertEqual(error.exception.code,'GITHUB_ACCESS_KIND_REQUIRED')
+            run.assert_not_called()
+
+    def test_api_read_declaration_requires_explicit_get_before_remote_execution(self):
+        commands=[['gh','api','fixture'],['gh','api','fixture','-f','value=1'],
+                  ['gh','api','--method','POST','fixture'],['gh','api','-X','DELETE','fixture'],
+                  ['gh','api','--method','GET','--method','PUT','fixture'],
+                  ['gh','api','--method','GET','--method=POST','fixture'],
+                  ['gh','api','--method','GET','-XDELETE','fixture'],['gh','api','fixture','--method']]
+        with mock.patch.object(gitops.subprocess,'run') as run:
+            for args in commands:
+                with self.subTest(args=args),self.assertRaises(common.AppError) as error:gitops.execute(args,github_access='READ')
+                self.assertEqual(error.exception.code,'GITHUB_READ_METHOD_REQUIRED')
+            run.assert_not_called()
+
+    def test_explicit_writes_keep_timeout_and_do_not_fail_after_a_completed_mutation(self):
+        commands=[['gh','api','fixture','-f','value=1'],['gh','api','fixture','-F','value=1'],
+                  ['gh','api','fixture','--input','fixture.json'],['gh','pr','merge','80'],
+                  ['gh','pr','comment','80'],['gh','pr','edit','80']]
+        clock=[0.0];timeouts=[]
+        def run(args,**kwargs):
+            timeouts.append(kwargs['timeout']);clock[0]+=40
+            return __import__('subprocess').CompletedProcess(args,0,'{}','')
+        with mock.patch.object(handoff.time,'monotonic',side_effect=lambda:clock[0]),mock.patch.object(gitops.subprocess,'run',side_effect=run):
+            for args in commands:
+                with self.subTest(args=args),handoff.api_read_budget():
+                    self.assertEqual(gitops.execute(args,timeout=75,github_access='WRITE'),'{}')
+                    with self.assertRaises(common.AppError):handoff.api('fixture/after-write')
+        self.assertEqual(timeouts,[75]*len(commands))
+
+    def test_gh_wrappers_share_api_budget_and_keep_default_outside_scope(self):
+        clock=[0.0];timeouts=[]
+        def run(args,**kwargs):
+            timeouts.append(kwargs['timeout']);clock[0]+=16
+            return __import__('subprocess').CompletedProcess(args,0,'{}','')
+        with mock.patch.object(handoff.time,'monotonic',side_effect=lambda:clock[0]),mock.patch.object(gitops.subprocess,'run',side_effect=run):
+            with handoff.api_read_budget():
+                gitops.gh(REPO,'repo','view',github_access='READ')
+                with self.assertRaises(common.AppError) as error:gitops.gh(REPO,'pr','view','80',github_access='READ')
+                self.assertEqual(error.exception.code,'COMMAND_TIMEOUT')
+            gitops.gh(REPO,'repo','view',github_access='READ')
+        self.assertEqual(timeouts,[30,14,120])
+
+    def test_remote_mutation_keeps_its_timeout_and_post_submit_read_can_expire(self):
+        clock=[0.0];timeouts=[]
+        def run(args,**kwargs):
+            timeouts.append(kwargs['timeout']);clock[0]+=40
+            return __import__('subprocess').CompletedProcess(args,0,'{}','')
+        with mock.patch.object(handoff.time,'monotonic',side_effect=lambda:clock[0]),mock.patch.object(gitops.subprocess,'run',side_effect=run):
+            with handoff.api_read_budget():
+                gitops.execute(['gh','api','--method','PUT','fixture/merge'],github_access='WRITE')
+                with self.assertRaises(common.AppError):handoff.api('fixture/after-submit')
+        self.assertEqual(timeouts,[120])
+
+    def test_nested_reads_share_remaining_time_and_discard_late_response(self):
+        clock=[0.0]; timeouts=[]
+        def execute(args, **kwargs):
+            timeouts.append(kwargs['timeout']);clock[0]+=16
+            return '{}'
+        with mock.patch.object(handoff.time,'monotonic',side_effect=lambda:clock[0]),mock.patch.object(handoff,'execute',side_effect=execute):
+            with handoff.api_read_budget():
+                handoff.api('fixture/first')
+                with handoff.api_read_budget():
+                    with self.assertRaises(common.AppError) as error:handoff.api('fixture/second')
+                    self.assertEqual(error.exception.code,'COMMAND_TIMEOUT')
+                with self.assertRaises(common.AppError):handoff.api('fixture/expired')
+        self.assertEqual(timeouts,[30,14])
+
+    def test_budget_is_context_local_and_restored_after_failure(self):
+        with mock.patch.object(handoff.time,'monotonic',return_value=0),mock.patch.object(handoff,'execute',return_value='{}') as execute:
+            with self.assertRaises(RuntimeError),handoff.api_read_budget():
+                with mock.patch.object(handoff.time,'monotonic',return_value=15):
+                    self.assertEqual(handoff.remaining_api_seconds(),15)
+                    observed=[]
+                    def independent():
+                        observed.append(handoff.remaining_api_seconds())
+                        with handoff.api_read_budget():observed.append(handoff.remaining_api_seconds())
+                    thread=threading.Thread(target=independent);thread.start();thread.join(timeout=5)
+                    self.assertFalse(thread.is_alive());self.assertEqual(observed,[None,30])
+                raise RuntimeError('fixture')
+            handoff.api('fixture/outside-budget')
+            self.assertEqual(execute.call_args.kwargs,{'github_access':'READ'})
+
+
 class RepositoryTests(unittest.TestCase):
     def inspect(self, values):
         with mock.patch.object(handoff, 'execute', side_effect=[json.dumps(x) for x in values]) as command:

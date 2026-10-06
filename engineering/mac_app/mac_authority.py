@@ -172,6 +172,7 @@ class LocalSource:
                 self.store.db.execute('ROLLBACK'); raise
         return self.tasks(repo)
 
+    @handoff.bounded_api_reads
     def preflight(self,bound,*,allow_base_advance=False):
         # Fresh read-only projections add barriers only. They never release an
         # external owner, infer terminal execution or advance the pinned plan.
@@ -371,6 +372,7 @@ class LocalSource:
     def _view(row):
         return {**parse_json(row['document'],1024*1024),'state':row['state'],'terminal':parse_json(row['terminal']) if row['terminal'] else None}
 
+    @handoff.bounded_api_reads
     def call(self,operation,payload):
         from native_transfer import SourceReply
         with self.store.lock:
