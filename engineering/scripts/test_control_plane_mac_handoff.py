@@ -70,6 +70,17 @@ class ApiBudgetTests(unittest.TestCase):
             gitops.gh(REPO,'repo','view')
         self.assertEqual(timeouts,[30,14,120])
 
+    def test_remote_mutation_keeps_its_timeout_and_post_submit_read_can_expire(self):
+        clock=[0.0];timeouts=[]
+        def run(args,**kwargs):
+            timeouts.append(kwargs['timeout']);clock[0]+=40
+            return __import__('subprocess').CompletedProcess(args,0,'{}','')
+        with mock.patch.object(handoff.time,'monotonic',side_effect=lambda:clock[0]),mock.patch.object(gitops.subprocess,'run',side_effect=run):
+            with handoff.api_read_budget():
+                gitops.execute(['gh','api','--method','PUT','fixture/merge'])
+                with self.assertRaises(common.AppError):handoff.api('fixture/after-submit')
+        self.assertEqual(timeouts,[120])
+
     def test_nested_reads_share_remaining_time_and_discard_late_response(self):
         clock=[0.0]; timeouts=[]
         def execute(args, **kwargs):

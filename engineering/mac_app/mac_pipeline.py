@@ -387,6 +387,7 @@ class Pipeline:
                  'native_sha256':digest(dict(native)),'job_sha256':digest(self.store.get(evidence['job_id']))}==evidence['local'],
                 'MAC_HOST_DEPENDENCY_COMPLETION_CHANGED')
 
+    @handoff.bounded_api_reads
     def reconcile_accepted(self,repo,task):
         bound=self.source.select(repo,task)
         self.source.preflight(bound,allow_base_advance=True)

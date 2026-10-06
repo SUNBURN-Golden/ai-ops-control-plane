@@ -311,6 +311,69 @@ class JournalTests(unittest.TestCase):
         self.pages=[[self.comment]]
         with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):receipts.Journal(self.store).consume(self.requirement)
 
+    def legacy_observation(self,comment,requirement=None):
+        proof=receipts.parse_comment(comment,requirement or self.requirement)
+        self.journal.db.execute('INSERT INTO mac_host_astra_observations VALUES (?,?,?,?,?)',
+            ('owner/kix',2,'a'*40,comment['id'],common.encoded(proof)))
+        return proof
+
+    def test_legacy_unpinned_positive_deletion_and_malformed_edit_remain_durable(self):
+        extra=audit_comment(self.requirement,cid=124)
+        self.pages=[[self.comment,extra]];self.journal.consume(self.requirement)
+        self.legacy_observation(self.comment);self.legacy_observation(extra)
+        self.journal.db.execute('DELETE FROM mac_host_astra_scoped_observations')
+        migrated=receipts.Journal(self.store);self.pages=[[self.comment]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):migrated.consume(self.requirement)
+        self.pages=[[self.comment,extra]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):receipts.Journal(self.store).consume(self.requirement)
+
+    def test_legacy_shallow_proof_retains_original_gate_when_a_weaker_gate_is_added(self):
+        self.journal.request(self.requirement)
+        legacy={**self.requirement,'request_binding':{**self.requirement['request_binding'],'requested_depth':'A1'}}
+        self.legacy_observation(audit_comment(self.requirement,cid=124,result='FAIL',depth='A1'),legacy)
+        other=copy.deepcopy(self.requirement);other['request_binding'].update(gate='MILESTONE',requested_depth='A1')
+        other['request_sha256']=common.digest(other['request_binding'])
+        self.journal.request(other)
+        self.comment=audit_comment(other,cid=125,depth='A1');self.pages=[[self.comment,
+            audit_comment(self.requirement,cid=124,result='FAIL',depth='A1')]]
+        journal=receipts.Journal(self.store)
+        self.assertEqual(journal.consume(other)['comment']['result'],'PASS')
+        self.assertEqual(journal.db.execute('SELECT gate FROM mac_host_astra_scoped_holds').fetchone()[0],'ARCHITECTURE')
+
+    def test_legacy_negative_observation_before_hold_write_is_preserved(self):
+        self.journal.request(self.requirement)
+        self.legacy_observation(audit_comment(self.requirement,result='FAIL'))
+        self.pages=[[]]
+        with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):receipts.Journal(self.store).consume(self.requirement)
+
+    def test_known_malformed_edit_is_persisted_before_retryable_new_format_parsing(self):
+        self.journal.consume(self.requirement)
+        old=copy.deepcopy(self.comment);self.comment['body']=receipts.MARK+'\nunknown format';self.pages=[[self.comment]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):self.journal.consume(self.requirement)
+        self.comment=old;self.pages=[[old]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):receipts.Journal(self.store).consume(self.requirement)
+
+    def ambiguous_legacy(self,result='PASS'):
+        self.journal.request(self.requirement)
+        other=copy.deepcopy(self.requirement);other['request_binding']['gate']='MILESTONE'
+        other['request_sha256']=common.digest(other['request_binding']);self.journal.request(other)
+        comment=audit_comment(other,cid=124,result=result);self.legacy_observation(comment,other)
+        return other,comment
+
+    def test_ambiguous_legacy_gate_uses_unchanged_authenticated_body_without_cross_gate_hold(self):
+        other,comment=self.ambiguous_legacy('FAIL');journal=receipts.Journal(self.store)
+        self.pages=[[self.comment,comment]]
+        self.assertEqual(journal.consume(self.requirement)['comment']['result'],'PASS')
+        with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):journal.consume(other)
+        self.assertEqual(journal.db.execute('SELECT gate FROM mac_host_astra_scoped_holds').fetchall()[0][0],'MILESTONE')
+
+    def test_missing_ambiguous_legacy_scope_blocks_without_inventing_a_permanent_hold(self):
+        _,comment=self.ambiguous_legacy();journal=receipts.Journal(self.store)
+        with self.assertRaisesRegex(AppError,'RECEIPT_UNVERIFIED'):journal.consume(self.requirement)
+        self.assertEqual(journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_scoped_holds').fetchone()[0],0)
+        self.pages=[[self.comment,comment]]
+        self.assertEqual(journal.consume(self.requirement)['comment']['result'],'PASS')
+
     def test_legacy_proven_failure_is_migrated_but_only_blocks_original_gate(self):
         document=self.journal.request(self.requirement)
         failed=receipts.parse_comment(audit_comment(self.requirement,result='FAIL'),self.requirement)

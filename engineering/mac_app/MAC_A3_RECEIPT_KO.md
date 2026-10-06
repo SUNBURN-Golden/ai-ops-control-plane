@@ -56,7 +56,11 @@ schema·상충 결과·stale HEAD가 있으면 같은 작업을 보류한다.
 불명확하거나 지원하지 않는 출력 형식이면 현재 전이를 미확인으로 차단하지만 영구
 hold를 쓰지 않는다. 이미 검증한 댓글의 본문 hash 변경·삭제와 실제 FAIL은 이 재시도
 허용에 포함되지 않는다. 기존 비범위 보류 원장은 역사로 유지하고, 입증된 실패·편집은
-원래 요청의 gate/depth로 이관해 보존한다. owner/예약/UNKNOWN 원장을 해제하지 않는다.
+원래 요청의 gate/depth로 이관해 보존한다. 기존 댓글 관측도 고정 receipt 또는 유일한
+관련 역사 요청 gate로 이관한다. 여러 역사 gate 사이의 범위가 불확정이면 기존 hash와
+동일한 인증 본문으로만 gate를 확정한다. 그 본문이 없거나 바뀌었으면 현재 검증을
+미확인으로 차단하며 다른 gate의 영구 hold를 추정하지 않는다. owner/예약/UNKNOWN
+원장을 해제하지 않는다.
 원장은 private host directory의 별도 `mac-astra.sqlite3`에 동기화해 기록한다. 의존 작업
 read/reserve의 실패가 `app.sqlite3`의 owner/admission 트랜잭션을 롤백해도 감사 관측과
 보류는 지워지지 않으며, 이를 보존하기 위해 바깥 reservation을 commit하지 않는다.
@@ -103,6 +107,11 @@ A3 admission과 의존 작업 live 재검증은 일부 경로에서 `Store.lock`
 잠금 대기도 예산을 소모하지만 Python 잠금·SQLite 대기를 강제 중단하거나 전체 operation의
 wall time이 30초 이하라고 보장하지 않는다. 로컬 검증 시간도 예산에 포함되며 budget 밖
 일반 호출의 기존 120초 timeout은 유지한다. owner 직렬화와 예약 정책은 그대로다.
+
+감리 시작·User 검수·병합 확인도 preflight와 후속 조회가 같은 예산을 공유한다. Ready/merge
+원격 mutation은 조회 예산으로 timeout을 줄이지 않는다. mutation 이후 확인 GET이 늦거나
+실패하면 기존 `READY_SUBMITTING`/`MERGE_SUBMITTING`의 불확정 보호를 유지하며 자동
+재전송하지 않는다.
 
 변경은 Mac source/tests/docs다. `control_plane_host*`, hostpack, boundary, sudoers와
 `aiops-fable`은 그대로다. 합성 GitHub 응답과 private fixture process/receipt로 admission,

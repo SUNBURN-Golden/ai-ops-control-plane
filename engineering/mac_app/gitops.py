@@ -30,7 +30,10 @@ ROADMAP_HEADER = {
 def execute(argv, cwd=None, timeout=120, allowed=(0,)):
     # Mac verification may read through gh wrappers as well as handoff.api.
     # Import at call time: handoff itself imports this executor.
-    budgeted = Path(argv[0]).name == 'gh'
+    mutation = tuple(argv[1:3]) in (('pr','ready'),('pr','create'))
+    if len(argv)>1 and argv[1]=='api':
+        mutation = mutation or any(argv[i] in ('--method','-X') and argv[i+1]!='GET' for i in range(2,len(argv)-1))
+    budgeted = Path(argv[0]).name == 'gh' and not mutation
     if budgeted:
         from handoff import remaining_api_seconds
         remaining = remaining_api_seconds()

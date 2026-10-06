@@ -628,6 +628,7 @@ class Engine:
         self.store.update(job['id'],candidate_ci_requested=job['head'],not_before=time.time()+60)
         self.store.event(job['id'],'candidate_ci_requested','Draft 상태를 유지한 채 현재 HEAD의 제품 검증 workflow를 한 번 요청했습니다.')
 
+    @handoff.bounded_api_reads
     def launch(self, job, role):
         with self.store.lock:
             job = self.store.get(job['id'])
@@ -905,6 +906,7 @@ class Engine:
                 all(job.get(role) and job[role]['head'] == job['head'] for role in ('review', 'supervision')) and
                 job['review']['attempt'] != job['supervision']['attempt'])
 
+    @handoff.bounded_api_reads
     def user_merge(self,key,value):
         """Owner-only, head-bound human approval; no automatic merge loop."""
         if not isinstance(value,dict) or set(value)!={'head','approval'}:
@@ -949,6 +951,7 @@ class Engine:
         finally:
             with self.store.lock:self.store.execution_busy.discard(key)
 
+    @handoff.bounded_api_reads
     def validate_acceptance(self, job, value=None):
         if job['state'] != 'ready': raise AppError('NOT_READY_FOR_ACCEPTANCE')
         already_merged=job.get('native_lineage') and self.repos.merge_candidate(job)['merged']

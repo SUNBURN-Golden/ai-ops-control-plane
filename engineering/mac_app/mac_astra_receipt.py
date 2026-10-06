@@ -292,6 +292,25 @@ class Journal:
                         self.db.execute('INSERT OR IGNORE INTO mac_host_astra_scoped_holds VALUES (?,?,?,?,?,?,?)',
                                         (row['repository'],row['pr'],row['head'],gate,proof['depth'],row['code'],row['document']))
 
+            requests=[parse_json(row[0])['request'] for row in self.db.execute('SELECT document FROM mac_host_astra_requests')]
+            pins=[parse_json(row[0]) for row in self.db.execute('SELECT document FROM mac_host_astra_receipts')]
+            for row in self.db.execute('SELECT * FROM mac_host_astra_observations').fetchall():
+                proof=parse_json(row['document'])
+                matching=[req for req in requests if req['repository'].lower()==row['repository'] and
+                          req['pr_url'].rsplit('/',1)[-1]==str(row['pr']) and req['head']==row['head']]
+                pinned={pin['request']['gate'] for pin in pins if pin['comment']==proof}
+                gates=pinned or {req['gate'] for req in matching}
+                if len(gates)==1:
+                    self._preserve_observation(row['repository'],row['pr'],row['head'],next(iter(gates)),proof)
+
+    def _preserve_observation(self,repo,number,head,gate,proof):
+        self.db.execute('INSERT OR IGNORE INTO mac_host_astra_scoped_observations VALUES (?,?,?,?,?,?)',
+                        (repo,number,head,gate,proof['comment_id'],encoded(proof)))
+        if proof['result'] not in ('PASS','PASS_WITH_NOTES') or proof['contract_change_required']!='NO':
+            code='MAC_HOST_ASTRA_AUDIT_CONFLICT'
+            self.db.execute('INSERT OR IGNORE INTO mac_host_astra_scoped_holds VALUES (?,?,?,?,?,?,?)',
+                            (repo,number,head,gate,proof['depth'],code,encoded({'code':code,'evidence':proof})))
+
     def hold(self, requirement, code, evidence=None):
         repo, number, request=context(requirement)
         depth=evidence.get('depth',request['requested_depth']) if isinstance(evidence,dict) else request['requested_depth']
@@ -319,15 +338,42 @@ class Journal:
         pages=api('repos/'+repo+'/issues/'+str(number)+'/comments?per_page=100',paginate=True)
         require(isinstance(pages,list) and pages and all(isinstance(page,list) for page in pages) and
                 sum(len(page) for page in pages)<=4096)
-        observed={};seen=set()
+        items={}
         for page in pages:
             for item in page:
-                require(isinstance(item,dict) and type(item.get('id')) is int and item['id'] not in seen)
-                seen.add(item['id'])
-                if not trusted_actor(item) or not isinstance(item.get('body'),str) or not item['body'].startswith(MARK):continue
-                if not relevant(item,requirement):continue
-                value=parse_comment(item,requirement)
-                observed[value['comment_id']]=value
+                require(isinstance(item,dict) and type(item.get('id')) is int and item['id'] not in items)
+                items[item['id']]=item
+        with self.store.lock:
+            # Ambiguous legacy scope requires the unchanged authenticated body.
+            # Its absence cannot invent a permanent hold for an unrelated gate.
+            for row in self.db.execute('SELECT * FROM mac_host_astra_observations WHERE repository=? AND pr=? AND head=?',key[:3]).fetchall():
+                proof=parse_json(row['document'])
+                if DEPTHS.index(proof['depth'])<DEPTHS.index(request['requested_depth']):continue
+                if self.db.execute('SELECT 1 FROM mac_host_astra_scoped_observations WHERE repository=? AND pr=? AND head=? AND comment_id=?',
+                                   (*key[:3],row['comment_id'])).fetchone():continue
+                item=items.get(row['comment_id'])
+                require(item is not None and trusted_actor(item) and isinstance(item.get('body'),str) and
+                        body_hash(item['body'])==proof['body_sha256'] and item.get('updated_at')==proof['updated_at'])
+                gate=scope(item['body'])[2]
+                scoped={**requirement,'request_binding':{**request,'gate':gate}}
+                require(parse_comment(item,scoped)==proof)
+                self._preserve_observation(*key[:3],gate,proof)
+            self.check_hold(requirement)
+            old={row['comment_id']:parse_json(row['document']) for row in self.db.execute(
+                'SELECT comment_id,document FROM mac_host_astra_scoped_observations WHERE repository=? AND pr=? AND head=? AND gate=?',key)
+                 if DEPTHS.index(parse_json(row['document'])['depth'])>=DEPTHS.index(request['requested_depth'])}
+            # A malformed edit of a known receipt is not a retryable new format.
+            for cid,value in old.items():
+                item=items.get(cid)
+                if (item is None or not trusted_actor(item) or not isinstance(item.get('body'),str) or
+                        body_hash(item['body'])!=value['body_sha256'] or item.get('updated_at')!=value['updated_at']):
+                    self.hold(requirement,'MAC_HOST_ASTRA_RECEIPT_CHANGED',value)
+        observed={}
+        for item in items.values():
+            if not trusted_actor(item) or not isinstance(item.get('body'),str) or not item['body'].startswith(MARK):continue
+            if not relevant(item,requirement):continue
+            value=parse_comment(item,requirement)
+            observed[value['comment_id']]=value
         with self.store.lock:
             self.check_hold(requirement)
             old={row['comment_id']:parse_json(row['document']) for row in self.db.execute(
