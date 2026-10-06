@@ -323,6 +323,7 @@ class Pipeline:
             self.store.db.execute("UPDATE mac_host_tasks SET state='REWORK_REQUIRED' WHERE repository=? AND task=?",(repo.lower(),bound['task_id']))
         return {'task_id':bound['task_id'],'state':'REWORK_REQUIRED','same_lineage':True}
 
+    @handoff.bounded_api_reads
     def accepted_dependency(self,bound,plan_commit,*,current=True):
         """Read a normal ACCEPTED delivery and its actual private/live proof.
 

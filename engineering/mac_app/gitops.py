@@ -28,11 +28,19 @@ ROADMAP_HEADER = {
 
 
 def execute(argv, cwd=None, timeout=120, allowed=(0,)):
+    # Mac verification may read through gh wrappers as well as handoff.api.
+    # Import at call time: handoff itself imports this executor.
+    budgeted = Path(argv[0]).name == 'gh'
+    if budgeted:
+        from handoff import remaining_api_seconds
+        remaining = remaining_api_seconds()
+        if remaining is not None: timeout = min(timeout, remaining)
     try:
         run = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
                              timeout=timeout, env=agents.environment())
     except subprocess.TimeoutExpired as exc:
         raise AppError('COMMAND_TIMEOUT') from exc
+    if budgeted: remaining_api_seconds()
     if run.returncode not in allowed:
         # Output can contain credentials or repository data; keep it out of API errors.
         diagnostic = run.stderr.lower()

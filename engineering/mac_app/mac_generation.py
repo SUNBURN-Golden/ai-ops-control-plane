@@ -19,6 +19,7 @@ import handoff
 import transport_guard
 
 
+@handoff.bounded_api_reads
 def dependency_evidence(source,scope,node,plan_commit,*,current=True):
     """Consume only the same original revision's normal Mac completions."""
     if not node.get('depends_on',[]): return []
@@ -45,6 +46,7 @@ def dependency_evidence(source,scope,node,plan_commit,*,current=True):
     return result
 
 
+@handoff.bounded_api_reads
 def frozen_dependencies(source,bound,*,live=False):
     """Retain the pinned graph and recheck its protected completion lineage."""
     from mac_pipeline import Pipeline

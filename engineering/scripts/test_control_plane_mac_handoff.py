@@ -57,6 +57,19 @@ def snapshot():
 
 
 class ApiBudgetTests(unittest.TestCase):
+    def test_gh_wrappers_share_api_budget_and_keep_default_outside_scope(self):
+        clock=[0.0];timeouts=[]
+        def run(args,**kwargs):
+            timeouts.append(kwargs['timeout']);clock[0]+=16
+            return __import__('subprocess').CompletedProcess(args,0,'{}','')
+        with mock.patch.object(handoff.time,'monotonic',side_effect=lambda:clock[0]),mock.patch.object(gitops.subprocess,'run',side_effect=run):
+            with handoff.api_read_budget():
+                gitops.gh(REPO,'repo','view')
+                with self.assertRaises(common.AppError) as error:gitops.gh(REPO,'pr','view','80')
+                self.assertEqual(error.exception.code,'COMMAND_TIMEOUT')
+            gitops.gh(REPO,'repo','view')
+        self.assertEqual(timeouts,[30,14,120])
+
     def test_nested_reads_share_remaining_time_and_discard_late_response(self):
         clock=[0.0]; timeouts=[]
         def execute(args, **kwargs):
