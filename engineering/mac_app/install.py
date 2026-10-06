@@ -148,7 +148,7 @@ def quiescent_generation_delivery(db,state,job,tables):
     import native_transfer
     from mac_authority import LocalSource, require
     inspected=job['state']=='accepted'
-    require(job['state'] in ('needs_user','paused','ready','accepted') and job.get('attempt') is None,'UPDATE_BUSY')
+    require(job['state'] in ('needs_user','paused','ready','accepted','cancelled') and job.get('attempt') is None,'UPDATE_BUSY')
     require({'mac_host_generations','mac_host_tasks','mac_host_attempts','native_local','mac_host_deliveries'} <= tables,
             'UPDATE_BUSY')
     lineage=job.get('native_lineage'); require(isinstance(lineage,dict),'UPDATE_BUSY')
@@ -292,11 +292,11 @@ def idle_database(state):
                     try: blocked_tasks.add(quiescent_generation_delivery(db,state,job,tables))
                     except (AppError,KeyError,TypeError,ValueError,OSError):
                         raise AppError('UPDATE_BUSY', '작업을 완료·검수하거나 안전하게 취소한 뒤 업데이트해 주세요. 대기·일시정지·실행 불명 작업은 유지합니다.') from None
-                elif state_name=='accepted' and job.get('native_lineage'):
+                elif state_name in ('accepted','cancelled') and job.get('native_lineage'):
                     lineage=job['native_lineage']['binding']
                     row=db.execute('SELECT state FROM mac_host_tasks WHERE repository=? AND task=?',
                                    (lineage['repository'].lower(),lineage['task_id'])).fetchone()
-                    if row and row[0]=='INSPECTED':
+                    if row and row[0]==('INSPECTED' if state_name=='accepted' else 'DELIVERING'):
                         try: blocked_tasks.add(quiescent_generation_delivery(db,state,job,tables))
                         except (AppError,KeyError,TypeError,ValueError,OSError): raise AppError('UPDATE_BUSY') from None
             for table,allowed in (('native_local',('TERMINAL',)),('mac_host_attempts',('TERMINAL',)),

@@ -300,6 +300,41 @@ class MacGenerationTests(unittest.TestCase):
         self.controller.tick();engine=core.Engine(self.store,delivery.FixtureRepositories(self.store.directory/'workspaces'),self.controller)
         self.assertTrue(engine.pipeline.deliver())
         return self.store.jobs()[0],folder
+    def cancelled_delivery(self):
+        job,_=self.blocked_delivery();engine=core.Engine(self.store,delivery.FixtureRepositories(self.store.directory/'workspaces'),self.controller)
+        self.store.action(job['id'],'resume',{'answer':'Fixture-only recovery'})
+        with patch('core.agents.command',return_value=['fixture-not-executed']),patch('core.subprocess.Popen'):
+            engine.launch(self.store.get(job['id']),'builder')
+        current=self.store.get(job['id']);attempt=current['attempt'];folder=self.store.directory/'jobs'/job['id']/attempt['id']
+        delivery.private_outcome(folder,attempt,delivery.report(current['head'],status='needs_user'),
+            profile=current['settings']['roles']['builder'],sid='fixture-cancelled-builder')
+        engine.observe(current)
+        self.store.action(job['id'],'cancel',{})
+        return self.store.get(job['id']),folder
+    def test_cancelled_two_call_generation_update_preserves_ledger_without_stop_marker(self):
+        job,folder=self.cancelled_delivery();before=list(self.store.db.iterdump())
+        self.assertEqual(job['calls'],2);self.assertIsNone(job['attempt'])
+        self.assertFalse((folder/'stop').exists())
+        with patch('core.Store',side_effect=AssertionError('A read-only precheck cannot open a Store')):
+            install.idle_database(self.store.directory)
+        self.assertEqual(list(self.store.db.iterdump()),before)
+        self.assertEqual(self.store.get(job['id'])['state'],'cancelled')
+        self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'DELIVERING')
+    def test_cancelled_label_cannot_bypass_private_receipt_binding_or_actual_live_group(self):
+        job,folder=self.cancelled_delivery();path=folder/'receipt.json';original=path.read_bytes()
+        value=common.read_json(path);value['binding']='e'*64;common.atomic_json(path,value)
+        with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
+        path.write_bytes(original);path.chmod(0o600)
+        with patch('install.os.killpg',return_value=None):
+            with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
+        path.unlink()
+        with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
+    def test_cancelled_generation_update_still_rejects_unknown_or_canonical_binding_change(self):
+        job,_=self.cancelled_delivery()
+        self.store.update(job['id'],state='unknown')
+        with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
+        self.store.update(job['id'],state='cancelled',native_lineage={**job['native_lineage'],'attempt_id':'e'*32})
+        with self.assertRaises(common.AppError):install.idle_database(self.store.directory)
     def test_update_preserves_quiescent_needs_user_generation_and_failure_without_state_mutation(self):
         job,_=self.blocked_delivery();before=list(self.store.db.iterdump())
         with patch('core.Store',side_effect=AssertionError('A read-only precheck cannot open a Store')):
