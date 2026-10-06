@@ -7,6 +7,27 @@
 감사 입력으로 보존한다. 이 사본은 런타임 수용 입력이 아니며 인증 API 재검증을 대체하지 않는다.
 수정·삭제되거나 인증 조회가 실패한 결정은 새 admission과 감사 소비를 허용하지 않는다.
 
+PR #80의 세 정책 완화 근거는 [D-2026-10-06-MAC-A3-RECEIPT-2](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/80#issuecomment-6015244412)다.
+작성자는 `BeautifulMind-JT` / numeric ID `263336091`, 댓글 ID는 `6015244412`,
+본문 UTF-8 SHA-256은 `3bea1df70664b5ce8713d627291e7a64f0c4b5162e7afee50697ac14a1479cb4`다.
+인증 API 본문 1,843바이트에서 직접 계산해 제시 hash와 대조했고, 생성·수정 시각은
+`2026-10-06T11:25:59Z`다. [정확한 결정 사본](../docs/MAC_A3_RECEIPT_DECISION_20261006_2.md)을
+보존하며 [결정 인증 기록](../docs/MAC_A3_RECEIPT_DECISION_20261006_2_RECORD.md)에도 pointer/hash를 남긴다.
+[공식 A3 DECISION_REQUIRED](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/80#issuecomment-6014644349)의
+F1–F3에 대해 User가 **A: 세 완화 모두 승인**을 선택했다. Mac에만 적용하며 원래
+결정의 해당 ordering·같은 HEAD 상충·기존 hold 해제 조항을 아래 범위에서 개정한다.
+
+- F1: 요청 기록보다 최대 30초 먼저 시작한 아직 소비하지 않은 run도 허용한다.
+- F2: 다른 gate 또는 요구보다 낮은 depth의 FAIL·DECISION_REQUIRED·contract YES까지
+  무시한다. 같은 gate이며 요구 이상의 depth인 결과만 상충 판단에 포함한다.
+- F3: 기존 UNVERIFIED hold, 증거 없는 CHANGED hold, PASS와 PASS_WITH_NOTES 사이의
+  conflict hold, 낮은 depth hold를 역사 기록으로 돌려 차단 효력을 없애는 이관 자체를
+  명시적으로 승인한다. 입증된 관련 FAIL·contract YES·known edit hold는 계속 보존한다.
+
+이는 PR80 source 정책의 durable 승인 기록이다. 사본과 hash는 공식 재감사의 근거이며,
+앱이 이 후속 결정까지 live 검증한다고 주장하지 않는다. 런타임의 기존 고정 결정 pin과
+영수증 binding·anti-replay 검증은 원래 방식대로 유지한다. Linux gate 규칙은 바꾸지 않는다.
+
 이 결정은 **Mac local 경로에 한정된 GitHub 감사 댓글 수용 예외**다. 기존 Linux
 program bridge의 보호 원장·scope receipt 계약을 바꾸지 않는다. Linux의 root 소유
 고정 `aiops-fable`이 감사하며 Mac은 모델을 감사자로 실행하거나 결과를 만들지 않는다.
@@ -24,8 +45,8 @@ Mac이 별도 서명이나 Linux 원장을 확인했다고 주장하지 않는�
    native request/attempt, job/branch/PR/HEAD, writer sessions와 private review digest가
    들어간다. A3는 ARCHITECTURE로 승격하고 RELEASE 예약과 사용자 병합을 유지한다.
 3. **이 요청이 기록된 다음에** 운영자가 Linux 고정 도구로 해당 PR/HEAD와 gate/depth를
-   감사한다. 도구 호출·감사 수행은 이 앱이 자동으로 하거나 대체하지 않는다. 요청 이전에
-   게시된 감사는 새 task revision으로 소급 승격할 수 없다.
+   감사한다. 도구 호출·감사 수행은 이 앱이 자동으로 하거나 대체하지 않는다. 결정
+   D-2026-10-06-MAC-A3-RECEIPT-2 F1이 허용한 30초 창을 제외하면 요청 이전 run은 거절한다.
 4. 앱은 인증 API로 해당 PR 댓글 목록 전체와 선택한 댓글을 직접 다시 조회한다.
    `<!-- aiops-fable-audit -->`와 둘째 줄 `ASTRA_AUDIT_V1`의 schema, 작성자 login/id,
    댓글 ID/URL/issue URL의 repo/PR, 실제 remote PR HEAD/branch/repo,
@@ -36,8 +57,8 @@ Mac이 별도 서명이나 Linux 원장을 확인했다고 주장하지 않는�
    반복 표시는 있으면 header와 대조하며, actual auditor/session은 header로 검증한다.
 5. 원장은 댓글 ID/URL/본문 SHA-256/생성·수정 시각 및 검증된 좁은 필드를 정확한 요청에
    한 번만 묶는다. 같은 댓글 또는 audit request/run ID는 다른 revision/job/native
-   attempt/writer/review 요청에 재사용할 수 없다. 도구 run 시작도 요청 기록 이후여야
-   한다. 후속 사용자 지시에 따라 시계 비교에 아래 30초 오차를 허용한다. 이미 사용한
+   attempt/writer/review 요청에 재사용할 수 없다. 도구 run 시작과 요청 기록·댓글 게시의
+   비교에는 결정 D-2026-10-06-MAC-A3-RECEIPT-2 F1에 따라 아래 30초 오차를 허용한다. 이미 사용한
    run/댓글을 다시 게시해 다른 요청으로 승격할 수 없다. raw 댓글·모델 transcript·
    비밀은 영수증에 저장하지 않는다.
 
@@ -86,7 +107,7 @@ approval·정확 HEAD merge 보호는 유지한다.
 ## 범위와 검증의 한계
 
 요청 시각은 Mac wall clock, audit run ID 시각은 Linux clock, 댓글 생성 시각은 GitHub
-clock이다. 후속 사용자 지시에 따라 `Mac request - 30초 <= Linux run <= GitHub comment + 30초`,
+clock이다. 결정 D-2026-10-06-MAC-A3-RECEIPT-2 F1에 따라 `Mac request - 30초 <= Linux run <= GitHub comment + 30초`,
 `GitHub comment >= Mac request - 30초`로 확인한다. 같은 초도 허용한다. 초과하는
 오차는 거절하며 시계 동기화를 증명하지 않는다. 허용 창 안의 아직 소비하지 않은 이전
 run을 실제 순서와 구별하지 못하는 한계는 남는다. 이미 소비한 댓글/run의 다른 요청
@@ -95,7 +116,8 @@ run을 실제 순서와 구별하지 못하는 한계는 남는다. 이미 소�
 
 운영자 계정이 감사 mark로 시작하는 댓글을 남겼지만 둘째 header를 해석할 수 없으면
 어느 HEAD/gate의 감사인지 구분하지 못해 `MAC_HOST_ASTRA_RECEIPT_UNVERIFIED`로
-현재 전이를 차단한다. 후속 사용자 지시에 따라 이런 미확인 새 댓글은 영구 hold를
+현재 전이를 차단한다. 결정 D-2026-10-06-MAC-A3-RECEIPT-2 F3에 따른 legacy hold 이관과
+별개로, 처음부터 검증하지 못한 새 댓글은 관측 proof나 영구 hold를
 쓰지 않는다. 정정된 새 댓글 또는 불명확한 댓글 제거 후 다시 검증할 수 있다. 입증된
 관련 FAIL과 이미 검증한 댓글의 수정·삭제를 정정으로 간주해 해제하지 않는다.
 
@@ -107,6 +129,28 @@ A3 admission과 의존 작업 live 재검증은 일부 경로에서 `Store.lock`
 잠금 대기도 예산을 소모하지만 Python 잠금·SQLite 대기를 강제 중단하거나 전체 operation의
 wall time이 30초 이하라고 보장하지 않는다. 로컬 검증 시간도 예산에 포함되며 budget 밖
 일반 호출의 기존 120초 timeout은 유지한다. owner 직렬화와 예약 정책은 그대로다.
+
+GitHub 실행 호출은 `github_access=READ` 또는 `WRITE`를 call site에서 명시한다.
+분류를 생략한 gh 호출은 실행 전에 거절하며 subcommand 목록으로 mutation을 추정하지
+않는다. API READ는 explicit GET method를 요구한다. WRITE는 implicit POST와 새 쓰기
+subcommand에도 조회 budget의 남은 timeout·응답 후 budget 검사를 적용하지 않는다.
+새 호출을 추가하는 작성자가 실제 side effect에 맞게 분류해야 하며 WRITE 표시는 권한이나
+실행 승인을 만들지 않는다.
+
+30초 예산에는 여러 순차 GET이 포함돼 느린 연결에서는 정상 증거가 있어도 fail-closed로
+재시도가 필요할 수 있다. `ContextVar`는 새 thread로 자동 전파되지 않는다. 현재 조회
+경로는 동기식이며 future thread 작업은 예산 context를 명시적으로 이어야 합산 제한을
+유지한다. 이 수리는 timeout 튜닝·thread 기반 조회를 추가하지 않는다.
+
+여러 역사 gate에 걸친 legacy 관측의 댓글이 삭제되거나 바뀌면 repo/PR/HEAD의 모든
+gate가 미확인으로 막힐 수 있다. 영구 hold를 새로 쓰지 않아도 동일 HEAD에서 단순 재시도만으로
+해결되지 않는다. 원래 authenticated body를 입증하거나 새 HEAD 또는 명시적 User 결정이
+필요하며 앱이 UNKNOWN·소유권·기존 입증된 hold를 자동 해제하지 않는다.
+
+운영자 계정이 이 PR에 다른 PR 번호의 audit header를 잘못 게시하면 HEAD/gate/depth
+필터 전에 PR binding 불일치로 현재 조회를 미확인 차단한다. 다른 gate를 무시하는 규칙은
+같은 PR의 검증된 binding에만 적용한다. 미게시·오게시 댓글의 제거 또는 정정 후 재검증할
+수 있지만 이미 입증된 관련 댓글의 편집·삭제 hold는 그대로다.
 
 감리 시작·User 검수·병합 확인도 preflight와 후속 조회가 같은 예산을 공유한다. Ready/merge
 원격 mutation은 조회 예산으로 timeout을 줄이지 않는다. mutation 이후 확인 GET이 늦거나

@@ -573,11 +573,11 @@ class ContractTests(unittest.TestCase):
 class GitTests(unittest.TestCase):
     def test_repo_metadata_uses_positional_repository_and_prs_keep_repo_flag(self):
         with mock.patch.object(gitops, 'execute', return_value='{}') as run:
-            gitops.gh('example/product', 'repo', 'view', '--json', 'defaultBranchRef,isArchived')
-            run.assert_called_once_with(['gh', 'repo', 'view', 'example/product', '--json', 'defaultBranchRef,isArchived'])
+            gitops.gh('example/product', 'repo', 'view', '--json', 'defaultBranchRef,isArchived',github_access='READ')
+            run.assert_called_once_with(['gh', 'repo', 'view', 'example/product', '--json', 'defaultBranchRef,isArchived'],github_access='READ')
             run.reset_mock()
-            gitops.gh('example/product', 'pr', 'view', 'aiops/test', '--json', 'headRefOid')
-            run.assert_called_once_with(['gh', 'pr', 'view', 'aiops/test', '--json', 'headRefOid', '--repo', 'example/product'])
+            gitops.gh('example/product', 'pr', 'view', 'aiops/test', '--json', 'headRefOid',github_access='READ')
+            run.assert_called_once_with(['gh', 'pr', 'view', 'aiops/test', '--json', 'headRefOid', '--repo', 'example/product'],github_access='READ')
 
     def test_real_git_scope_stays_bound_after_an_agent_commits_a_changed_manifest(self):
         import program_scope
@@ -616,7 +616,7 @@ class GitTests(unittest.TestCase):
         for stderr,code in [('repository not found token-secret','REPOSITORY_ACCESS_REQUIRED'),('HTTP 401 token-secret','GITHUB_LOGIN_REQUIRED')]:
             result=subprocess.CompletedProcess(['gh'],1,'',stderr)
             with mock.patch.object(gitops.subprocess,'run',return_value=result):
-                with self.assertRaises(common.AppError) as caught:gitops.execute(['gh','repo','view'])
+                with self.assertRaises(common.AppError) as caught:gitops.execute(['gh','repo','view'],github_access='READ')
             self.assertEqual(caught.exception.code,code);self.assertNotIn('token-secret',str(caught.exception))
 
     def test_required_checks_missing_or_skipped_cannot_pass(self):

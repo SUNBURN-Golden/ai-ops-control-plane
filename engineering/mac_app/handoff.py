@@ -84,7 +84,7 @@ def api(path, paginate=False):
     if paginate: args += ['--paginate', '--slurp']
     try:
         remaining = remaining_api_seconds()
-        raw = execute([*args, path], **({'timeout': remaining} if remaining is not None else {}))
+        raw = execute([*args, path], github_access='READ', **({'timeout': remaining} if remaining is not None else {}))
         remaining_api_seconds()
     except OSError as exc:
         raise AppError('CLI_SETUP_REQUIRED', 'GitHub CLI 실행 경로와 권한을 확인해 주세요.') from exc

@@ -27,13 +27,22 @@ ROADMAP_HEADER = {
 }
 
 
-def execute(argv, cwd=None, timeout=120, allowed=(0,)):
+def execute(argv, cwd=None, timeout=120, allowed=(0,), *, github_access=None):
     # Mac verification may read through gh wrappers as well as handoff.api.
     # Import at call time: handoff itself imports this executor.
-    mutation = tuple(argv[1:3]) in (('pr','ready'),('pr','create'))
-    if len(argv)>1 and argv[1]=='api':
-        mutation = mutation or any(argv[i] in ('--method','-X') and argv[i+1]!='GET' for i in range(2,len(argv)-1))
-    budgeted = Path(argv[0]).name == 'gh' and not mutation
+    github = Path(argv[0]).name == 'gh'
+    if github and github_access not in ('READ','WRITE'):
+        raise AppError('GITHUB_ACCESS_KIND_REQUIRED')
+    budgeted = github and github_access == 'READ'
+    if budgeted and len(argv)>1 and argv[1]=='api':
+        methods=[]
+        for i,arg in enumerate(argv[2:],2):
+            if arg in ('--method','-X'):
+                methods.append(argv[i+1] if i+1<len(argv) else None)
+            elif arg.startswith('--method='):methods.append(arg.split('=',1)[1])
+            elif arg.startswith('-X') and len(arg)>2:methods.append(arg[2:])
+        if methods!=['GET']:
+            raise AppError('GITHUB_READ_METHOD_REQUIRED')
     if budgeted:
         from handoff import remaining_api_seconds
         remaining = remaining_api_seconds()
@@ -62,10 +71,10 @@ def git(checkout, *args, **kwargs):
                     *args], cwd=checkout, **kwargs)
 
 
-def gh(repo, *args, **kwargs):
+def gh(repo, *args, github_access=None, **kwargs):
     if args[:2] == ('repo', 'view'):
-        return execute(['gh', 'repo', 'view', repo, *args[2:]], **kwargs)
-    return execute(['gh', *args, '--repo', repo], **kwargs)
+        return execute(['gh', 'repo', 'view', repo, *args[2:]], github_access=github_access, **kwargs)
+    return execute(['gh', *args, '--repo', repo], github_access=github_access, **kwargs)
 
 
 def prepare_host_checkout(checkout, branch, base_sha, plan_blob):
@@ -114,7 +123,7 @@ class Repositories:
             if not self.clean(job): raise AppError('PREPARATION_OUTCOME_UNKNOWN')
             branch = git(checkout, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD').removeprefix('origin/')
             return {'base_sha': self.head(job), 'base_branch': branch, 'head': self.head(job)}
-        metadata = parse_json(gh(job['repository'], 'repo', 'view', '--json', 'defaultBranchRef,isArchived'))
+        metadata = parse_json(gh(job['repository'], 'repo', 'view', '--json', 'defaultBranchRef,isArchived',github_access='READ'))
         if metadata.get('isArchived'): raise AppError('ARCHIVED_REPOSITORY')
         branch = (metadata.get('defaultBranchRef') or {}).get('name')
         if not branch: raise AppError('EMPTY_REPOSITORY')
@@ -258,14 +267,14 @@ class Repositories:
         self.assert_binding(job)
         if self.head(job) != job['head'] or not self.clean(job): raise AppError('STALE_PUBLISH_HEAD')
         if job.get('native_lineage'):
-            metadata=parse_json(gh(job['repository'],'repo','view','--json','nameWithOwner,isPrivate'))
+            metadata=parse_json(gh(job['repository'],'repo','view','--json','nameWithOwner,isPrivate',github_access='READ'))
             if not isinstance(metadata,dict) or metadata.get('nameWithOwner','').lower()!=job['repository'].lower() or metadata.get('isPrivate') is not True:
                 raise AppError('MAC_HOST_CANDIDATE_PUBLICATION_SCOPE_REQUIRED')
         checkout = self.path(job)
         git(checkout, 'push', '--porcelain', 'origin', 'HEAD:refs/heads/' + job['branch'], timeout=180)
         fields='url,state,headRefOid'+(',isDraft,autoMergeRequest' if generation else '')
         prior = parse_json(gh(job['repository'], 'pr', 'list', '--head', job['branch'], '--state', 'all',
-                              '--json', fields, '--limit', '10'))
+                              '--json', fields, '--limit', '10',github_access='READ'))
         if prior:
             if len(prior) != 1 or prior[0]['state'] != 'OPEN' or prior[0]['headRefOid'] != job['head']:
                 raise AppError('PR_BINDING_MISMATCH')
@@ -290,7 +299,7 @@ class Repositories:
         path = self.directory.parent / 'jobs' / job['id'] / 'pr-body.md'
         path.write_text(body, encoding='utf-8')
         url = gh(job['repository'], 'pr', 'create', '--draft', '--base', job['base_branch'],
-                 '--head', job['branch'], '--title', 'AIOPS: ' + job['goal'].split('\n')[0][:120], '--body-file', str(path))
+                 '--head', job['branch'], '--title', 'AIOPS: ' + job['goal'].split('\n')[0][:120], '--body-file', str(path),github_access='WRITE')
         if not re.fullmatch(r'https://github\.com/' + re.escape(job['repository']) + r'/pull/[0-9]+', url):
             raise AppError('PUBLISH_RECEIPT_UNKNOWN')
         return url
@@ -298,7 +307,7 @@ class Repositories:
     def checks(self, job):
         fields='headRefOid,statusCheckRollup,url,state'
         if job.get('native_lineage'): fields+=',isDraft,autoMergeRequest'
-        data = parse_json(gh(job['repository'], 'pr', 'view', job['branch'], '--json', fields))
+        data = parse_json(gh(job['repository'], 'pr', 'view', job['branch'], '--json', fields,github_access='READ'))
         if data['headRefOid'] != job['head'] or data['state'] != 'OPEN':
             raise AppError('STALE_REMOTE_HEAD')
         if job.get('native_lineage'):
@@ -359,7 +368,7 @@ class Repositories:
                 target.get('path')=='.github/workflows/'+workflow and target.get('state')=='active'):
             raise AppError('MAC_HOST_CANDIDATE_BINDING_UNVERIFIED')
         execute(['gh','api','--method','POST','repos/'+repo+'/actions/workflows/'+workflow+'/dispatches',
-                 '-f','ref='+job['branch']])
+                 '-f','ref='+job['branch']],github_access='WRITE')
 
     def hosted_checks(self,job,head,*,post_merge=False):
         """Mac node CI comes from real GitHub Actions checks/runs, not status text."""
@@ -473,7 +482,7 @@ class Repositories:
     def user_ready(self,job):
         pull=self.merge_candidate(job)
         if pull['merged'] or not pull['draft']: return
-        gh(job['repository'],'pr','ready',str(pull['number']))
+        gh(job['repository'],'pr','ready',str(pull['number']),github_access='WRITE')
 
     def user_merge(self,job):
         pull=self.merge_candidate(job)
@@ -481,7 +490,7 @@ class Repositories:
         if pull['draft']: raise AppError('USER_READY_REQUIRED')
         result=parse_json(execute(['gh','api','--method','PUT',
             'repos/'+job['repository']+'/pulls/'+str(pull['number'])+'/merge',
-            '-f','sha='+job['head'],'-f','merge_method=merge']))
+            '-f','sha='+job['head'],'-f','merge_method=merge'],github_access='WRITE'))
         if result.get('merged') is not True: raise AppError('USER_MERGE_OUTCOME_UNKNOWN')
         observed=self.merge_candidate(job)
         if not observed['merged'] or observed['merge_head']!=result.get('sha'):

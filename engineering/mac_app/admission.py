@@ -20,7 +20,7 @@ def host_required(reason, **evidence):
 def pages(execute, path, deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 0: raise AppError('ADMISSION_OBSERVATION_UNRESOLVED')
-    value = parse_json(execute(['gh', 'api', '--method', 'GET', '--paginate', '--slurp', path], timeout=remaining))
+    value = parse_json(execute(['gh', 'api', '--method', 'GET', '--paginate', '--slurp', path], timeout=remaining,github_access='READ'))
     if (not isinstance(value, list) or not value or any(not isinstance(page, list) for page in value)
             or sum(len(page) for page in value) > 4096):
         raise AppError('ADMISSION_OBSERVATION_UNRESOLVED', '작업 등록 관측이 불완전합니다. 실행 전에 GitHub 읽기 결과를 확인해야 합니다.')
