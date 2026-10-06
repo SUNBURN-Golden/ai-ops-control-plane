@@ -1,0 +1,51 @@
+{
+  "decision_id": "D-2026-10-06-MAC-FAILED-PRESTART-NONOWNERSHIP",
+  "source": "AUTHENTICATED_GITHUB_API_BODY_UTF8",
+  "copies": [
+    {
+      "file": "MAC_FAILED_PRESTART_CONTROL_5956874897.md",
+      "comment_id": 5956874897,
+      "url": "https://github.com/BeautifulMind-JT/kix-protocol/issues/92#issuecomment-5956874897",
+      "issue_url": "https://api.github.com/repos/BeautifulMind-JT/kix-protocol/issues/92",
+      "actor": {
+        "login": "BeautifulMind-JT",
+        "id": 263336091,
+        "type": "User"
+      },
+      "created_at": "2026-10-02T16:39:34Z",
+      "updated_at": "2026-10-02T16:39:47Z",
+      "bytes": 526,
+      "body_sha256": "867801b42e1644962560c4b6dd230e67f51b8d604e5970effacd00af03315960"
+    },
+    {
+      "file": "MAC_FAILED_PRESTART_CONFIRMATION_6016190250.md",
+      "comment_id": 6016190250,
+      "url": "https://github.com/BeautifulMind-JT/kix-protocol/issues/92#issuecomment-6016190250",
+      "issue_url": "https://api.github.com/repos/BeautifulMind-JT/kix-protocol/issues/92",
+      "actor": {
+        "login": "BeautifulMind-JT",
+        "id": 263336091,
+        "type": "User"
+      },
+      "created_at": "2026-10-06T12:26:02Z",
+      "updated_at": "2026-10-06T12:26:02Z",
+      "bytes": 2151,
+      "body_sha256": "4369ebe024b764413ff4a9ca22bff6536a80f0369ddd6232a718af1d28bd1cc1"
+    },
+    {
+      "file": "MAC_FAILED_PRESTART_DECISION_20261006.md",
+      "comment_id": 6016578811,
+      "url": "https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/81#issuecomment-6016578811",
+      "issue_url": "https://api.github.com/repos/BeautifulMind-JT/ai-ops-control-plane/issues/81",
+      "actor": {
+        "login": "BeautifulMind-JT",
+        "id": 263336091,
+        "type": "User"
+      },
+      "created_at": "2026-10-06T12:47:14Z",
+      "updated_at": "2026-10-06T12:47:14Z",
+      "bytes": 1664,
+      "body_sha256": "1fad73dade5435130c0576315939310e7559250d3813359fd21077aaedf103e7"
+    }
+  ]
+}
