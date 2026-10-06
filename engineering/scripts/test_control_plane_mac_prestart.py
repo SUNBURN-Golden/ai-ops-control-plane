@@ -146,6 +146,15 @@ class PrestartAdmissionTests(unittest.TestCase):
     def test_duplicate_same_original_issue_is_not_cleared_by_one_proof(self):
         self.latest['tasks'].append(copy.deepcopy(self.latest['tasks'][0])); self.assert_blocked()
 
+    def test_program_node_delimiter_alias_cannot_expand_the_positive_exception(self):
+        for program, node in (('kix-agents', 'scope-sync'), ('kix-agents-scope', 'sync')):
+            with self.subTest(program=program, node=node):
+                self.assertEqual(mac_authority.original_task_key(program, node), prestart.SCOPE['task_id'])
+                with self.assertRaises(common.AppError):
+                    mac_generation.require_unowned_original(self.latest, program, node)
+        self.latest['tasks'][0].update(program='kix-agents', node='scope-sync')
+        self.assert_blocked()
+
     def test_live_record_change_after_adoption_blocks_preflight_and_stored_external_check(self):
         bound = self.adopt(); self.comments[0]['body'] += '\nChanged state'
         before = list(self.store.db.iterdump())

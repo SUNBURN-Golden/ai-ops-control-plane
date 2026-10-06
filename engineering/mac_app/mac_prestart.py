@@ -12,7 +12,7 @@ import hashlib
 import re
 
 from common import parse_json
-from mac_authority import original_task_key, require
+from mac_authority import require
 import handoff
 
 REPOSITORY = 'BeautifulMind-JT/kix-protocol'
@@ -51,16 +51,18 @@ def pinned_comment(comment, pin):
 
 
 @handoff.bounded_api_reads
-def verify(repo, task):
+def verify(repo, task, program, node):
     """Allow only #92's exact projection plus unchanged User confirmation.
 
     No caller-supplied history/fixture/decision prose enters this predicate.
     Every use re-reads the issue and its complete comment set. Missing,
     conflicting or changed restored history retains the original hold.
     """
+    require(all(isinstance(v, str) for v in (program, node, task.get('program'), task.get('node'))) and
+            (program.lower(), node.lower()) == (task['program'].lower(), task['node'].lower()) ==
+            ('kix', 'agents-scope-sync'), CODE)
     require(isinstance(repo, str) and repo.lower() == REPOSITORY.lower() and task.get('number') == ISSUE and
             task.get('url') == ISSUE_URL and task.get('state') == 'open' and
-            original_task_key(task.get('program'), task.get('node')) == 'KIX-AGENTS-SCOPE-SYNC' and
             task.get('materialization_request_id') == MATERIALIZATION and
             task.get('declared_owners') == ['CURSOR'], CODE)
     root = 'repos/' + REPOSITORY + '/issues/92'

@@ -109,7 +109,7 @@ def require_unowned_original(snapshot, program, node):
                     'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
             if original_task_key(task['program'],task['node']) == original_task_key(program,node):
                 import mac_prestart
-                proofs.append(mac_prestart.verify(snapshot.get('repository', ''), task))
+                proofs.append(mac_prestart.verify(snapshot.get('repository', ''), task, program, node))
     require(len(proofs) <= 1, 'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
     return proofs
 
