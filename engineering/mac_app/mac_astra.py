@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 import re
 
-from common import AppError, digest
+from common import AppError, digest, repository
 
 
 def require(value):
@@ -17,14 +17,23 @@ def require(value):
 
 
 def audit_requirement(job, scope):
+    require(isinstance(job, dict) and isinstance(scope, dict))
     lineage = job.get('native_lineage')
     require(isinstance(lineage, dict) and isinstance(lineage.get('binding'), dict))
     bound = lineage['binding']
-    require(isinstance(scope, dict) and scope.get('blob') == bound.get('plan_blob') and
+    try:
+        scope_repo = repository(scope.get('repository'))
+        bound_repo = repository(bound.get('repository'))
+        job_repo = repository(job.get('repository'))
+    except AppError as exc:
+        raise AppError('MAC_HOST_AUDIT_SCOPE_UNVERIFIED') from exc
+    require(scope.get('blob') == bound.get('plan_blob') and
             scope.get('program') == bound.get('program') and
-            str(scope.get('repository', '')).lower() == str(bound.get('repository', '')).lower() and
-            str(job.get('repository', '')).lower() == str(bound.get('repository', '')).lower() and
+            scope_repo.lower() == bound_repo.lower() == job_repo.lower() and
             job.get('base_sha') == bound.get('plan_commit'))
+    require(all(isinstance(value, str) and value.strip()
+                for value in (job.get('id'), lineage.get('request_id'), lineage.get('attempt_id'),
+                              bound.get('program'), bound.get('node'), scope.get('path'))))
     require(all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}', value)
                 for value in (job.get('head'), bound.get('plan_commit'), bound.get('plan_blob'))))
     require(isinstance(bound.get('task_id'), str) and bound['task_id'] and
@@ -41,7 +50,7 @@ def audit_requirement(job, scope):
         gate = 'ARCHITECTURE'
     required = floor == 'A3' or gate != 'NONE'
     request = {
-        'repository': bound['repository'], 'task_id': bound['task_id'],
+        'repository': bound_repo, 'task_id': bound['task_id'],
         'task_revision': bound['task_revision'], 'canonical_binding': copy.deepcopy(bound),
         'program': bound['program'], 'node': bound['node'],
         'plan_commit': bound['plan_commit'], 'plan_blob': bound['plan_blob'],
@@ -49,7 +58,7 @@ def audit_requirement(job, scope):
         'native_attempt_id': lineage['attempt_id'], 'head': job['head'],
         'pr_url': job.get('pr_url'), 'gate': gate, 'requested_depth': floor,
         'approval_pointer': scope.get('approval_pointer'),
-        'auditor_identity': 'ASTRA_FABLE', 'user_only_merge': True,
+        'requested_auditor': 'ASTRA_FABLE', 'declared_user_only_merge': True,
     }
     return {
         'node': bound['node'], 'head': job['head'], 'audit_floor': floor, 'astra_gate': gate,
