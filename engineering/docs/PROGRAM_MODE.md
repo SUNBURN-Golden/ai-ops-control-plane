@@ -241,7 +241,7 @@ flowchart TD
   - 리뷰 세션 동안 같은 작업의 WRITER 입장은 막힌다.
 
 **판정 결속: 세션 서명과 host 고정 (P2 구현, 재검토 반영)**
-- 모든 레인이 같은 GitHub 계정으로 글을 쓴다. 그래서 GitHub에 있는 글(이슈 본문, control record 댓글, 리뷰 본문)은 어느 레인이든 고칠 수 있다. **gate 판단은 이 글을 근거로 쓰지 않는다.**
+- 모든 레인이 같은 GitHub 계정으로 글을 쓴다. 그래서 GitHub에 있는 글(이슈 본문, control record 댓글, 리뷰 본문)은 어느 레인이든 고칠 수 있다. **Linux program gate 판단은 이 글을 근거로 쓰지 않는다.** Mac local 감사 전달에만 §13.1의 D-2026-10-06-MAC-A3-RECEIPT 예외가 있다.
 - 근거는 세 가지뿐이다.
   - host ledger(레인 UID는 쓸 수 없다)
   - host가 기록한 `plan_commit`의 plan
@@ -650,11 +650,37 @@ Claude Code Routines를 쓴다. 매 실행은 새 세션이다. 문서: https://
 - **CONFIRMED 복구:** host는 CONFIRMED인데 GitHub finalize가 사라진 경우, 자동 복구가 없다(기존 Astra 노트). 현장 소장은 이 경우 멈추고 운영자에게 알린다.
 - **Astra = Claude Fable (M5):** User가 감수한다(2026-09-30).
   - **같은 회사의 모델:** 설계 초안과 감사 도구의 지시문은 Opus가 쓰고, 감사는 Fable이 한다. 둘 다 Claude다. 독립성은 세션, 모델, 고정 지시문으로만 나뉜다.
-  - **감사 댓글도 단일 토큰으로 올라간다(M4):** 같은 토큰으로 가짜 `ASTRA_AUDIT_V1` 댓글을 만들 수 있다. gate는 이 글을 읽지 않는다. 강한 증거는 host 실행 폴더의 원본 출력이고, 댓글에 그 sha256이 있다.
+  - **감사 댓글도 단일 토큰으로 올라간다(M4):** 같은 토큰으로 가짜 `ASTRA_AUDIT_V1` 댓글을 만들 수 있다. Linux program gate는 이 글을 읽지 않는다. 그 경로의 강한 증거는 host 실행 폴더의 원본 출력이고, 댓글에 그 sha256이 있다. 아래 Mac-only 예외는 이 Linux 계약을 바꾸지 않는다.
   - **PR 내용의 prompt injection:** 감사 대상 안의 글이 판정을 흔들 수 있다. 읽기 전용, 네트워크 없음, 자격 증명 없음, 고정 지시문, 조작 시도는 BLOCKING으로 보고하게 한 것이 대책이다.
   - **도구 변경:** `aiops-fable`을 바꾸면 그 변경도 감사받는다. 도구 파일은 `RUNTIME_PATHS`에 있어서 활성화 재결합이 필요하다.
   - **대체 모델 없음:** Fable을 쓸 수 없으면 감사는 기다린다. 다른 모델로 바꾸지 않는다(`AGENTS.md` §12). 거절 시 자동 전환도 끄고, 결과에 다른 모델이 섞이면 올리지 않는다.
   - **추가 과금:** 도구는 Claude가 "초과 사용 막힘"이라고 알릴 때만 실행을 이어 간다. 계정의 추가 사용량(usage credits)과 자동 충전은 User가 claude.ai 설정에서 끈다. 이것이 꺼져 있어야 현장 소장 Routine을 설정한다.
+
+### 13.1 Mac local 감사 결과 전달 예외 — D-2026-10-06-MAC-A3-RECEIPT
+
+사용자 결정 [D-2026-10-06-MAC-A3-RECEIPT](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/78#issuecomment-6011271646)는
+`authority_kind=MAC_LOCAL`에 한해 인증된 GitHub 감사 댓글을 결과 전달 경로로 수용한다.
+댓글 ID `6011271646`, 작성자 `BeautifulMind-JT` / numeric ID `263336091`,
+생성·수정 시각 `2026-10-06T07:10:27Z`, 본문 SHA-256
+`46dc2cf0fdd02eeabbc2ac234ffcda0d410820f169d6e87f2f904d7ad939f132`를 고정한다.
+[원문 파일](MAC_A3_RECEIPT_DECISION_20261006.md)은 인증 API로 읽은 정확한 UTF-8 본문이며,
+이 저장소 기록으로 기존 승인 계약에 예외를 명시한다. 새로운 결정이나 권한을 만들지 않는다.
+
+감사는 Linux root 소유 고정 `aiops-fable`이 한다. Mac은 원래 결정과
+`<!-- aiops-fable-audit -->` / `ASTRA_AUDIT_V1` 댓글을 인증 API로 직접 다시 읽어
+작성자·repo/PR/정확 delivery HEAD·PASS/PASS_WITH_NOTES·요구 depth·schema·불변 본문
+SHA-256을 검증하고 private task/revision/request에 귀속시킨다. 재사용·편집·삭제·상충은
+[Mac receipt 계약](../mac_app/MAC_A3_RECEIPT_KO.md)에 따라 거절한다. 사본·붙여넣기·모델
+PASS는 런타임 권한이 아니며 admission·감리·검수·사용자 병합의 별도 gate를 유지한다.
+
+**신뢰 잔여 위험:** Mac은 지정 운영자 계정의 댓글을 고정 감사 도구의 결과로 신뢰한다.
+같은 계정의 token 보유자가 형식에 맞는 감사 댓글을 위조할 수 있다. login/numeric ID와
+본문 hash는 계정과 불변 내용을 확인하며 root 도구의 작성 사실을 암호학적으로 증명하지
+않는다. 이 경계는 위 사용자 결정의 전달 방식에 한정한다. Mac이 Linux 보호 원장을
+직접 검증하거나 새 서명 키·credential·actor·공유 admission authority를 만들었다고
+주장하지 않는다. Linux host/Fable/hostpack/boundary/sudoers, 기존 M1/M4/M5와
+Linux program gate는 그대로이며 RELEASE 예약·정확 HEAD CI·독립 검토·User merge를
+대체하지 않는다. 소스 예외 기록은 설치·runtime qualification 또는 감사 PASS가 아니다.
 
 ## 14. v0 A3 감사(FAIL) 대응
 

@@ -176,6 +176,11 @@ class LocalSource:
         # Fresh read-only projections add barriers only. They never release an
         # external owner, infer terminal execution or advance the pinned plan.
         snapshot=handoff.inspect_repository(bound['repository'])
+        import mac_astra_receipt
+        with self.store.lock:
+            task=self._task(self.store.db,bound)
+            node=parse_json(task['work'],1024*1024)['task']
+        mac_astra_receipt.admission(node)
         if 'generation_id' in bound:
             import mac_generation
             mac_generation.preflight(self,bound,snapshot)
@@ -255,7 +260,8 @@ class LocalSource:
             dependency=db.execute('SELECT task,state,binding FROM mac_host_tasks WHERE repository=? AND task=?',(bound['repository'].lower(),key)).fetchone()
             require(dependency is not None and dependency['state']=='ACCEPTED','MAC_HOST_DEPENDENCY_GATE_REQUIRED')
             deps.append({'task_id':key,'state':'ACCEPTED','binding_sha256':digest(parse_json(dependency['binding']))})
-        require(work['task'].get('astra_gate','NONE')=='NONE' and work['task'].get('audit_floor','A1')!='A3','MAC_HOST_ASTRA_GATE_REQUIRED')
+        import mac_astra_receipt
+        mac_astra_receipt.admission(work['task'])
         return {'binding':bound,'work':work,'gate_evidence':'mac-host:'+self.source_host+'#'+
                 ('generation-'+bound['generation_id'] if 'generation_id' in bound else 'explicit-owner-mode'), 'history':[],'dependencies':deps}
 

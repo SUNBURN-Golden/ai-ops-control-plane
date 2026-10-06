@@ -33,7 +33,7 @@ class AuditRequestTests(unittest.TestCase):
         self.assertEqual(value['request_binding']['canonical_binding'], self.bound)
         self.assertEqual(value['request_binding']['head'], self.job['head'])
         self.assertIsNone(value['audit_receipt'])
-        self.assertEqual(value['receipt_support'], 'PROTECTED_MAC_CONNECTOR_REQUIRED')
+        self.assertEqual(value['receipt_support'], 'AUTHENTICATED_GITHUB_AUDIT_COMMENT')
         self.assertEqual(value['request_binding']['requested_auditor'], 'ASTRA_FABLE')
         self.assertNotIn('auditor_identity', value['request_binding'])
         self.assertNotIn('user_only_merge', value['request_binding'])

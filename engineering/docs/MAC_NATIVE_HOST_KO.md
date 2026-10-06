@@ -14,7 +14,30 @@
 
 새 로컬 task의 canonical pointer는 `mac-host:<host-id>:<repo>:<task-id>`이다. `authority_kind=MAC_LOCAL`과 양의 **로컬 원장 행 ID**를 함께 묶는다. 이 ID를 GitHub 이슈 번호나 기존 VM의 materialization ID로 표시하지 않는다. GitHub 원본 계획의 승인 포인터와 기존 외부 이슈 ID는 provenance로 보존하며 원자적 예약으로 취급하지 않는다. 이 namespace 변경은 정확한 코드 SHA의 권한 경계 검토 대상이다.
 
-`host start --repo … --task … --request-id <32자리 hex>`는 등록된 binding을 기계적으로 선택한다. 시작 전과 체크아웃 준비 후에 원래 계획·작업 등록을 다시 읽는다. HEAD/blob 변경이나 새 외부 claim은 시작을 차단한다. 계획과 profile은 자동 재지정하지 않는다. 의존 작업의 Mac `ACCEPTED` 기록과 원래 A3/Astra gate가 없으면 다음 작업을 시작하지 않는다. 선언된 A3/MILESTONE/ARCHITECTURE/RELEASE를 임의로 약화하지 않는다. 현재 후보는 보호된 Astra 영수증의 Mac 수용 경로를 제공하지 않으므로 그 gate가 있는 작업은 보류한다.
+`host start --repo … --task … --request-id <32자리 hex>`는 등록된 binding을 기계적으로 선택한다. 시작 전과 체크아웃 준비 후에 원래 계획·작업 등록을 다시 읽는다. HEAD/blob 변경이나 새 외부 claim은 시작을 차단한다. 계획과 profile은 자동 재지정하지 않는다. 의존 작업의 검증된 Mac `ACCEPTED` 기록과 A3/Astra 전달 경로의 사용자 결정 검증이 없으면 다음 작업을 시작하지 않는다. 선언된 A3/MILESTONE/ARCHITECTURE/RELEASE를 임의로 약화하지 않는다. 아래 Mac-only 예외는 admission의 결정 검증과 후보 HEAD의 실제 감사 수용을 구분하며, 감사가 없으면 감리·검수·병합을 보류한다.
+
+### 승인된 Mac-only A3 결과 전달 예외
+
+사용자 결정 [D-2026-10-06-MAC-A3-RECEIPT](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/78#issuecomment-6011271646)는
+`authority_kind=MAC_LOCAL`에 한해 인증된 GitHub 감사 댓글 경로를 승인했다.
+댓글 ID `6011271646`, 작성자 `BeautifulMind-JT` / numeric ID `263336091`,
+생성·수정 시각 `2026-10-06T07:10:27Z`, 본문 SHA-256
+`46dc2cf0fdd02eeabbc2ac234ffcda0d410820f169d6e87f2f904d7ad939f132`다.
+[정확한 결정 원문](MAC_A3_RECEIPT_DECISION_20261006.md)을 저장소에 보존한다.
+사본은 감사 입력이며 런타임의 직접 인증 API 조회를 대체하지 않는다.
+
+Linux root 소유 고정 `aiops-fable`이 감사하고 Mac은 원래 결정과 표시된 PR 댓글을
+직접 다시 읽는다. 실제 actor·repo/PR/정확 delivery HEAD·PASS/PASS_WITH_NOTES·요구
+depth·schema·불변 body hash를 모두 검증한 결과만 private task/revision/request에
+귀속한다. 상세 재사용·삭제·상충·보류 조건은 [Mac receipt 계약](../mac_app/MAC_A3_RECEIPT_KO.md)을 따른다.
+
+이 방식은 **운영자 계정의 댓글을 고정 감사 도구의 결과로 신뢰**한다. 해당 계정 token
+보유자는 같은 형식의 댓글을 위조할 수 있으며 hash는 불변 내용의 증거이지 root 도구
+작성의 암호학적 증명이 아니다. Mac이 Linux 보호 원장을 확인했다는 의미가 아니다.
+이는 기존 사용자 결정의 한정된 신뢰 경계이며 새 key·credential·actor·공유 admission
+authority를 승인하지 않는다. Linux host/Fable/hostpack/boundary/sudoers 및 Linux
+program gate의 보호 receipt 계약은 그대로다. 정확 HEAD CI·독립 검토·감리·User merge와
+RELEASE 예약도 유지한다. 이 문서 기록은 새로운 결정, 실제 설치 또는 감사 PASS가 아니다.
 
 읽기 → 체크아웃 준비 → 로컬 예약 → claim → worker 시작 → 종료 관측 순서다. source 또는 worker 응답을 잃으면 `UNKNOWN`을 유지한다. 재시작은 새 시작을 허용하는 근거가 아니다. 나중에 같은 binding의 종료 영수증이 도착하면 종료만 관측할 수 있다. 종료 write 응답만 잃은 경우 `canonical reconcile`은 저장된 terminal을 읽어 대조하며 시작/예약을 재전송하지 않는다.
 
@@ -48,7 +71,7 @@ Mac node 검수의 CI는 인증된 GitHub API가 반환한 실제 `github-action
 
 선행 변경이 병합되어 기본 HEAD가 달라졌으면 owner의 `host advance-base --repo … --decision …`가 인증된 최신 원본을 읽는다. 원래 program blob·node revision·owner·명세·dependencies가 같고 미확정 실행이나 미검수 산출물이 없어야 다음 `READY` node의 base만 갱신한다. 이전 binding과 계보는 보존한다. 계획 변경·owner 변경·기존 외부 claim 해제 기능은 아니다.
 
-설치/활성화 전에는 현재 최종 코드 SHA의 실제 독립 검토, 필요한 A3/권한 경계 검증, 정상 시작 경로의 실제 계정 검증, 기존 실행의 충돌 확인을 마쳐야 한다. 자동 제품 dispatch와 A3 영수증 수용은 아직 활성화하지 않는다. 제품 순서는 KIX → 커머스 → ZARI → Film이며 SoulBound·마음결은 제외한다. 같은 작업의 기존 실행이 미확인인 동안 제품 개발을 중복 시작하지 않는다.
+설치/활성화 전에는 현재 최종 코드 SHA의 실제 독립 검토, 필요한 A3/권한 경계 검증, 정상 시작 경로의 실제 계정 검증, 기존 실행의 충돌 확인을 마쳐야 한다. 이 소스 후보는 위 결정에 따른 Mac A3 receipt 검증 경로를 제공하지만, 이것만으로 설치·runtime qualification이나 자동 제품 dispatch를 활성화했다고 주장하지 않는다. 제품 순서는 KIX → 커머스 → ZARI → Film이며 SoulBound·마음결은 제외한다. 같은 작업의 기존 실행이 미확인인 동안 제품 개발을 중복 시작하지 않는다.
 
 업데이트는 기존 지원 `Install.command --update` 경로만 사용한다. 중지되어 있던 서비스와 로그인 자동 시작 비활성 설정을 유지하고 DB·토큰·기록을 보존한다. 일반 job이 모두 종료되어도 native 예약·UNKNOWN·감사/검수/병합 대기 node가 있으면 교체를 거절한다. 기본 factory는 초기화되지 않은 Mac adapter로 시작하며 첫 설치/업데이트만으로 mode를 초기화하거나 제품 개발을 시작하지 않는다.
 

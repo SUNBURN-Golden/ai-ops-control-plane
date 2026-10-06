@@ -18,6 +18,15 @@ class Pipeline:
     def __init__(self,store,source,repos,*,failure=None):
         self.store,self.source,self.repos=store,source,repos
         self.failure=failure
+        self._astra=None
+
+    @property
+    def astra(self):
+        # Read-only legacy inspections/install checks must not migrate a ledger.
+        if self._astra is None:
+            from mac_astra_receipt import Journal
+            self._astra=Journal(self.store)
+        return self._astra
 
     def _document(self,request):
         row=self.store.db.execute('SELECT * FROM mac_host_deliveries WHERE request=?',(request,)).fetchone()
@@ -154,6 +163,37 @@ class Pipeline:
         bound=job['native_lineage']['binding']
         return mac_astra.audit_requirement(job,self.source.program(bound)['scope'])
 
+    def validate_audit(self,job):
+        requirement=self.audit_requirement(job)
+        if not requirement['required']: return requirement
+        require(isinstance(requirement.get('request_binding'),dict),'MAC_HOST_ASTRA_AUDIT_REQUIRED')
+        self.validate_candidate(job,refresh=False)
+        require(job.get('candidate_published_head')==job['head'] and job.get('ci') and
+                job['ci'].get('state')=='passed' and job['ci'].get('head')==job['head'] and
+                job['ci'].get('source')=='GITHUB_ACTIONS_API','MAC_HOST_LIVE_CI_REQUIRED')
+        request=self.astra.request(requirement)
+        requirement={**requirement,'request_recorded_at':request['created_at']}
+        with self.store.lock:
+            recorded=self.store.get(job['id']).get('audit_requirement')
+            # Live verification must not rewrite an unchanged accepted job:
+            # dependency proofs bind its complete private document digest.
+            if not isinstance(recorded,dict) or {**recorded,'audit_receipt':None}!=requirement:
+                self.store.update(job['id'],audit_requirement=requirement)
+        receipt=self.astra.consume(requirement)
+        require(receipt['comment']['auditor_session'] not in
+                self.writer_sessions(job)+[job['review']['provider_evidence']['session_id']],
+                'MAC_HOST_INDEPENDENT_REVIEW_REQUIRED')
+        with self.store.lock:
+            self.astra.check_hold(requirement)
+            current=self.store.get(job['id'])
+            require(self.audit_requirement(current)['request_sha256']==requirement['request_sha256'] and
+                    self.repos.head(current)==job['head'] and self.repos.clean(current),
+                    'MAC_HOST_ASTRA_RECEIPT_CHANGED')
+            requirement={**requirement,'audit_receipt':receipt}
+            if current.get('audit_requirement')!=requirement:
+                self.store.update(job['id'],audit_requirement=requirement)
+        return requirement
+
     def validate_candidate(self,job,*,refresh=True):
         self.assert_job(job,refresh=refresh)
         require(self.repos.head(job)==job['head'] and self.repos.clean(job),'MAC_HOST_INSPECTION_CHANGED')
@@ -164,8 +204,8 @@ class Pipeline:
         require(job['pr_url'] and job['ci'] and job['ci']['state']=='passed' and job['ci']['checks'] and
                 job['ci'].get('head')==job['head'] and job['ci'].get('source')=='GITHUB_ACTIONS_API' and
                 self.repos.head(job)==job['head'] and self.repos.clean(job),'MAC_HOST_LIVE_CI_REQUIRED')
-        self.validate_reviews(job,('review','supervision'))
-        require(not self.audit_requirement(job)['required'],'MAC_HOST_ASTRA_AUDIT_REQUIRED')
+        audit=self.validate_audit(job)
+        self.validate_reviews(dict(job,audit_requirement=audit),('review','supervision'))
 
     def writer_sessions(self,job):
         """Exclude only a proven initial native trust preflight, keeping its record."""
@@ -211,6 +251,8 @@ class Pipeline:
             material={'job':job['id'],'attempt':evidence['attempt'],'head':job['head'],
                       'role':'reviewer' if role=='review' else 'supervisor','profile':evidence['profile'],
                       'plan':job['plan'],'task':None}
+            if role=='supervision' and self.audit_requirement(job)['required']:
+                require('host_verification_sha256' in request,'MAC_HOST_ASTRA_RECEIPT_CHANGED')
             if 'host_verification_sha256' in request:
                 proof=request['host_verification_sha256']
                 require(role=='supervision' and isinstance(proof,str) and
@@ -225,6 +267,10 @@ class Pipeline:
                         snapshot.get('repository')==job['repository'] and context.get('id')==job['id'] and
                         context.get('exact_head')==job['head'] and context.get('plan')==job['plan'] and
                         context.get('canonical_binding')==job['native_lineage']['binding'],'MAC_HOST_PRIVATE_REVIEW_REQUIRED')
+                audit=job.get('audit_requirement') or {}
+                if self.audit_requirement(job)['required']:
+                    require(snapshot.get('astra_audit')==audit and audit.get('audit_receipt') is not None,
+                            'MAC_HOST_ASTRA_RECEIPT_CHANGED')
                 material['host_verification_sha256']=proof
             expected=digest(material)
             receipt=self.source.private_receipt(folder,{'id':request['attempt_id'],'binding':request['binding']})
@@ -249,6 +295,10 @@ class Pipeline:
         inspection={'head':job['head'],'pr_url':job['pr_url'],'task_revision':lineage['binding']['task_revision'],
                     'review_sha256':digest(job['review']),'supervision_sha256':digest(job['supervision']),
                     'ci_sha256':digest(job['ci']),'user_inspected_at':job['accepted_at']}
+        if self.audit_requirement(job)['required']:
+            require((job.get('audit_requirement') or {}).get('audit_receipt') is not None,
+                    'MAC_HOST_ASTRA_AUDIT_REQUIRED')
+            inspection['astra_receipt_sha256']=digest(job['audit_requirement']['audit_receipt'])
         require('inspection' not in document or document['inspection']==inspection,'MAC_HOST_INSPECTION_IMMUTABLE')
         document['inspection']=inspection
         self.store.db.execute("UPDATE mac_host_deliveries SET state='INSPECTED',document=? WHERE request=?",(encoded(document),lineage['request_id']))

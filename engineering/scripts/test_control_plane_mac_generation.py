@@ -194,11 +194,23 @@ class MacGenerationTests(unittest.TestCase):
             with self.assertRaisesRegex(common.AppError,'PROGRAM_REVISION_CHANGED'):
                 self.source.generation(self.value(**{name:'f'*40}))
         self.assertEqual(self.source.tasks('owner/kix'),[])
-    def test_a3_and_architecture_gates_still_block_adoption(self):
+    def test_a3_and_architecture_gates_require_the_pinned_channel_decision(self):
         for changes in ({'audit_floor':'A3'},{'astra_gate':'ARCHITECTURE'}):
             self.latest=fixtures.snapshot(nodes=[{'id':'CONFORMANCE','title':'Gated','spec':'Unchanged architecture scope',**changes}])
-            with self.assertRaisesRegex(common.AppError,'ASTRA_GATE_REQUIRED'):self.adopt()
+            with self.assertRaisesRegex(common.AppError,'ASTRA_DECISION_UNVERIFIED'):self.adopt()
         self.assertEqual(self.worker.launched,0)
+
+    def test_a3_generation_admission_binds_live_channel_decision_without_completing_audit(self):
+        import mac_astra_receipt
+        self.latest=fixtures.snapshot(nodes=[{'id':'CONFORMANCE','title':'Gated','spec':'Unchanged architecture scope',
+                                             'audit_floor':'A3','astra_gate':'RELEASE'}])
+        with patch('mac_astra_receipt.decision_evidence',return_value=copy.deepcopy(mac_astra_receipt.DECISION)) as read:
+            bound=self.adopt();work=self.source.call('read',bound).document['work']
+            self.assertEqual(work['astra_decision'],mac_astra_receipt.DECISION)
+            self.assertEqual(work['task']['astra_gate'],'RELEASE')
+            self.assertEqual(common.digest(work),bound['work_sha256']);self.assertGreaterEqual(read.call_count,2)
+        self.assertEqual(self.worker.launched,0)
+        self.assertEqual(self.source.tasks('owner/kix')[0]['state'],'READY')
     def test_dependency_is_not_inherited_from_a_legacy_done_declaration(self):
         self.latest=fixtures.snapshot(tasks=[{'number':94,'program':'KIX','node':'P-SDK-0','state':'closed'}])
         value=self.value(node='NEXT')
