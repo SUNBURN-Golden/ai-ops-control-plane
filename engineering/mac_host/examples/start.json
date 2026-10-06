@@ -1,7 +1,6 @@
 {
   "schema_version": 1,
   "request_id": "REPLACE_WITH_USER_REQUEST_ID",
-  "runner_name": "aiops-macbook-01",
   "repository": "BeautifulMind-JT/ZARI",
   "operation": "start",
   "issue_number": 0,
@@ -9,5 +8,6 @@
     "program": "REPLACE_WITH_APPROVED_PROGRAM",
     "node": "REPLACE_WITH_READY_NODE",
     "plan_commit": "REPLACE_WITH_APPROVED_40_HEX_COMMIT"
-  }
+  },
+  "execution_host": "current"
 }

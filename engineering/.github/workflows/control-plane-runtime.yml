@@ -3,18 +3,6 @@ name: Control Plane Runtime
 on:
   workflow_dispatch:
     inputs:
-      execution_host:
-        description: "Execution host: existing routing or the qualified MacBook Linux VM"
-        required: true
-        type: choice
-        default: current
-        options:
-          - current
-          - macbook
-      expected_runner_name:
-        description: "Exact qualified runner name; mandatory for execution_host=macbook"
-        required: false
-        type: string
       operation:
         description: "preflight, dispatch, or a program-mode operation (docs/PROGRAM_MODE.md)"
         required: true
@@ -84,7 +72,7 @@ concurrency:
 jobs:
   control:
     if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-    runs-on: ${{ inputs.execution_host == 'macbook' && fromJSON('["self-hosted","astra-control-plane","aiops-macbook"]') || fromJSON('["self-hosted","astra-control-plane"]') }}
+    runs-on: [self-hosted, astra-control-plane]
     timeout-minutes: ${{ inputs.operation == 'quota-resume' && 490 || contains(fromJSON('["astra-audit","astra-consult"]'), inputs.operation) && 245 || 15 }}
     env:
       ISSUE_NUMBER: ${{ inputs.issue_number }}
@@ -96,19 +84,6 @@ jobs:
       PREFLIGHT_BUILDER: ${{ inputs.builder_id }}
       PROGRAM_ARGS: ${{ inputs.program_args }}
     steps:
-      - name: Verify selected MacBook runner
-        if: ${{ inputs.execution_host == 'macbook' }}
-        shell: bash
-        env:
-          EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
-          ACTUAL_RUNNER_NAME: ${{ runner.name }}
-          ACTUAL_RUNNER_OS: ${{ runner.os }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$EXPECTED_RUNNER_NAME" || "$EXPECTED_RUNNER_NAME" != "$ACTUAL_RUNNER_NAME" || "$ACTUAL_RUNNER_OS" != "Linux" ]]; then
-            echo "MACBOOK_RUNNER_BINDING_MISMATCH" >&2
-            exit 2
-          fi
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -311,6 +286,5 @@ jobs:
           except Exception as exc:  # best effort: the hourly heartbeat covers a lost wake
               print(f"coordinator wake failed: {type(exc).__name__}")
           PY
-
 
 

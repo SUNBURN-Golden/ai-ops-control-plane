@@ -22,7 +22,8 @@ python3 engineering/mac_host/host.py guest-check
 ## 고정 명령 릴레이
 
 기존 보호 호스트에서 이어가는 인계 요청은 `execution_host: current`와 runner 이름
-생략을 명시할 수 있다. 기본값은 계속 `macbook`이다. `current`는 기존 workflow의
+생략을 명시할 수 있다. 기본값은 `current`이며 `macbook` 요청은
+`SHARED_ADMISSION_AUTHORITY_REQUIRED`로 전송 전에 거절한다. `current`는 기존 workflow의
 라우팅을 사용하며 Mac 네이티브 실행이나 소유권 이동이 아니다. 실제 전송 전 동일한
 보호 호스트·원장·runner qualification을 확인해야 한다. [인계 준비와 fixture 대조](../docs/MAC_HANDOFF_PREPARATION_KO.md)를 참고한다.
 
@@ -33,7 +34,11 @@ python3 engineering/mac_host/relay.py submit --request engineering/mac_host/exam
 python3 engineering/mac_host/relay.py submit --request request.json --execute
 ```
 
-전송에는 환경의 `GH_TOKEN`이 필요하다. 토큰을 명령문·JSON·저장소에 넣지 않는다. 실제 전송은 root workflow의 `execution_host=macbook`과 `expected_runner_name`을 지정한다. runner는 `self-hosted`, `astra-control-plane`, `aiops-macbook` 라벨과 정확한 runner 이름, Linux OS 검사를 모두 통과해야 한다.
+전송에는 환경의 `GH_TOKEN`이 필요하다. 토큰을 명령문·JSON·저장소에 넣지 않는다.
+두 runtime workflow의 Mac 라우팅 변경은 제거했고 기존 main 라우팅만 유지한다.
+[Mac 호스트 채택 결정](https://github.com/BeautifulMind-JT/ai-ops-control-plane/pull/77#issuecomment-6008874154)은 공유 admission authority가
+완성되기 전 VM 라우팅을 활성화하지 않는다. dispatcher가 보낸 runner 이름·라벨·OS
+비교는 같은 승인 원장의 증거가 아니다.
 
 `prepare`와 `submit` 기본 동작은 미리보기다. `--execute`만 한 번 전송한다. SQLite 전달 기록은 앱·레거시 엔진의 task admission 원장을 대신하지 않는다. 재전송에는 같은 request ID를 사용한다. 응답을 잃으면 UNKNOWN을 보관하고 자동으로 다시 전송하지 않는다. `status --refresh`는 확인된 workflow run 한 건을 한 번 조회하며 workflow 성공을 task DONE으로 해석하지 않는다.
 

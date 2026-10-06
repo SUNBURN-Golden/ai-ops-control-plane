@@ -79,10 +79,11 @@ def prepare(request):
         raise RelayError("UNKNOWN_REQUEST_FIELD")
     if not matches(request.get("request_id"), r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}"):
         raise RelayError("REQUEST_ID_REQUIRED")
-    execution_host = request.get("execution_host", "macbook")
+    execution_host = request.get("execution_host", "current")
     if execution_host == "macbook":
-        if not matches(request.get("runner_name"), r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"):
-            raise RelayError("EXACT_RUNNER_NAME_REQUIRED")
+        # D-2026-10-06-MAC-HOST adopts the host, not a second admission
+        # authority. A dispatcher-supplied name cannot qualify its ledger.
+        raise RelayError("SHARED_ADMISSION_AUTHORITY_REQUIRED")
     elif execution_host == "current":
         if "runner_name" in request: raise RelayError("UNEXPECTED_RUNNER_OVERRIDE")
     else:
@@ -107,10 +108,8 @@ def prepare(request):
         raise RelayError("ISSUE_NUMBER_REQUIRED")
     if "builder_id" in request and (operation != "preflight" or not isinstance(request["builder_id"], str) or request["builder_id"] not in LANES):
         raise RelayError("INVALID_PREFLIGHT_BUILDER")
-    inputs = {"execution_host": execution_host,
-              "target_repository": request["repository"], "operation": operation,
+    inputs = {"target_repository": request["repository"], "operation": operation,
               "program_args": canonical(args)}
-    if execution_host == "macbook": inputs["expected_runner_name"] = request["runner_name"]
     if issue is not None:
         inputs["issue_number"] = str(issue)
     if operation == "preflight":

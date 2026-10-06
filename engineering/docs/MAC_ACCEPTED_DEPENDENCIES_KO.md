@@ -11,6 +11,10 @@ canonical task와 delivery가 정상 `ACCEPTED`, 앱 job이 `accepted`여야 한
 인증된 GitHub Actions 읽기로 실제 merge 부모·tree·계획 ancestry·완료 CI를
 재확인한다. closed/merged 표시, 모델 PASS, 과거 legacy DONE은 증거가 아니다.
 
+ACCEPTED는 실제 두 부모를 가진 merge commit만 지원한다. 첫 부모는 검증된
+base SHA, 두 번째 부모는 검수한 정확한 PR HEAD여야 하며 tree도 일치해야 한다.
+Squash 또는 rebase 병합은 ACCEPTED가 아니므로 후속 의존 작업을 열지 않는다.
+
 검증 결과와 로컬 기록 fingerprint는 새 작업의 work에 고정한다. admission
 직전과 start 시 다시 대조하며, 누락·변조·다른 revision/HEAD·부분 실패는
 소유권 예약 전에 거부한다. 기존 완료 작업, 기록 및 UNKNOWN은 수정하지 않는다.

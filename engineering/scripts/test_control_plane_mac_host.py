@@ -29,7 +29,7 @@ relay, host = module('relay'), module('host')
 
 
 def request(operation='lanes', **fields):
-    return dict(schema_version=1, request_id='request-1', runner_name='aiops-macbook-01',
+    return dict(schema_version=1, request_id='request-1',
                 repository='BeautifulMind-JT/ZARI', operation=operation, **fields)
 
 
@@ -68,7 +68,8 @@ class RelaySchemaTests(unittest.TestCase):
                         expected.discard('target_repository')  # product-local source copy
                     self.assertLessEqual(expected, inputs)
                     self.assertIn('          - ' + case['operation'] + '\n', workflow)
-                    self.assertEqual(body['inputs']['execution_host'], 'macbook')
+                    self.assertNotIn('execution_host',body['inputs'])
+                    self.assertNotIn('expected_runner_name',body['inputs'])
 
     def test_rejects_ambiguous_or_injected_requests(self):
         base = request()
@@ -196,31 +197,26 @@ class ReceiptTests(unittest.TestCase):
 
 
 class RunnerBindingTests(unittest.TestCase):
-    def test_mac_requests_have_dedicated_label(self):
+    def test_mac_routing_is_absent_without_shared_admission(self):
         for path in [ROOT / '.github/workflows/control-plane-runtime.yml',
                      ROOT / 'engineering/.github/workflows/control-plane-runtime.yml']:
-            selector = next(line for line in path.read_text().splitlines() if line.startswith('    runs-on:'))
-            self.assertIn("inputs.execution_host == 'macbook'", selector)
-            self.assertIn('["self-hosted","astra-control-plane","aiops-macbook"]', selector)
+            text=path.read_text()
+            selector = next(line for line in text.splitlines() if line.startswith('    runs-on:'))
+            self.assertEqual(selector,'    runs-on: [self-hosted, astra-control-plane]')
+            self.assertNotIn('execution_host',text)
+            self.assertNotIn('aiops-macbook',text)
 
-    def test_real_shell_guard_refuses_wrong_host_before_checkout(self):
-        for path in [ROOT / '.github/workflows/control-plane-runtime.yml',
-                     ROOT / 'engineering/.github/workflows/control-plane-runtime.yml']:
-            text = path.read_text()
-            start = text.index('      - name: Verify selected MacBook runner')
-            stop = text.index('      - uses: actions/checkout', start)
-            block = text[start:stop]
-            script = '\n'.join(line[10:] for line in block.split('        run: |\n', 1)[1].splitlines())
-            cases = [('aiops-macbook-01', 'aiops-macbook-01', 'Linux', 0),
-                     ('aiops-macbook-01', 'old-grok', 'Linux', 2),
-                     ('', 'aiops-macbook-01', 'Linux', 2),
-                     ('aiops-macbook-01', 'aiops-macbook-01', 'macOS', 2)]
-            for expected, actual, system, code in cases:
-                with self.subTest(path=path, expected=expected, actual=actual, system=system):
-                    run = subprocess.run(['bash', '-c', script], env={**os.environ,
-                        'EXPECTED_RUNNER_NAME': expected, 'ACTUAL_RUNNER_NAME': actual, 'ACTUAL_RUNNER_OS': system},
-                        capture_output=True, text=True)
-                    self.assertEqual(run.returncode, code)
+    def test_even_an_exact_dispatcher_runner_name_cannot_send_mac_work(self):
+        api=FakeGitHub()
+        for name in ('aiops-macbook-01','qualified-looking-runner'):
+            with tempfile.TemporaryDirectory() as folder:
+                journal=relay.Journal(Path(folder)/'receipts')
+                try:
+                    with self.assertRaisesRegex(relay.RelayError,'SHARED_ADMISSION_AUTHORITY_REQUIRED'):
+                        relay.submit(request(execution_host='macbook',runner_name=name),journal,api)
+                    self.assertEqual(journal.db.execute('SELECT count(*) FROM requests').fetchone()[0],0)
+                    self.assertEqual(api.calls,[])
+                finally:journal.close()
 
 
 class MacHostTests(unittest.TestCase):
