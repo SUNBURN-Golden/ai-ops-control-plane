@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "request_id": "mac-lanes-001",
+  "repository": "BeautifulMind-JT/ZARI",
+  "operation": "lanes",
+  "execution_host": "current"
+}

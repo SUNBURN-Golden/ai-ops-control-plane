@@ -4,6 +4,10 @@
 
 This repo is the **operating system layer**: who may do what, where truth lives, how work is handed off, and how knowledge is promoted. It is not a case file store and not a CRM.
 
+**AIOPS Mac development candidate:** [설치·사용 안내](engineering/mac_app/README_KO.md) · [자율 개발 모드의 범위와 사용자 결정](engineering/docs/MAC_APP_AUTONOMY_KO.md). A local app UI, configurable Codex/Claude/Cursor/GLM/Grok Build/Devin planning/build/review/inspection roles, and a bot CLI/MCP drive work toward final human acceptance. Actual Mac installation and provider/host qualification remain required; this does not activate or replace the existing protected Linux runtime.
+
+[Mac 호스트 채택의 조건](engineering/docs/MAC_HOST_ADOPTION_KO.md): VM runner routing remains disabled until a shared admission authority is implemented and qualified. Mac generations bind the durable User decision and reject open canonical Linux ownership; this source candidate still requires its new-head A3 audit.
+
 ---
 
 ## 목적 / Purpose
