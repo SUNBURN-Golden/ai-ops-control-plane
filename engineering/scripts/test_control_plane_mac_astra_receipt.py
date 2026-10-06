@@ -83,7 +83,6 @@ class CommentReceiptTests(unittest.TestCase):
             with self.subTest(result=result,depth=depth), self.assertRaises(AppError): self.read()
         for old,new in (('VERIFIED_CONTRACT_CHANGE_REQUIRED: NO','VERIFIED_CONTRACT_CHANGE_REQUIRED: YES'),
                         ('AUDIT_RESULT: PASS','AUDIT_RESULT: FAIL'),
-                        ('AUDIT_ATTEMPT_ID: 1','AUDIT_ATTEMPT_ID: 2'),
                         ('gate=ARCHITECTURE','gate=MILESTONE'),
                         ('AUDIT_RESULT: PASS','AUDIT_RESULT: PASS\nAUDIT_RESULT: PASS')):
             self.comment=audit_comment(self.requirement);self.comment['body']=self.comment['body'].replace(old,new)
@@ -107,14 +106,28 @@ class CommentReceiptTests(unittest.TestCase):
             with self.subTest(field=field),self.assertRaises(AppError):self.read()
             self.pull=old
 
-    def test_later_same_head_contract_yes_or_shallow_pass_blocks_prior_pass(self):
-        for depth,contract in (('A3','YES'),('A2','NO')):
+    def test_later_same_head_contract_yes_blocks_prior_pass(self):
+        for depth,contract in (('A3','YES'),):
             later=audit_comment(self.requirement,cid=124,depth=depth)
             later['body']=later['body'].replace('VERIFIED_CONTRACT_CHANGE_REQUIRED: NO',
                                                'VERIFIED_CONTRACT_CHANGE_REQUIRED: '+contract)
             self.pages=[[self.comment,later]]
             with self.subTest(depth=depth,contract=contract),self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):
                 self.read()
+
+    def test_producer_model_attempt_and_optional_display_fields_are_not_pins(self):
+        self.comment['body']=self.comment['body'].replace('claude-fable-5-1','future-fable-model').replace('AUDIT_ATTEMPT_ID: 1','AUDIT_ATTEMPT_ID: 9')
+        self.comment['body']='\n'.join(line for line in self.comment['body'].splitlines() if not line.startswith(
+            ('AUDITED_MERGE_BASE_SHA:','AUDIT_RESULT:','VERIFIED_AUDIT_DEPTH:','AUDITED_HEAD_OR_EVIDENCE_SHA:')))
+        self.pages=[[self.comment]]
+        self.assertEqual(self.read()['result'],'PASS')
+
+    def test_other_gate_and_lower_depth_fail_or_pass_are_ignored(self):
+        for result,depth,gate in (('FAIL','A3','MILESTONE'),('FAIL','A2','ARCHITECTURE'),('PASS','A2','ARCHITECTURE')):
+            other=audit_comment(self.requirement,cid=124,result=result,depth=depth)
+            other['body']=other['body'].replace('gate=ARCHITECTURE','gate='+gate)
+            self.pages=[[self.comment,other]]
+            with self.subTest(result=result,depth=depth,gate=gate):self.assertEqual(self.read()['result'],'PASS')
 
 
 class DecisionReceiptTests(unittest.TestCase):
@@ -198,13 +211,19 @@ class JournalTests(unittest.TestCase):
         self.comment=audit_comment(changed,cid=124);self.pages=[[self.comment]]
         with self.assertRaisesRegex(AppError,'RECEIPT_REPLAY'):self.journal.consume(changed)
 
-    def test_audit_start_in_request_second_is_not_proven_after_request(self):
+    def test_audit_start_in_request_second_is_within_approved_clock_tolerance(self):
         document=self.journal.request(self.requirement)
         document['created_at']='2030-01-01T00:00:00Z'
         self.journal.db.execute('UPDATE mac_host_astra_requests SET document=? WHERE request_sha256=?',
                              (common.encoded(document),self.requirement['request_sha256']))
+        self.assertEqual(self.journal.consume(self.requirement)['comment']['result'],'PASS')
+
+    def test_audit_start_beyond_clock_tolerance_is_rejected(self):
+        document=self.journal.request(self.requirement);document['created_at']='2030-01-01T00:00:31Z'
+        self.journal.db.execute('UPDATE mac_host_astra_requests SET document=? WHERE request_sha256=?',
+                               (common.encoded(document),self.requirement['request_sha256']))
+        self.comment['created_at']=self.comment['updated_at']='2030-01-01T00:00:32Z';self.pages=[[self.comment]]
         with self.assertRaisesRegex(AppError,'RECEIPT_REPLAY'):self.journal.consume(self.requirement)
-        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_receipts').fetchone()[0],0)
 
     def test_observed_failure_survives_deletion_restart_and_new_same_head_request(self):
         self.pages=[[audit_comment(self.requirement,cid=124,result='FAIL')]]
@@ -241,19 +260,19 @@ class JournalTests(unittest.TestCase):
         # deletion; it blocks now, without fabricating a permanent observation.
         with patch('handoff.api',side_effect=temporarily_missing):
             with self.assertRaisesRegex(AppError,'RECEIPT_UNVERIFIED'):self.journal.consume(self.requirement)
-        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_holds').fetchone()[0],0)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_scoped_holds').fetchone()[0],0)
         self.assertEqual(receipts.Journal(self.store).consume(self.requirement),pinned)
         # Once the authenticated list confirms the pinned ID disappeared,
         # the persisted hold survives restoring the old content and a restart.
         self.pages=[[]]
         with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):self.journal.consume(self.requirement)
-        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_holds').fetchone()[0],1)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_scoped_holds').fetchone()[0],1)
         self.pages=[[self.comment]]
         with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):
             receipts.Journal(self.store).consume(self.requirement)
 
-    def test_observed_contract_yes_or_shallow_pass_is_a_durable_hold(self):
-        for depth,contract in (('A3','YES'),('A2','NO')):
+    def test_observed_contract_yes_is_a_durable_hold(self):
+        for depth,contract in (('A3','YES'),):
             with self.subTest(depth=depth,contract=contract):
                 changed=copy.deepcopy(self.requirement)
                 changed['request_binding']['head']=('e' if contract=='YES' else 'f')*40
@@ -267,6 +286,43 @@ class JournalTests(unittest.TestCase):
                 self.pages=[[audit_comment(changed,cid=124)]]
                 with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):
                     receipts.Journal(self.store).consume(changed)
+
+    def test_shallow_or_other_gate_audit_does_not_poison_new_qualifying_audit(self):
+        shallow=audit_comment(self.requirement,cid=124,result='FAIL',depth='A2')
+        unrelated=audit_comment(self.requirement,cid=125,result='FAIL')
+        unrelated['body']=unrelated['body'].replace('gate=ARCHITECTURE','gate=MILESTONE')
+        self.pages=[[shallow,unrelated]]
+        with self.assertRaisesRegex(AppError,'ASTRA_AUDIT_REQUIRED'):self.journal.consume(self.requirement)
+        self.pages=[[shallow,unrelated,self.comment]]
+        self.assertEqual(self.journal.consume(self.requirement)['comment']['comment_id'],123)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_scoped_holds').fetchone()[0],0)
+
+    def test_new_malformed_required_fields_are_retryable_and_actual_failure_persists(self):
+        malformed=copy.deepcopy(self.comment);malformed['body']=receipts.MARK+'\nold format'
+        self.pages=[[malformed]]
+        with self.assertRaisesRegex(AppError,'RECEIPT_UNVERIFIED'):self.journal.consume(self.requirement)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_host_astra_scoped_holds').fetchone()[0],0)
+        self.pages=[[self.comment]];self.journal.consume(self.requirement)
+        failed=audit_comment(self.requirement,cid=124,result='FAIL')
+        failed['body']='\n'.join(line for line in failed['body'].splitlines() if not line.startswith(
+            ('AUDIT_REQUEST_ID:','AUDIT_ATTEMPT_ID:','VERIFIED_CONTRACT_CHANGE_REQUIRED:')))
+        self.pages=[[self.comment,failed]]
+        with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):self.journal.consume(self.requirement)
+        self.pages=[[self.comment]]
+        with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):receipts.Journal(self.store).consume(self.requirement)
+
+    def test_legacy_proven_failure_is_migrated_but_only_blocks_original_gate(self):
+        document=self.journal.request(self.requirement)
+        failed=receipts.parse_comment(audit_comment(self.requirement,result='FAIL'),self.requirement)
+        held={'request_sha256':document['request_sha256'],'head':'a'*40,'code':'MAC_HOST_ASTRA_AUDIT_CONFLICT','evidence':failed}
+        self.journal.db.execute('INSERT INTO mac_host_astra_holds VALUES (?,?,?,?,?)',
+            ('owner/kix',2,'a'*40,held['code'],common.encoded(held)))
+        journal=receipts.Journal(self.store)
+        with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):journal.consume(self.requirement)
+        different=copy.deepcopy(self.requirement);different['request_binding']['gate']='MILESTONE'
+        different['request_sha256']=common.digest(different['request_binding'])
+        self.comment=audit_comment(different);self.pages=[[self.comment]]
+        self.assertEqual(journal.consume(different)['comment']['result'],'PASS')
 
     def test_new_head_or_pr_requires_a_new_audit_and_pinned_edits_do_not_get_replaced(self):
         self.journal.consume(self.requirement)
@@ -290,7 +346,7 @@ class JournalTests(unittest.TestCase):
         with self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):
             receipts.Journal(self.store).consume(self.requirement)
 
-    def test_second_authenticated_scan_preserves_new_edited_comment_observation(self):
+    def test_second_authenticated_scan_unverified_new_comment_is_retryable(self):
         edited=audit_comment(self.requirement,cid=124);edited['updated_at']='2030-01-01T00:01:00Z'
         count=0
         def changing_api(path,paginate=False):
@@ -300,10 +356,9 @@ class JournalTests(unittest.TestCase):
                 return [[copy.deepcopy(self.comment)]] if count==1 else [[copy.deepcopy(self.comment),edited]]
             return self.api(path,paginate=paginate)
         with patch('handoff.api',side_effect=changing_api):
-            with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):self.journal.consume(self.requirement)
+            with self.assertRaisesRegex(AppError,'RECEIPT_UNVERIFIED'):self.journal.consume(self.requirement)
         self.pages=[[self.comment]]
-        with self.assertRaisesRegex(AppError,'RECEIPT_CHANGED'):
-            receipts.Journal(self.store).consume(self.requirement)
+        self.assertEqual(receipts.Journal(self.store).consume(self.requirement)['comment']['result'],'PASS')
 
     def concurrent_hold(self,boundary):
         reads=0
