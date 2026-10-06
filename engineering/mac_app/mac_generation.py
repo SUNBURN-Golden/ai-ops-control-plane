@@ -98,22 +98,28 @@ def decision_evidence(pointer):
 def require_unowned_original(snapshot, program, node):
     require(snapshot.get('task_scope') == 'all' and isinstance(snapshot.get('tasks'), list),
             'MAC_HOST_HISTORY_INCOMPLETE')
+    proofs = []
     for task in snapshot['tasks']:
         require(isinstance(task, dict) and task.get('state') in ('open', 'closed'),
                 'MAC_HOST_HISTORY_INCOMPLETE')
-        # An open canonical projection is a hold even when its owner is only
-        # in a protected control record/comment. Missing task keys also hold.
+        # Open projections still hold unless an exact User-confirmed prestart
+        # failure proves this original task acquired no owner/session.
         if task['state'] == 'open':
-            require(task.get('program') and task.get('node') and
-                    original_task_key(task['program'],task['node']) != original_task_key(program,node),
+            require(task.get('program') and task.get('node'),
                     'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
+            if original_task_key(task['program'],task['node']) == original_task_key(program,node):
+                import mac_prestart
+                proofs.append(mac_prestart.verify(snapshot.get('repository', ''), task))
+    require(len(proofs) <= 1, 'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
+    return proofs
 
 
 def preflight(source, bound, snapshot):
     value = record(source, bound)
     require(decision_evidence(value['request']['decision']) == value['decision_evidence'],
             'MAC_GENERATION_DURABLE_DECISION_UNVERIFIED')
-    require_unowned_original(snapshot, bound['program'], bound['node'])
+    require(require_unowned_original(snapshot, bound['program'], bound['node']) ==
+            value.get('failed_prestart_evidence', []), 'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
 
 
 def claim(repo, task):
@@ -133,6 +139,9 @@ def record(source, bound):
     require(value.get('decision_evidence') == HOST_DECISION and
             value['request']['decision'] == HOST_DECISION['url'],
             'MAC_GENERATION_DURABLE_DECISION_REQUIRED')
+    import mac_prestart
+    require(value.get('failed_prestart_evidence', []) in ([], [mac_prestart.evidence()]),
+            'MAC_GENERATION_BINDING_INVALID')
     return value
 
 
@@ -163,7 +172,7 @@ def adopt(source, value):
             hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == original['blob'],
             'MAC_HOST_PROGRAM_REVISION_CHANGED')
     scope = load_scope(raw, snapshot['repository'], original['blob'])
-    require_unowned_original(snapshot, scope['program'], value['node'])
+    prestart = require_unowned_original(snapshot, scope['program'], value['node'])
     approval = decision_evidence(value['decision'])
     matches = [n for n in scope['nodes'] if n['id'] == value['node']]
     require(len(matches) == 1, 'MAC_GENERATION_NODE_NOT_FOUND')
@@ -231,6 +240,7 @@ def adopt(source, value):
                      'generation_id': value['generation_id']}
             document = {'request': request, 'binding': bound, 'program': program, 'source_host': source.source_host,
                         'decision_evidence': approval,
+                        'failed_prestart_evidence': prestart,
                         'policy': copy.deepcopy(POLICY), 'original_task': work['original_task'],
                         'legacy_claims': sorted({digest(c) for c in legacy} | {r[0] for r in db.execute(
                             'SELECT id FROM mac_host_external WHERE repository=?',(repo,))}),
@@ -252,8 +262,11 @@ def check_external(source, bound):
     original = value['original_task']['task_id']
     for row in source.store.db.execute('SELECT id,document FROM mac_host_external WHERE repository=? AND task IN (?,?,?)',
                                       (bound['repository'].lower(), original, bound['task_id'], '*')):
-        require_unowned_original({'task_scope': 'all', 'tasks': [parse_json(row['document'])['task']]},
-                                 bound['program'], bound['node'])
+        proofs = require_unowned_original({'repository': bound['repository'], 'task_scope': 'all',
+                                          'tasks': [parse_json(row['document'])['task']]},
+                                         bound['program'], bound['node'])
+        require(not proofs or proofs == value.get('failed_prestart_evidence', []),
+                'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
         require(row['id'] in value['legacy_claims'], 'MAC_GENERATION_EXTERNAL_CHANGE_UNRESOLVED')
     acknowledged = {digest(r) for r in value['legacy_receipts']}
     for fence in transport_guard.unresolved(source.store.directory, include_digest=True):
