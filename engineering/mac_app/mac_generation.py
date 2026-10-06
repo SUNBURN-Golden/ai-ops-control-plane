@@ -134,6 +134,7 @@ def record(source, bound):
     return value
 
 
+@handoff.bounded_api_reads
 def adopt(source, value):
     require(source.authority_initialized, 'MAC_HOST_NOT_INITIALIZED')
     require(isinstance(value, dict) and set(value) == FIELDS, 'MAC_GENERATION_REQUEST_INVALID')

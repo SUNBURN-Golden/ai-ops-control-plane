@@ -96,11 +96,13 @@ run을 실제 순서와 구별하지 못하는 한계는 남는다. 이미 소�
 관련 FAIL과 이미 검증한 댓글의 수정·삭제를 정정으로 간주해 해제하지 않는다.
 
 A3 admission과 의존 작업 live 재검증은 일부 경로에서 `Store.lock`과 `app.sqlite3`의
-`BEGIN IMMEDIATE`를 유지한 채 GitHub를 읽는다. `handoff.api`가 사용하는 기존
-`gitops.execute`는 단일 gh 호출에 120초 timeout을 적용하며 timeout도 fail-closed다.
-여러 조회의 합계에 대한 deadline은 없다. 지연·timeout 동안 다른 원장 쓰기나 UI 요청이
-기다릴 수 있으며 별도 감사 DB가 이 잠금 시간을 줄여 주지는 않는다. 이 수리는 기존
-timeout·owner 직렬화·예약 정책을 바꾸지 않는다.
+`BEGIN IMMEDIATE`를 유지한 채 GitHub를 읽는다. Mac admission, 원장 operation,
+감사·inspect 검증은 monotonic clock의 합산 30초 API 조회 예산을 공유한다. 중첩 호출은
+예산을 갱신하지 않으며 각 gh GET에는 남은 시간만 timeout으로 넘긴다. 늦게 도착한
+응답도 거부한다. timeout은 재시도 가능한 미확인이고 바깥 원장 transaction은 rollback한다.
+잠금 대기도 예산을 소모하지만 Python 잠금·SQLite 대기를 강제 중단하거나 전체 operation의
+wall time이 30초 이하라고 보장하지 않는다. 로컬 검증 시간도 예산에 포함되며 budget 밖
+일반 호출의 기존 120초 timeout은 유지한다. owner 직렬화와 예약 정책은 그대로다.
 
 변경은 Mac source/tests/docs다. `control_plane_host*`, hostpack, boundary, sudoers와
 `aiops-fable`은 그대로다. 합성 GitHub 응답과 private fixture process/receipt로 admission,

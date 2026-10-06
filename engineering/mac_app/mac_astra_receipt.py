@@ -53,6 +53,7 @@ def body_hash(body):
     return hashlib.sha256(body.encode('utf-8')).hexdigest()
 
 
+@handoff.bounded_api_reads
 def decision_evidence():
     comment = api('repos/BeautifulMind-JT/ai-ops-control-plane/issues/comments/' + str(DECISION['comment_id']))
     require(trusted_actor(comment) and comment.get('id') == DECISION['comment_id'] and
@@ -171,6 +172,7 @@ def parse_comment(comment, requirement):
             'audit_request_id':run or 'comment-'+str(comment['id']), 'contract_change_required': contract}
 
 
+@handoff.bounded_api_reads
 def read_receipt(requirement, comment_id, *, expected=None, journal=None):
     require(type(comment_id) is int and comment_id > 0)
     decision_evidence(); live_pr(requirement)
@@ -308,6 +310,7 @@ class Journal:
         for row in held:
             if DEPTHS.index(row['depth'])>=DEPTHS.index(request['requested_depth']):raise AppError(row['code'])
 
+    @handoff.bounded_api_reads
     def observe(self, requirement):
         repo,number,request=context(requirement)
         key=(repo.lower(),number,request['head'],request['gate'])
@@ -342,6 +345,7 @@ class Journal:
                 self.hold(requirement,'MAC_HOST_ASTRA_AUDIT_CONFLICT',value)
         return values
 
+    @handoff.bounded_api_reads
     def request(self, requirement):
         _, _, request = context(requirement)
         sha = requirement.get('request_sha256')
@@ -363,6 +367,7 @@ class Journal:
                 self.db.execute('INSERT INTO mac_host_astra_requests VALUES (?,?)', (sha, encoded(document)))
         return document
 
+    @handoff.bounded_api_reads
     def consume(self, requirement):
         document = self.request(requirement); sha = document['request_sha256']
         repo, number, request = context(requirement)

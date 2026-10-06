@@ -56,6 +56,37 @@ def snapshot():
         return handoff.inspect_repository(REPO)
 
 
+class ApiBudgetTests(unittest.TestCase):
+    def test_nested_reads_share_remaining_time_and_discard_late_response(self):
+        clock=[0.0]; timeouts=[]
+        def execute(args, **kwargs):
+            timeouts.append(kwargs['timeout']);clock[0]+=16
+            return '{}'
+        with mock.patch.object(handoff.time,'monotonic',side_effect=lambda:clock[0]),mock.patch.object(handoff,'execute',side_effect=execute):
+            with handoff.api_read_budget():
+                handoff.api('fixture/first')
+                with handoff.api_read_budget():
+                    with self.assertRaises(common.AppError) as error:handoff.api('fixture/second')
+                    self.assertEqual(error.exception.code,'COMMAND_TIMEOUT')
+                with self.assertRaises(common.AppError):handoff.api('fixture/expired')
+        self.assertEqual(timeouts,[30,14])
+
+    def test_budget_is_context_local_and_restored_after_failure(self):
+        with mock.patch.object(handoff.time,'monotonic',return_value=0),mock.patch.object(handoff,'execute',return_value='{}') as execute:
+            with self.assertRaises(RuntimeError),handoff.api_read_budget():
+                with mock.patch.object(handoff.time,'monotonic',return_value=15):
+                    self.assertEqual(handoff.remaining_api_seconds(),15)
+                    observed=[]
+                    def independent():
+                        observed.append(handoff.remaining_api_seconds())
+                        with handoff.api_read_budget():observed.append(handoff.remaining_api_seconds())
+                    thread=threading.Thread(target=independent);thread.start();thread.join(timeout=5)
+                    self.assertFalse(thread.is_alive());self.assertEqual(observed,[None,30])
+                raise RuntimeError('fixture')
+            handoff.api('fixture/outside-budget')
+            self.assertEqual(execute.call_args.kwargs,{})
+
+
 class RepositoryTests(unittest.TestCase):
     def inspect(self, values):
         with mock.patch.object(handoff, 'execute', side_effect=[json.dumps(x) for x in values]) as command:
