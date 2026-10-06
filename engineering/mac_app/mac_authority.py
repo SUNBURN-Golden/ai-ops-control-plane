@@ -121,6 +121,13 @@ class LocalSource:
         with self.store.lock:
             self.store.db.execute('BEGIN IMMEDIATE')
             try:
+                # register and generation are two entrypoints to the same
+                # original node. Serialize both directions of admission.
+                for owned in self.store.db.execute('SELECT binding FROM mac_host_tasks WHERE repository=?',(repo,)):
+                    owner=parse_json(owned['binding'])
+                    require(not('generation_id' in owner and str(owner.get('program','')).upper()==scope['program'].upper() and
+                                str(owner.get('node','')).upper() in {n.upper() for n in scope['node_ids']}),
+                            'MAC_HOST_ORIGINAL_TASK_ALREADY_OWNED')
                 previous=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',(repo,)).fetchone()
                 if previous:
                     require(parse_json(previous[0])==record,'MAC_HOST_PROGRAM_REVISION_CHANGED')

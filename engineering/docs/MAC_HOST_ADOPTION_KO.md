@@ -20,7 +20,9 @@ MAC-* generation의 `decision`에는 위 결정 댓글의 정확 URL을 넣어�
 본문 밖의 보호 원장·댓글에 있거나 node를 판별할 수 없는 열린 이슈도 fail-closed로
 거절한다. adoption, 시작 전, checkout 준비 후 claim 전에 전체 GitHub 관측을 대조한다.
 같은 원래 노드에 두 번째 Mac generation/등록 task도 SQLite single-writer transaction
-안에서 거절한다. 이 검사는 명시적 Linux 이관·기존 실행 종료 증거를 만들지 않는다.
+안에서 canonical 대소문자를 정규화해 양쪽 등록 순서 모두 거절한다.
+GitHub 관측은 cross-host atomic lock 증거가 아니며 공유 admission authority를
+구현했다고 주장하지 않는다. 이 검사는 명시적 Linux 이관·기존 실행 종료 증거를 만들지 않는다.
 
 새 source HEAD의 A3 재감사는 별도로 필요하다. 이 문서는 감사 PASS, 실제 설치,
 VM 활성화 또는 보호 호스트 admission qualification을 주장하지 않는다.

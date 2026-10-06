@@ -208,7 +208,8 @@ def adopt(source, value):
                     'MAC_HOST_LOCAL_WORK_BUSY')
             for row in db.execute('SELECT binding FROM mac_host_tasks WHERE repository=?', (repo,)):
                 owner = parse_json(row['binding'])
-                require((owner.get('program'), owner.get('node')) != (scope['program'], node['id']),
+                require((str(owner.get('program','')).upper(), str(owner.get('node','')).upper()) !=
+                        (scope['program'].upper(), node['id'].upper()),
                         'MAC_GENERATION_ORIGINAL_TASK_ALREADY_OWNED')
             if dependencies:
                 from mac_pipeline import Pipeline

@@ -1,6 +1,7 @@
 """Isolated fixture generation contracts, not actual product/account evidence."""
 import concurrent.futures
 import copy
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -136,6 +137,34 @@ class MacGenerationTests(unittest.TestCase):
         self.assertEqual(results.count('ADOPTED'),1)
         self.assertIn('MAC_GENERATION_ORIGINAL_TASK_ALREADY_OWNED',results)
         self.assertEqual(len(self.source.tasks('owner/kix')),1);self.assertEqual(self.worker.launched,0)
+    def test_register_after_generation_cannot_add_a_second_original_record(self):
+        self.adopt();before=list(self.store.db.iterdump())
+        with self.assertRaisesRegex(common.AppError,'ORIGINAL_TASK_ALREADY_OWNED'):
+            self.source.register(self.latest)
+        self.assertEqual(list(self.store.db.iterdump()),before);self.assertEqual(self.worker.launched,0)
+    def test_concurrent_register_and_generation_admit_only_one_original_record(self):
+        def admit(kind):
+            try:
+                self.adopt() if kind=='generation' else self.source.register(self.latest)
+                return 'ADMITTED'
+            except common.AppError as exc:return exc.code
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:results=list(pool.map(admit,['generation','register']))
+        self.assertEqual(results.count('ADMITTED'),1)
+        self.assertEqual(sum('ORIGINAL_TASK_ALREADY_OWNED' in v for v in results),1)
+        self.assertEqual(len(self.source.tasks('owner/kix')),1);self.assertEqual(self.worker.launched,0)
+    def test_case_only_plan_change_cannot_duplicate_the_canonical_original(self):
+        self.adopt()
+        raw=common.parse_json(self.latest['source']['raw_program'])
+        raw['program']=raw['program'].lower()
+        for node in raw['nodes']:node['id']=node['id'].lower()
+        data=common.encoded(raw);self.latest['source']['raw_program']=data
+        self.latest['source']['blob']=hashlib.sha1(b'blob '+str(len(data.encode())).encode()+b'\0'+data.encode()).hexdigest()
+        self.latest['source']['head']='d'*40;before=list(self.store.db.iterdump())
+        with self.assertRaisesRegex(common.AppError,'ORIGINAL_TASK_ALREADY_OWNED'):
+            self.source.generation(self.value(2,node='conformance'))
+        with self.assertRaisesRegex(common.AppError,'ORIGINAL_TASK_ALREADY_OWNED'):
+            self.source.register(self.latest)
+        self.assertEqual(list(self.store.db.iterdump()),before);self.assertEqual(self.worker.launched,0)
     def test_generation_replay_is_read_only_and_cannot_repin_or_change_decision(self):
         value=self.value();bound=self.source.generation(value)
         before=[tuple(r) for r in self.store.db.execute('SELECT * FROM mac_host_generations')]

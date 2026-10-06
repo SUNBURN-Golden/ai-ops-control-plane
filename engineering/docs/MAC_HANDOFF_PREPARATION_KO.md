@@ -140,9 +140,10 @@ SUBMITTING·UNKNOWN, 확인되지 않은 종료, 로컬 미확정 상태는 보�
 
 `preview-start`는 일치하는 CREATED 노드와 열린 canonical 이슈에 한해 **기존 호스트에서 이어가기 위한**
 relay 요청을 만든다. 직접 lane·모델·worker·launch packet을 지정하지 않는다.
-이 요청의 `execution_host: current`는 기존 root workflow가 이미 지원하는 라우팅이다.
+이 요청의 `execution_host: current`는 기존 root workflow의 라우팅을 사용한다.
 `engineering/mac_host/relay.py prepare`로 해당 요청을 추가 검증할 수 있다.
-기존 relay의 기본값은 계속 `macbook`이며 그 모드는 정확한 runner 이름을 요구한다.
+relay의 기본값은 `current`다. 공유 admission authority가 없으므로 `macbook` 요청은
+정확한 runner 이름을 입력해도 전송 전에 거절한다.
 `current`에는 runner override를 넣을 수 없다.
 
 실제 전송 단계에서는 기존 `control_plane_program.start`가 최신 프로그램·canonical
