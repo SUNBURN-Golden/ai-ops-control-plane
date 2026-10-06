@@ -167,7 +167,9 @@ def read_receipt(requirement, comment_id, *, expected=None):
             if header[2] != request['head']:
                 continue
             other = parse_comment(item, requirement)
-            require(other['result'] == evidence['result'], 'MAC_HOST_ASTRA_AUDIT_CONFLICT')
+            require(other['result'] == evidence['result'] and other['contract_change_required'] == 'NO' and
+                    DEPTHS.index(other['depth']) >= DEPTHS.index(request['requested_depth']),
+                    'MAC_HOST_ASTRA_AUDIT_CONFLICT')
     require(found, 'MAC_HOST_ASTRA_RECEIPT_CHANGED')
     live_pr(requirement)
     return evidence

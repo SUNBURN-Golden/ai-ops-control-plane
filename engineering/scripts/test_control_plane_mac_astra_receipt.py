@@ -107,6 +107,15 @@ class CommentReceiptTests(unittest.TestCase):
             with self.subTest(field=field),self.assertRaises(AppError):self.read()
             self.pull=old
 
+    def test_later_same_head_contract_yes_or_shallow_pass_blocks_prior_pass(self):
+        for depth,contract in (('A3','YES'),('A2','NO')):
+            later=audit_comment(self.requirement,cid=124,depth=depth)
+            later['body']=later['body'].replace('VERIFIED_CONTRACT_CHANGE_REQUIRED: NO',
+                                               'VERIFIED_CONTRACT_CHANGE_REQUIRED: '+contract)
+            self.pages=[[self.comment,later]]
+            with self.subTest(depth=depth,contract=contract),self.assertRaisesRegex(AppError,'AUDIT_CONFLICT'):
+                self.read()
+
 
 class DecisionReceiptTests(unittest.TestCase):
     def test_live_decision_actor_body_url_and_edit_checks(self):
