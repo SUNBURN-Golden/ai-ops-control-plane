@@ -334,7 +334,8 @@ class LocalSource:
             previous=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',(repo,)).fetchone()
             require(previous is not None,'MAC_HOST_PROGRAM_NOT_FOUND')
             original=previous[0]
-        snapshot=handoff.inspect_repository(repo, existing_subject=True)
+        canonical_repository=parse_json(original)['scope']['repository']
+        snapshot=handoff.inspect_repository(canonical_repository, existing_subject=True)
         with self.store.lock:
             previous=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',(repo,)).fetchone()
             require(previous is not None and previous[0]==original,'MAC_HOST_PROGRAM_REVISION_CHANGED')
