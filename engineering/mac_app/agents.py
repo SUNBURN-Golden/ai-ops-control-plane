@@ -77,7 +77,7 @@ def prompt(job, role, head):
         'reviewer': 'You are a fresh, independent, non-author reviewer. Do not modify any file. Independently inspect the actual source and diff from base_sha to the exact head below, applicable contracts, acceptance criteria and available test evidence. Do not trust the writer summary as proof. Return fail for unresolved defects or insufficient evidence, needs_user for a consequential required decision, and complete only for a passing review of this exact head. covered_tasks must list every planned task id. plan must be null.',
         'supervisor': 'You are the independent final inspector, not the planner or writer. Do not modify any file. Read the original repository deliverable specifications yourself. Check the entire current diff, every planned task, cross-task integration, tests and user-visible usability. Find omissions in the plan as well as implementation defects. Return complete only if ALL source-defined deliverables and the user goal are satisfied at this exact head. covered_tasks must list every task id. Missing live credentials/evidence is not a passing result. plan must be null.',
     }[role]
-    context = {key: job.get(key) for key in ('id', 'repository', 'goal', 'base_sha', 'plan', 'source_pins', 'program_scope', 'feedback', 'user_answers', 'generation_policy', 'generation_decision', 'host_preparation')}
+    context = {key: job.get(key) for key in ('id', 'repository', 'goal', 'base_sha', 'plan', 'source_pins', 'program_scope', 'feedback', 'user_answers', 'generation_policy', 'generation_decision', 'host_preparation', 'bundle')}
     context.update(role=role, exact_head=head, current_task=task)
     if role=='supervisor' and job.get('native_lineage'):
         context.update(candidate_pr=job.get('pr_url'),hosted_ci=job.get('ci'),
@@ -129,7 +129,13 @@ def prompt(job, role, head):
                             'Read authoritative documents at that pin before editing. Git metadata is host-owned and read-only; '
                             'do not repeat fetch, commit, push, checkout, or other metadata writes. Technical gates remain unchanged.')
         context['canonical_binding']=job['native_lineage']['binding']
-        instruction += (' This delivery is exactly one admitted original program node. The full original program is context, '
+        if job.get('bundle'):
+            instruction += (' This is one admitted bundle and one writer/branch/PR. Preserve every member spec and internal dependency. '
+                            'For complete, covered_tasks must equal all member IDs in order and checks must include executed '
+                            'evidence prefixed node:<id>: for each. A member run is not completion of dependencies. '
+                            'Keep unresolved decisions blocked. Do not claim original jobs accepted. Review the whole bundle and integration.')
+        else:
+            instruction += (' This delivery is exactly one admitted original program node. The full original program is context, '
                         'not authority to implement or claim completion of other nodes. Its canonical dependencies are separately gated by the Mac host. '
                         'Retain the original node spec and do not replan. Review only this node and its integration with admitted dependencies.')
         if 'generation_id' in job['native_lineage']['binding']:
@@ -204,7 +210,9 @@ def command(profile, role, attempt_dir, *, checkout=None):
     model = ['--model', profile['model']] if profile['model'] else []
     folder = Path(attempt_dir)
     if provider == 'codex':
-        return [cli, '-a', 'never', 'exec', '--json', '--ephemeral', '--color', 'never',
+        from product_builder import options
+        tuning = sum((['-c', k+'='+json.dumps(v)] for k,v in options(profile).items()), [])
+        return [cli, '-a', 'never', *tuning, 'exec', '--json', '--ephemeral', '--color', 'never',
                 '--sandbox', 'workspace-write' if writing else 'read-only',
                 '-c', 'sandbox_workspace_write.network_access=true' if writing else 'sandbox_workspace_write.network_access=false',
                 '--output-schema', str(folder / 'schema.json'), '--output-last-message', str(folder / 'last-message.json'),
@@ -413,7 +421,8 @@ def completion(profile, folder):
             # native field is camelCase (unlike streaming-messages-json).
             report = wrapper.get('structuredOutput'); sid = 'grok-cli:' + wrapper['sessionId']
         else: raise AppError('UNSUPPORTED_PROVIDER')
-    return {'report': validate_report(report), 'session_id': sid,
+    from product_builder import evidence
+    return {**evidence(profile), 'report': validate_report(report), 'session_id': sid,
             'harness': CATALOG[provider]['harness'], 'provider': provider, 'model_requested': profile['model']}
 
 

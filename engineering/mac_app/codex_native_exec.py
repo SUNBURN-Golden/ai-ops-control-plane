@@ -45,7 +45,8 @@ def qualified_cli():
 
 
 def overrides(request,name,profile,runtime):
-    return {'default_permissions':name,'permissions.'+name:profile,'analytics.enabled':False,
+    from product_builder import options
+    return {**options(request['profile']), 'default_permissions':name,'permissions.'+name:profile,'analytics.enabled':False,
         'model_provider':'openai','web_search':'disabled','mcp_servers':{},'notify':[],
         'shell_environment_policy':{'inherit':'core','set':{
             'PATH':agents.environment().get('PATH','/usr/bin:/bin'),
@@ -155,6 +156,15 @@ class Driver:
             self.proof['profile_checks']=bound_profile(read,listed,self.name,self.profile,
                 self.values['shell_environment_policy']['set']['PATH'],
                 self.values['shell_environment_policy']['set'])
+            from product_builder import options
+            tuning=options(self.request['profile'])
+            sdk.require(all(read['config'].get(k)==v for k,v in tuning.items()))
+            if tuning:
+                models=protocol.rpc('model/list',{'includeHidden':True})
+                matches=[m for m in models.get('data',[]) if m.get('model')==self.request['profile']['model']]
+                sdk.require(len(matches)==1 and any(e.get('reasoningEffort')=='high' for e in matches[0].get('supportedReasoningEfforts',[])) and
+                    any(t.get('id')==tuning['service_tier'] for t in matches[0].get('serviceTiers',[])))
+                self.proof['builder_options_verified']=tuning
             features=protocol.rpc('experimentalFeature/list',{'limit':1000})
             self.proof['feature_checks']={key:any(v.get('name')==key and v.get('enabled') is False
                 for v in features['data']) for key in FEATURES};self.save()

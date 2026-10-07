@@ -106,8 +106,20 @@ class Store:
 
     def set_settings(self, value):
         value = validate_settings(value)
-        with self.lock: self.db.execute('UPDATE settings SET value=? WHERE id=1', (encoded(value),))
+        with self.lock:
+            previous = self.settings()
+            if 'product_builders' not in value and 'product_builders' in previous:
+                value['product_builders'] = copy.deepcopy(previous['product_builders'])
+            self.db.execute('UPDATE settings SET value=? WHERE id=1', (encoded(value),))
         return value
+
+    def product_builder(self, value):
+        from product_builder import validate
+        selected = validate(value)
+        with self.lock:
+            settings = self.settings()
+            settings['product_builders'] = selected
+            return self.set_settings(settings)
 
     def jobs(self):
         with self.lock:
@@ -291,7 +303,8 @@ class Store:
             elif action == 'reconfigure':
                 if job['state'] not in ('paused', 'needs_user', 'waiting_provider') or job['attempt']:
                     raise AppError('PAUSE_BEFORE_MODEL_CHANGE')
-                settings = self.settings()
+                from product_builder import resolve
+                settings = resolve(self.settings(),job['repository'])
                 if job.get('native_lineage') and settings['roles']['builder']!=job['settings']['roles']['builder']:
                     raise AppError('MAC_HOST_OWNER_PROFILE_IMMUTABLE')
                 phase = 'reviewing' if job['phase'] in ('reviewing', 'supervising', 'publishing', 'verifying') else job['phase']
@@ -786,7 +799,14 @@ class Engine:
                 provider_evidence.get('harness') != agents.CATALOG[profile['provider']]['harness'] or
                 provider_evidence.get('model_requested') != profile['model']):
             raise AppError('PROVIDER_PROFILE_MISMATCH')
+        from product_builder import matches
+        if not matches(profile, provider_evidence): raise AppError('PROVIDER_PROFILE_MISMATCH')
         agents.validate_report(report)
+        if job.get('bundle'):
+            import mac_bundle
+            try: mac_bundle.validate_report(report, job['bundle'])
+            except AppError as exc:
+                report=dict(report,status='fail',findings=[exc.code])
         if role=='builder' and job.get('native_lineage'):
             self.store.update(job['id'],builder_sessions=[*job.get('builder_sessions',[]),provider_evidence.get('session_id')])
         if report['status'] == 'complete' and (report['findings'] or report['question'].strip() or
@@ -848,6 +868,9 @@ class Engine:
                 'acceptance': ['모든 피드백 해결', '전체 회귀 검증 통과'], 'depends_on': []} if job['correcting'] else job['plan']['tasks'][job['task_index']]
         if job.get('native_lineage') and job['correcting']:
             task = copy.deepcopy(job['plan']['tasks'][0])
+            if job.get('bundle'):
+                task['instructions']='Complete the entire frozen bundle, preserving internal dependency order:\n'+encoded(job['bundle'])
+                task['id']=job['bundle']['id']
             task['instructions'] += '\n\nResolve all supplied findings and re-run the original node verification. Preserve this node identity and complete original spec.'
         return task
 
@@ -857,7 +880,8 @@ class Engine:
         built = list(job['built_tasks'])
         if not job['correcting'] or (job.get('native_lineage') and task['id'] not in built):
             built.append(task['id'])
-        index = 1 if job.get('native_lineage') else job['task_index'] if job['correcting'] else job['task_index'] + 1
+        if job.get('bundle'): built=[n['id'] for n in job['plan']['tasks']]
+        index = len(job['plan']['tasks']) if job.get('native_lineage') else job['task_index'] if job['correcting'] else job['task_index'] + 1
         phase = 'reviewing' if job['correcting'] or index >= len(job['plan']['tasks']) else 'building'
         self.store.update(job['id'], head=head, built_tasks=built, task_index=index, phase=phase, state=phase,
                           feedback=[], correcting=False, review=None, supervision=None, ci=None, checkpoint_retry=None)
@@ -880,6 +904,11 @@ class Engine:
         receipt = self.pipeline.source.private_receipt(folder, {'id': retry['attempt'], 'binding': binding})
         actor = receipt.get('provider_evidence') or {}; report = receipt.get('report') or {}
         agents.validate_report(report)
+        if job.get('bundle'):
+            import mac_bundle
+            mac_bundle.validate_report(report,job['bundle'])
+        from product_builder import matches
+        if not matches(profile, actor): raise AppError('PROVIDER_PROFILE_MISMATCH')
         sid = actor.get('session_id'); writers = job.get('builder_sessions') or []
         if (request.get('attempt_id') != retry['attempt'] or request.get('binding') != binding or
             request.get('role') != 'builder' or request.get('profile') != profile or

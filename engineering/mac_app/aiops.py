@@ -85,6 +85,10 @@ class Application:
         if not isinstance(source,mac_authority.LocalSource): raise AppError('MAC_HOST_ADAPTER_REQUIRED')
         if operation=='initialize': return source.initialize(value)
         if operation=='generation': return source.generation(value)
+        if operation=='product-builder': return self.store.product_builder(value)
+        if operation=='bundle-prepare':
+            import mac_bundle
+            return mac_bundle.prepare(source,value)
         if operation=='receipt-scope': return source.annotate_receipt(value)
         if operation=='advance-base': return source.advance_base(value)
         if operation=='stop':
@@ -324,7 +328,7 @@ def client(directory, path, value=None, owner=False):
         def redirect_request(self, *args): raise AppError('REDIRECT_REFUSED')
     try:
         # Handoff observation can need four bounded GitHub reads, including pagination.
-        timeout = 600 if value is not None and path in ('/api/handoffs', '/api/handoffs/inspect', '/api/canonical/start','/api/host/register','/api/host/generation','/api/host/start') else 20
+        timeout = 600 if value is not None and path in ('/api/handoffs', '/api/handoffs/inspect', '/api/canonical/start','/api/host/register','/api/host/generation','/api/host/bundle-prepare','/api/host/start') else 20
         with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(req, timeout=timeout) as response:
             return parse_json(response.read(16777217).decode(), 16777216)
     except urllib.error.HTTPError as exc:
@@ -423,6 +427,9 @@ def main(argv=None):
     host_gen.add_argument('--repo',required=True); host_gen.add_argument('--node',required=True)
     host_gen.add_argument('--generation-id',required=True); host_gen.add_argument('--decision',required=True)
     host_gen.add_argument('--plan-commit',required=True); host_gen.add_argument('--plan-blob',required=True)
+    for name in ('bundle-prepare','product-builder'):
+        host_actions.add_parser(name).add_argument('--input',type=Path,required=True)
+    host_gen.add_argument('--bundle',type=Path)
     for name in ('register','tasks'):
         host_actions.add_parser(name).add_argument('--repo',required=True)
     host_start=host_actions.add_parser('start'); host_start.add_argument('--repo',required=True)
@@ -480,12 +487,14 @@ def main(argv=None):
                 if operation=='initialize': value={'mode':args.mode,'decision':args.decision}
                 elif operation=='generation': value={'repository':args.repo,'node':args.node,'generation_id':args.generation_id,
                     'decision':args.decision,'plan_commit':args.plan_commit,'plan_blob':args.plan_blob}
+                elif operation in ('bundle-prepare','product-builder'): value=read_json(args.input,262144)
                 elif operation=='receipt-scope': value=read_json(args.association,65536)
                 elif operation=='start': value={'repository':args.repo,'task_id':args.task,'request_id':args.request_id}
                 elif operation=='stop': value={'request_id':args.request_id}
                 elif operation in ('reconcile-accepted','retry-delivery'): value={'repository':args.repo,'task_id':args.task}
                 elif operation=='advance-base': value={'repository':args.repo,'decision':args.decision}
                 else: value={'repository':args.repo}
+                if operation=='generation' and args.bundle: value['bundle']=read_json(args.bundle,65536)
                 result=client(args.data_dir,'/api/host/'+operation,value,owner=True)
         elif args.command == 'handoff':
             if args.handoff_command == 'inspect':

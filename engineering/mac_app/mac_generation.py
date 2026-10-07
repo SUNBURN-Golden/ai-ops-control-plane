@@ -18,6 +18,7 @@ from program_scope import load_scope
 import handoff
 from repository_identity import url_matches, same_repository, canonical_url
 import transport_guard
+import mac_bundle
 
 
 @handoff.bounded_api_reads
@@ -119,8 +120,13 @@ def preflight(source, bound, snapshot):
     value = record(source, bound)
     require(decision_evidence(value['request']['decision']) == value['decision_evidence'],
             'MAC_GENERATION_DURABLE_DECISION_UNVERIFIED')
-    require(require_unowned_original(snapshot, bound['program'], bound['node']) ==
-            value.get('failed_prestart_evidence', []), 'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
+    nodes = value['request'].get('bundle', {}).get('nodes', [bound['node']])
+    proofs = []
+    for node in nodes: proofs.extend(require_unowned_original(snapshot, bound['program'], node))
+    require(proofs == value.get('failed_prestart_evidence', []), 'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
+    if 'bundle' in value['request']:
+        require(mac_bundle.decision()==value['bundle_decision'], 'MAC_BUNDLE_DECISION_UNVERIFIED')
+        mac_bundle.check_receipts(source, value['program']['scope'], nodes)
 
 
 def claim(repo, task):
@@ -140,6 +146,15 @@ def record(source, bound):
     require(value.get('decision_evidence') == HOST_DECISION and
             value['request']['decision'] == HOST_DECISION['url'],
             'MAC_GENERATION_DURABLE_DECISION_REQUIRED')
+    if 'bundle' in value['request']:
+        task, packet = mac_bundle.aggregate(value['program']['scope'], value['request']['bundle'])
+        row = source.store.db.execute('SELECT work FROM mac_host_tasks WHERE repository=? AND task=?',
+            (bound['repository'].lower(), bound['task_id'])).fetchone()
+        require(row is not None, 'MAC_BUNDLE_BINDING_INVALID')
+        work = parse_json(row[0], 1024*1024)
+        require(value.get('bundle_decision')==mac_bundle.DECISION, 'MAC_BUNDLE_DECISION_UNVERIFIED')
+        require(work.get('task') == task and work.get('bundle') == packet and digest(work) == bound['work_sha256'],
+                'MAC_BUNDLE_BINDING_INVALID')
     import mac_prestart
     require(value.get('failed_prestart_evidence', []) in ([], [mac_prestart.evidence()]),
             'MAC_GENERATION_BINDING_INVALID')
@@ -149,7 +164,7 @@ def record(source, bound):
 @handoff.bounded_api_reads
 def adopt(source, value):
     require(source.authority_initialized, 'MAC_HOST_NOT_INITIALIZED')
-    require(isinstance(value, dict) and set(value) == FIELDS, 'MAC_GENERATION_REQUEST_INVALID')
+    require(isinstance(value, dict) and set(value) in (FIELDS, FIELDS | {'bundle'}), 'MAC_GENERATION_REQUEST_INVALID')
     repo = repository(value['repository']).lower()
     require(isinstance(value['generation_id'], str) and re.fullmatch(r'[0-9a-f]{32}', value['generation_id']) and
             isinstance(value['node'], str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}', value['node']) and
@@ -165,17 +180,27 @@ def adopt(source, value):
             require(old['request'] == request, 'MAC_GENERATION_IMMUTABLE')
             record(source, old['binding'])
             return copy.deepcopy(old['binding'])
-    snapshot = handoff.inspect_repository(repo)
+    snapshot = handoff.inspect_repository(repo, **({'bundle_candidate':True} if 'bundle' in value else {}))
     require(snapshot.get('task_scope') == 'all' and isinstance(snapshot.get('tasks'), list),
             'MAC_HOST_HISTORY_INCOMPLETE')
     original = snapshot['source']; raw = original['raw_program']; data = raw.encode()
     require(original['head'] == value['plan_commit'] and original['blob'] == value['plan_blob'] and
             hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == original['blob'],
             'MAC_HOST_PROGRAM_REVISION_CHANGED')
-    scope = load_scope(raw, snapshot['repository'], original['blob'])
-    prestart = require_unowned_original(snapshot, scope['program'], value['node'])
+    scope = load_scope(raw, snapshot['repository'], original['blob'],bundle_repository_alias='bundle' in value)
+    bundle = None
+    if 'bundle' in value:
+        bundle_approval = mac_bundle.decision()
+        bundle_task, bundle = mac_bundle.aggregate(scope, value['bundle'])
+        require(value['node'] == bundle_task['id'], 'MAC_BUNDLE_INVALID')
+        prestart = []
+        for member in bundle['nodes']:
+            prestart.extend(require_unowned_original(snapshot, scope['program'], member['id']))
+        mac_bundle.check_receipts(source, scope, value['bundle']['nodes'])
+    else:
+        prestart = require_unowned_original(snapshot, scope['program'], value['node'])
     approval = decision_evidence(value['decision'])
-    matches = [n for n in scope['nodes'] if n['id'] == value['node']]
+    matches = [bundle_task] if bundle else [n for n in scope['nodes'] if n['id'] == value['node']]
     require(len(matches) == 1, 'MAC_GENERATION_NODE_NOT_FOUND')
     node = matches[0]
     import mac_astra_receipt
@@ -183,7 +208,8 @@ def adopt(source, value):
     # Legacy DONE/closed/merged/PASS text never supplies dependency authority.
     # This reader validates existing immutable, normally ACCEPTED Mac lineage.
     dependencies=dependency_evidence(source,scope,node,original['head'])
-    settings = source.store.settings(); profile = settings['roles']['builder']
+    from product_builder import resolve
+    settings = resolve(source.store.settings(), repo); profile = settings['roles']['builder']
     lanes = {'devin': 'DEVIN', 'cursor': 'CURSOR', 'glm': 'GLM', 'grok_build': 'GROK_BUILD',
              'claude': 'MAC_CLAUDE', 'codex': 'MAC_CODEX'}
     require(profile['provider'] in lanes and settings['publish_pr'] is True, 'MAC_HOST_PROFILE_UNSUPPORTED')
@@ -198,6 +224,7 @@ def adopt(source, value):
             'generation_policy': copy.deepcopy(POLICY), 'generation_decision': value['decision'],
             'generation_decision_evidence': approval,
             'original_task': {'task_id': origin_task, 'task_revision': origin_revision, 'provenance_only': True}}
+    if bundle: work['bundle'] = bundle
     if astra_decision: work['astra_decision'] = astra_decision
     if dependencies: work['dependency_evidence']=dependencies
     require(len(encoded(work).encode()) <= 300000, 'MAC_HOST_SCOPE_TOO_LARGE')
@@ -220,11 +247,12 @@ def adopt(source, value):
                     'MAC_HOST_LOCAL_WORK_BUSY')
             require(not db.execute("SELECT 1 FROM native_local WHERE state!='TERMINAL'").fetchone(),
                     'MAC_HOST_LOCAL_WORK_BUSY')
-            for row in db.execute('SELECT binding FROM mac_host_tasks WHERE repository=?', (repo,)):
+            for row in mac_bundle.owned_rows(source,repo):
                 owner = parse_json(row['binding'])
-                require(original_task_key(owner.get('program'),owner.get('node')) !=
-                        original_task_key(scope['program'],node['id']),
+                require(not (mac_bundle.keys(owner['program'], parse_json(row['work'], 1024*1024)) &
+                             mac_bundle.keys(scope['program'], work)),
                         'MAC_GENERATION_ORIGINAL_TASK_ALREADY_OWNED')
+            if bundle: mac_bundle.check_receipts(source, scope, value['bundle']['nodes'])
             if dependencies:
                 from mac_pipeline import Pipeline
                 pipeline=Pipeline(source.store,source,None)
@@ -247,6 +275,7 @@ def adopt(source, value):
                             'SELECT id FROM mac_host_external WHERE repository=?',(repo,))}),
                         'legacy_receipts': copy.deepcopy(receipts),
                         'adopted_at': time.time()}
+            if bundle: document['bundle_decision']=bundle_approval
             db.execute('UPDATE mac_host_tasks SET binding=? WHERE id=?', (encoded(bound), cursor.lastrowid))
             db.execute('INSERT INTO mac_host_generations VALUES (?,?,?)', (value['generation_id'], repo, encoded(document)))
             for item in legacy:
@@ -260,15 +289,18 @@ def adopt(source, value):
 
 def check_external(source, bound):
     value = record(source, bound)
-    original = value['original_task']['task_id']
-    for row in source.store.db.execute('SELECT id,document FROM mac_host_external WHERE repository=? AND task IN (?,?,?)',
-                                      (bound['repository'].lower(), original, bound['task_id'], '*')):
-        proofs = require_unowned_original({'repository': bound['repository'], 'task_scope': 'all',
-                                          'tasks': [parse_json(row['document'])['task']]},
-                                         bound['program'], bound['node'])
-        require(not proofs or proofs == value.get('failed_prestart_evidence', []),
-                'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
+    nodes = value['request'].get('bundle', {}).get('nodes', [bound['node']])
+    originals = {original_task_key(bound['program'], n) for n in nodes}
+    for row in source.store.db.execute('SELECT id,task,document FROM mac_host_external WHERE repository=?',
+                                      (bound['repository'].lower(),)):
+        if row['task'].upper() not in originals | {bound['task_id'], '*'}: continue
+        for node in nodes:
+            proofs = require_unowned_original({'repository': bound['repository'], 'task_scope': 'all',
+                                              'tasks': [parse_json(row['document'])['task']]}, bound['program'], node)
+            require(not proofs or proofs == value.get('failed_prestart_evidence', []),
+                    'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
         require(row['id'] in value['legacy_claims'], 'MAC_GENERATION_EXTERNAL_CHANGE_UNRESOLVED')
+    if 'bundle' in value['request']: mac_bundle.check_receipts(source, value['program']['scope'], nodes)
     acknowledged = {digest(r) for r in value['legacy_receipts']}
     for fence in transport_guard.unresolved(source.store.directory, include_digest=True):
         require(digest(fence) in acknowledged, 'MAC_GENERATION_EXTERNAL_RECEIPT_UNRESOLVED')
