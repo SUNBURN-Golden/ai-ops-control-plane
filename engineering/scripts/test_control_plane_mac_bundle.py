@@ -209,7 +209,7 @@ class ProductProfileTests(unittest.TestCase):
         self.assertEqual(product_builder.resolve(settings,'SUNBURN-Golden/kix-protocol')['roles']['builder'],product_builder.PROFILE)
         self.assertEqual(product_builder.resolve(settings,'SUNBURN-Golden/kix-commerce-apps')['roles'],original['roles'])
         self.assertEqual(settings['roles'],original['roles'])
-        self.assertEqual(product_builder.options(product_builder.PROFILE),{'model_reasoning_effort':'high','service_tier':'priority'})
+        self.assertEqual(product_builder.options(product_builder.PROFILE),{'model_reasoning_effort':'high','service_tier':'default'})
     def test_global_tuning_arbitrary_product_and_partial_options_rejected(self):
         settings=copy.deepcopy(common.DEFAULTS);settings['roles']['builder']=product_builder.PROFILE
         with self.assertRaises(common.AppError):common.validate_settings(settings)
@@ -234,10 +234,57 @@ class ProductProfileTests(unittest.TestCase):
     def test_cli_options_and_receipt_bind_requested_values(self):
         with patch('agents.executable',return_value='/fixture/codex'):
             argv=agents.command(product_builder.PROFILE,'builder',Path('/tmp/fixture'))
-        self.assertIn('service_tier="priority"',argv);self.assertIn('model_reasoning_effort="high"',argv)
+        self.assertIn('service_tier="default"',argv);self.assertIn('model_reasoning_effort="high"',argv)
         evidence=product_builder.evidence(product_builder.PROFILE)
         self.assertTrue(product_builder.matches(product_builder.PROFILE,evidence))
         self.assertFalse(product_builder.matches(product_builder.PROFILE,{}))
+
+    def test_legacy_fast_mapping_and_evidence_are_not_rewritten(self):
+        fast=product_builder.FAST_PROFILE
+        common.validate_profile(fast)
+        product_builder.validate({product_builder.REPOSITORY:fast})
+        self.assertEqual(product_builder.options(fast),{'model_reasoning_effort':'high','service_tier':'priority'})
+        with patch('agents.executable',return_value='/fixture/codex'):
+            argv=agents.command(fast,'builder',Path('/tmp/fixture'))
+        self.assertIn('service_tier="priority"',argv)
+        for profile,other in ((fast,product_builder.PROFILE),(product_builder.PROFILE,fast)):
+            receipt=product_builder.evidence(profile)
+            self.assertEqual(receipt['service_tier_requested'],profile['service_tier'])
+            self.assertTrue(product_builder.matches(profile,receipt))
+            self.assertFalse(product_builder.matches(other,receipt))
+
+    def test_future_default_setting_does_not_mutate_frozen_fast_job(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            store=core.Store(Path(temp)/'app')
+            try:
+                store.product_builder({product_builder.REPOSITORY:product_builder.FAST_PROFILE})
+                job=store.create({'repository':product_builder.REPOSITORY,'request_id':'fixture-request','goal':'fixture'})
+                frozen=product_builder.resolve(store.settings(),job['repository'])
+                store.update(job['id'],settings=frozen,native_lineage={'fixture':True},state='waiting_provider',phase='reviewing')
+                before=store.get(job['id'])
+                settings=store.product_builder({product_builder.REPOSITORY:product_builder.PROFILE})
+                self.assertEqual(settings['roles'],common.DEFAULTS['roles'])
+                self.assertEqual(product_builder.resolve(settings,job['repository'])['roles']['builder'],product_builder.PROFILE)
+                self.assertEqual(store.get(job['id']),before)
+                with self.assertRaisesRegex(common.AppError,'OWNER_PROFILE_IMMUTABLE'):
+                    store.action(job['id'],'reconfigure',{})
+                self.assertEqual(store.get(job['id']),before)
+            finally:store.close()
+
+    def test_only_exact_two_profiles_are_accepted_and_results_are_copied(self):
+        for profile in (product_builder.PROFILE,product_builder.FAST_PROFILE):
+            for field,value in (('provider','glm'),('model','gpt-6-sol'),('reasoning_effort','low'),
+                                ('service_tier','priority'),('service_tier','auto'),('service_tier',None),('extra',True)):
+                candidate={**profile,field:value}
+                with self.subTest(field=field,value=value),self.assertRaises(common.AppError):
+                    product_builder.validate({product_builder.REPOSITORY:candidate})
+                with self.assertRaises(common.AppError):product_builder.options(candidate)
+            original={product_builder.REPOSITORY:copy.deepcopy(profile)}
+            selected=product_builder.validate(original)
+            selected[product_builder.REPOSITORY]['service_tier']='changed'
+            self.assertEqual(original[product_builder.REPOSITORY],profile)
+        self.assertEqual(product_builder.options({'provider':'codex','model':'gpt-6-astra'}),{})
 
 
 class BundleDecisionTests(unittest.TestCase):
@@ -254,11 +301,12 @@ class BundleDecisionTests(unittest.TestCase):
 
 
 class NativeTuningTests(unittest.TestCase):
+    profile = product_builder.PROFILE
     def setUp(self):
         import test_control_plane_mac_codex_native_exec as fixture
         import codex_native_exec as native
         fixture.Fixture.setUp(self)
-        self.request['profile']=copy.deepcopy(product_builder.PROFILE)
+        self.request['profile']=copy.deepcopy(self.profile)
         self.driver=native.Driver(self.request,self.folder)
     def client(self):
         import test_control_plane_mac_codex_native_exec as fixture
@@ -266,7 +314,7 @@ class NativeTuningTests(unittest.TestCase):
         client.read['config'].update(product_builder.options(self.request['profile']))
         rpc=client.rpc
         client.models={'data':[{'model':'gpt-6-astra','supportedReasoningEfforts':[{'reasoningEffort':'high'}],
-                              'serviceTiers':[{'id':'priority','name':'Fast'}]}]}
+                              'serviceTiers':[{'id':'priority','name':'Fast'},{'id':'default','name':'Standard'}]}]}
         def call(method,params,timeout=20):
             if method=='model/list':client.calls.append(method);return client.models
             return rpc(method,params,timeout)
@@ -277,17 +325,33 @@ class NativeTuningTests(unittest.TestCase):
         fixture.NativePreflightTests.preflight(self,client)
     def test_actual_config_and_capabilities_bound_before_model_call(self):
         client=self.client();before=self.config.read_bytes();self.preflight(client)
-        self.assertEqual(self.driver.proof['builder_options_verified'],{'model_reasoning_effort':'high','service_tier':'priority'})
+        self.assertEqual(self.driver.proof['builder_options_verified'],product_builder.options(self.profile))
+        self.assertEqual(self.driver.values['service_tier'],product_builder.options(self.profile)['service_tier'])
         self.assertFalse(self.driver.proof['model_turn_requested']);self.assertEqual(self.config.read_bytes(),before)
         self.assertNotIn('thread/start',client.calls)
-    def test_missing_effort_or_priority_or_wrong_effective_config_fails_closed(self):
+    def test_missing_effort_or_tier_or_wrong_effective_config_fails_closed(self):
         for field in ('supportedReasoningEfforts','serviceTiers','model'):
             client=self.client();client.models['data'][0][field]=[] if field!='model' else 'another-model'
             with self.assertRaises(common.AppError):self.preflight(client)
             self.assertNotIn('account/read',client.calls)
-        client=self.client();client.read['config']['service_tier']='default'
+        wrong = 'priority' if self.profile['service_tier']=='default' else 'default'
+        for value in (wrong, None, 'auto', ''):
+            client=self.client();client.read['config']['service_tier']=value
+            with self.subTest(value=value),self.assertRaises(common.AppError):self.preflight(client)
+            self.assertNotIn('model/list',client.calls)
+        client=self.client();del client.read['config']['service_tier']
         with self.assertRaises(common.AppError):self.preflight(client)
         self.assertNotIn('model/list',client.calls)
+    def test_other_service_tier_cannot_substitute_for_requested_tier(self):
+        client=self.client()
+        wanted=product_builder.options(self.profile)['service_tier']
+        client.models['data'][0]['serviceTiers']=[t for t in client.models['data'][0]['serviceTiers'] if t['id']!=wanted]
+        with self.assertRaises(common.AppError):self.preflight(client)
+        self.assertNotIn('account/read',client.calls)
+
+
+class LegacyFastNativeTuningTests(NativeTuningTests):
+    profile = product_builder.FAST_PROFILE
 
 
 if __name__=='__main__':unittest.main()

@@ -5,11 +5,13 @@ from common import AppError
 
 REPOSITORY = 'sunburn-golden/kix-protocol'
 PROFILE = {'provider': 'codex', 'model': 'gpt-6-astra',
-           'reasoning_effort': 'high', 'service_tier': 'fast'}
+           'reasoning_effort': 'high', 'service_tier': 'default'}
+# Preserve previously frozen profiles and their requested-value evidence.
+FAST_PROFILE = {**PROFILE, 'service_tier': 'fast'}
 
 
 def validate(value):
-    if not isinstance(value, dict) or set(value) != {REPOSITORY} or value[REPOSITORY] != PROFILE:
+    if not isinstance(value, dict) or set(value) != {REPOSITORY} or value[REPOSITORY] not in (PROFILE, FAST_PROFILE):
         raise AppError('KIX_BUILDER_PROFILE_REQUIRED')
     return copy.deepcopy(value)
 
@@ -27,10 +29,10 @@ def resolve(settings, repository):
 def options(profile):
     if 'reasoning_effort' not in profile and 'service_tier' not in profile:
         return {}
-    if profile != PROFILE:
+    if profile not in (PROFILE, FAST_PROFILE):
         raise AppError('KIX_BUILDER_PROFILE_REQUIRED')
     return {'model_reasoning_effort': profile['reasoning_effort'],
-            'service_tier': 'priority'}
+            'service_tier': 'priority' if profile['service_tier'] == 'fast' else 'default'}
 
 
 def evidence(profile):

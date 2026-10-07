@@ -9,12 +9,18 @@ ACCEPTED로 바꾸지 않는다. Linux 호스트·보호 도구·credential은 �
 owner CLI의 `host product-builder --input profile.json`에 다음을 전달한다.
 
 ```json
-{"sunburn-golden/kix-protocol":{"provider":"codex","model":"gpt-6-astra","reasoning_effort":"high","service_tier":"fast"}}
+{"sunburn-golden/kix-protocol":{"provider":"codex","model":"gpt-6-astra","reasoning_effort":"high","service_tier":"default"}}
 ```
 
 전역 roles와 다른 제품은 그대로다. 신규 KIX 등록/generation에서만 builder 설정을 고정한다.
-기존 실행의 설정·영수증은 소급 변경하지 않는다. 사용자 fast는 공식 CLI의 서비스 ID priority로
-매핑한다. native 실행 전 model/list의 정확 model/high/priority 지원과 실제 config 값을 확인한다.
+사용자의 fast 해제 요청에 따라 일반 속도는 CLI에 `service_tier="default"`를 명시한다.
+옵션을 생략하거나 전역 설정을 바꾸지 않는다. 기존 실행의 설정·영수증은 소급 변경하지 않는다.
+이전에 고정된 fast 프로필도 계속 검증하며, 그 값은 기존대로 CLI 서비스 ID priority로 매핑한다.
+native 실행 전 model/list의 정확 model/high/요청 서비스 ID 지원과 실제 config 값을 확인한다.
+default 지원이 없거나 실제 값이 priority·누락 등으로 다르면 모델 호출 전에 차단한다.
+일반 속도 요청을 fast로 대체하지 않으며, 두 속도의 requested 영수증은 서로 대신할 수 없다.
+이 소스 업데이트는 저장된 제품 프로필을 자동 변경하지 않는다. 검증·설치 후 기존 담당자가
+위 입력을 명시적으로 적용해야 이후 신규 KIX 작업에 반영된다.
 영수증의 requested 값과 private policy 근거는 요청·전달 증거이며 실제 과금이나 서버의 실행
 모델을 증명한다는 뜻은 아니다. 지원되지 않으면 대체 모델/계정/서비스 없이 차단한다.
 
