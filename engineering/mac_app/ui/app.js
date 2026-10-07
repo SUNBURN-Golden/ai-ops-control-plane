@@ -129,7 +129,11 @@ function renderModels(){
     provider.addEventListener('change',()=>{model.value='';explain();});explain();
     providerWrap.append(label,provider);modelWrap.append(ml,model);fields.append(providerWrap,modelWrap);card.append(fields,hint);root.append(card);
   }
-  if(state.settings.product_builders?.['sunburn-golden/kix-protocol'])root.append(el('p','provider-hint','KIX Protocol의 신규 개발 작업: Astra · high · Fast. 기존 작업과 다른 제품에는 소급 적용하지 않습니다.'));
+  const kixBuilder=state.settings.product_builders?.['sunburn-golden/kix-protocol'];
+  if(kixBuilder){
+    const speed=kixBuilder.service_tier==='default'?'일반 속도':'Fast';
+    root.append(el('p','provider-hint','KIX Protocol의 신규 개발 작업: Astra · high · '+speed+'. 기존 작업과 다른 제품에는 소급 적용하지 않습니다.'));
+  }
   $('#session-minutes').value=state.settings.session_minutes;$('#max-calls').value=state.settings.max_agent_calls;$('#keep-awake').checked=state.settings.keep_awake;$('#publish-pr').checked=state.settings.publish_pr;
 }
 function shellQuote(value){return "'"+value.replaceAll("'","'\\''")+"'";}
