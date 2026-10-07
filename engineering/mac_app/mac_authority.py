@@ -330,10 +330,14 @@ class LocalSource:
         require(isinstance(value,dict) and set(value)=={'repository','decision'} and
                 isinstance(value['decision'],str) and 1<=len(value['decision'])<=2000,'MAC_HOST_REQUEST_INVALID')
         repo=repository(value['repository']).lower()
-        snapshot=handoff.inspect_repository(repo)
         with self.store.lock:
             previous=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',(repo,)).fetchone()
             require(previous is not None,'MAC_HOST_PROGRAM_NOT_FOUND')
+            original=previous[0]
+        snapshot=handoff.inspect_repository(repo, existing_subject=True)
+        with self.store.lock:
+            previous=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',(repo,)).fetchone()
+            require(previous is not None and previous[0]==original,'MAC_HOST_PROGRAM_REVISION_CHANGED')
             program=parse_json(previous[0])
             require(snapshot['source']['blob']==program['scope']['blob'] and snapshot['source']['branch']==program['branch'],
                     'MAC_HOST_PROGRAM_REVISION_CHANGED')

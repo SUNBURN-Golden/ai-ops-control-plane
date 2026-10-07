@@ -3,6 +3,7 @@ import copy
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -112,6 +113,54 @@ class CompatibilityTests(unittest.TestCase):
         with handoff.api_read_budget(): identity.transport(OLD)
         self.pin['body'] += '\nrevoked'
         with handoff.api_read_budget(), self.assertRaises(AppError): identity.transport(OLD)
+
+    def test_existing_receipt_journal_is_byte_identical_and_negative_hold_survives_transfer(self):
+        import core
+        import common
+        import mac_astra_receipt as receipts
+        from test_control_plane_mac_astra_receipt import audit_comment
+        request = dict(repository=OLD, pr_url=f'https://github.com/{OLD}/pull/2', head='a'*40,
+                       branch='aiops/fixture', gate='ARCHITECTURE', requested_depth='A3',
+                       task_id='EXISTING', task_revision='d'*64,
+                       canonical_binding=dict(task_id='EXISTING', task_revision='d'*64))
+        requirement = dict(request_binding=request, request_sha256=common.digest(request))
+        original = audit_comment(requirement)
+        comments = [copy.deepcopy(original)]
+        pull = dict(number=2, html_url=request['pr_url'],
+                    head=dict(sha=request['head'], ref=request['branch'], repo=dict(full_name=OLD, id=1365416872)),
+                    base=dict(repo=dict(full_name=OLD, id=1365416872)))
+        def api(path, paginate=False):
+            if path.endswith('/pulls/2'): return copy.deepcopy(pull)
+            if path.endswith('/issues/comments/123'): return copy.deepcopy(comments[0])
+            if '/comments?' in path: return [copy.deepcopy(comments)]
+            raise AssertionError(path)
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(handoff, 'api', side_effect=api), \
+                patch.object(receipts, 'decision_evidence', return_value=copy.deepcopy(receipts.DECISION)):
+            store = core.Store(Path(folder)/'app')
+            try:
+                journal = receipts.Journal(store)
+                pinned = journal.consume(requirement)
+                before = '\n'.join(journal.db.iterdump())
+                for item in comments:
+                    for key in ('html_url', 'issue_url'): item[key] = item[key].replace(OLD, NEW)
+                pull['html_url'] = pull['html_url'].replace(OLD, NEW)
+                for key in ('head', 'base'): pull[key]['repo'] = dict(full_name=NEW, id=1365416872)
+                self.assertEqual(journal.consume(requirement), pinned)
+                self.assertEqual('\n'.join(journal.db.iterdump()), before)
+                self.assertEqual(receipts.read_receipt(requirement, 123, expected=pinned['comment'], journal=journal), pinned['comment'])
+                negative = audit_comment(requirement, cid=124, result='FAIL')
+                for key in ('html_url', 'issue_url'): negative[key] = negative[key].replace(OLD, NEW)
+                comments.append(negative)
+                with self.assertRaisesRegex(AppError, 'AUDIT_CONFLICT'): journal.consume(requirement)
+                held = '\n'.join(journal.db.iterdump())
+                comments.pop()
+                with self.assertRaisesRegex(AppError, 'AUDIT_CONFLICT'): receipts.Journal(store).consume(requirement)
+                self.assertEqual('\n'.join(journal.db.iterdump()), held)
+                self.assertEqual(request['repository'], OLD)
+                self.assertEqual(common.digest(request), requirement['request_sha256'])
+            finally:
+                store.close()
 
 
 if __name__ == '__main__': unittest.main()

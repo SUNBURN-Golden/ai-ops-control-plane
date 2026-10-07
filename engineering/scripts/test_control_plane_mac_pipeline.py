@@ -601,6 +601,14 @@ class MacPipelineTests(unittest.TestCase):
 
 class CandidateDispatchTests(unittest.TestCase):
     def setUp(self):
+        from test_control_plane_mac_url_compat import metadata, decision, CENTRAL, NEW
+        def identity_read(path, paginate=False):
+            if path == 'repos/' + CENTRAL: return metadata(CENTRAL)
+            if path == 'repos/' + NEW: return metadata(NEW)
+            if path == 'repos/' + CENTRAL + '/issues/comments/6030780072': return decision()
+            raise AssertionError(path)
+        identity_patch=patch('handoff._raw_api', side_effect=identity_read)
+        identity_patch.start();self.addCleanup(identity_patch.stop)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.repos=gitops.Repositories(Path(self.temp.name)/'workspaces')
         self.job={'repository':'BeautifulMind-JT/kix-protocol','head':'c'*40,'branch':'aiops/native-fixture',
@@ -619,7 +627,7 @@ class CandidateDispatchTests(unittest.TestCase):
             self.repos.dispatch_candidate_workflow(self.job,'ktx-kernel.yml')
         argv=execute.call_args.args[0]
         self.assertEqual(argv,['gh','api','--method','POST',
-            'repos/BeautifulMind-JT/kix-protocol/actions/workflows/ktx-kernel.yml/dispatches',
+            'repos/SUNBURN-Golden/kix-protocol/actions/workflows/ktx-kernel.yml/dispatches',
             '-f','ref=aiops/native-fixture'])
     def test_ready_auto_merge_or_changed_remote_head_cannot_be_dispatched(self):
         for change in ('ready','auto_merge','head'):
@@ -646,7 +654,7 @@ class CandidateDispatchTests(unittest.TestCase):
             result=self.repos.user_merge(self.job)
         self.assertTrue(result['merged'])
         self.assertEqual(execute.call_args.args[0],['gh','api','--method','PUT',
-            'repos/BeautifulMind-JT/kix-protocol/pulls/9/merge','-f','sha='+self.job['head'],'-f','merge_method=merge'])
+            'repos/SUNBURN-Golden/kix-protocol/pulls/9/merge','-f','sha='+self.job['head'],'-f','merge_method=merge'])
     def test_changed_head_or_base_holds_before_ready_or_merge(self):
         self.job['base_sha']='b'*40
         self.pull['base']['sha']='b'*40
@@ -768,7 +776,7 @@ class LiveSupervisionEvidenceTests(unittest.TestCase):
         for rid,name,path in ((42,'kernel','ktx-kernel.yml'),(43,'protocol','protocol.yml')):
             url=self.url+'/actions/runs/'+str(rid)
             checks.append({'name':name,'status':'SUCCESS','run_id':rid})
-            self.runs[rid]={'head_sha':self.head,'head_branch':self.job['branch'],'repository':{'full_name':self.repo},
+            self.runs[rid]={'head_sha':self.head,'head_branch':self.job['branch'],'repository':{'full_name':self.repo,'id':1365416872},
                 'path':'.github/workflows/'+path,'status':'completed','conclusion':'success',
                 'html_url':url,'event':'workflow_dispatch','secret':'PRIVATE_BLOB_MUST_NOT_BE_FORWARDED'}
             self.jobs[rid]={'total_count':1,'jobs':[{'id':rid+100,'name':name,'head_sha':self.head,
