@@ -114,14 +114,15 @@ class LocalSource:
                 'MAC_HOST_PLAN_BLOB_MISMATCH')
         scope=load_scope(raw,snapshot['repository'],source['blob'])
         require(isinstance(source.get('head'),str) and re.fullmatch(r'[0-9a-f]{40}',source['head']),'MAC_HOST_PLAN_PIN_REQUIRED')
-        profile=self.store.settings()['roles']['builder']
+        from product_builder import resolve
+        settings=resolve(self.store.settings(), repo)
+        profile=settings['roles']['builder']
         lanes={'devin':'DEVIN','cursor':'CURSOR','glm':'GLM','grok_build':'GROK_BUILD','claude':'MAC_CLAUDE','codex':'MAC_CODEX'}
         require(profile['provider'] in lanes,'MAC_HOST_PROFILE_UNSUPPORTED')
         # Observation timestamps can change on a read-only refresh. Authority,
         # original plan, profile and the full legacy projection cannot.
         require(isinstance(source.get('branch'),str) and source['branch'] and '\n' not in source['branch'],
                 'MAC_HOST_BASE_BRANCH_REQUIRED')
-        settings=self.store.settings()
         record={'scope':scope,'head':source['head'],'branch':source['branch'],'profile':profile,
                 'settings':settings,'tasks':copy.deepcopy(snapshot['tasks'])}
         with self.store.lock:
@@ -129,9 +130,10 @@ class LocalSource:
             try:
                 # register and generation are two entrypoints to the same
                 # original node. Serialize both directions of admission.
-                for owned in self.store.db.execute('SELECT binding FROM mac_host_tasks WHERE repository=?',(repo,)):
+                import mac_bundle
+                for owned in mac_bundle.owned_rows(self,repo):
                     owner=parse_json(owned['binding'])
-                    require(not('generation_id' in owner and original_task_key(owner.get('program'),owner.get('node')) in
+                    require(not('generation_id' in owner and mac_bundle.keys(owner['program'], parse_json(owned['work'],1024*1024)) &
                                 {original_task_key(scope['program'],n) for n in scope['node_ids']}),
                             'MAC_HOST_ORIGINAL_TASK_ALREADY_OWNED')
                 previous=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',(repo,)).fetchone()
@@ -179,8 +181,9 @@ class LocalSource:
         import mac_astra_receipt
         with self.store.lock:
             task=self._task(self.store.db,bound)
-            node=parse_json(task['work'],1024*1024)['task']
-        snapshot=handoff.inspect_repository(bound['repository'], existing_subject=True)
+            work=parse_json(task['work'],1024*1024);node=work['task']
+        snapshot=handoff.inspect_repository(bound['repository'], existing_subject=True,
+                    **({'bundle_candidate':True} if 'bundle' in work else {}))
         mac_astra_receipt.admission(node)
         if 'generation_id' in bound:
             import mac_generation

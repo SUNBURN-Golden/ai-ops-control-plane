@@ -10,6 +10,7 @@ import re
 import time
 
 import agents
+import mac_bundle
 import handoff
 from common import AppError, TERMINAL, digest, encoded, parse_json
 from mac_authority import require
@@ -51,8 +52,7 @@ class Pipeline:
             require(job['settings']['roles']['builder']==work['profile'] and job['base_sha']==bound['plan_commit'] and
                     job['program_scope']['blob']==bound['plan_blob'] and job['settings']['publish_pr'] is True and
                     job['branch']=='aiops/native-'+lineage['request_id'][:16] and
-                    len(job['plan']['tasks'])==1 and job['plan']['tasks'][0]['id']==work['task']['id'] and
-                    job['plan']['tasks'][0]['instructions']==work['task']['spec'],'MAC_HOST_DELIVERY_BINDING_MISMATCH')
+                    job['plan']['tasks']==mac_bundle.plan_tasks(work) and job.get('bundle')==work.get('bundle'),'MAC_HOST_DELIVERY_BINDING_MISMATCH')
             self.source.check_external(bound)
 
     def deliver(self):
@@ -96,9 +96,11 @@ class Pipeline:
                   # Local delivery contains one already-admitted node. Its exact
                   # program dependencies remain in the immutable canonical binding.
                   'depends_on':[]}
+            items=mac_bundle.plan_tasks(work)
+            if 'bundle' in work: job['bundle']=copy.deepcopy(work['bundle'])
             job.update(native_lineage=lineage,settings=copy.deepcopy(work['settings']),base_sha=bound['plan_commit'],
                 base_branch=program['branch'],branch='aiops/native-'+rid[:16],program_scope=copy.deepcopy(program['scope']),
-                plan={'summary':node['title'],'sources':['.aiops/program.json'],'tasks':[item]},
+                plan={'summary':node['title'],'sources':['.aiops/program.json'],'tasks':items},
                 source_pins={'.aiops/program.json':bound['plan_blob']},calls=1,task_index=0,built_tasks=[],
                 current_task=item,builder_sessions=[] if receipt.get('error')=='PROVIDER_LOGIN_REQUIRED' else
                     [(receipt.get('provider_evidence') or {}).get('session_id')],
@@ -112,8 +114,11 @@ class Pipeline:
             report=receipt.get('report')
             if report is not None: agents.validate_report(report)
             passing=report and report['status']=='complete' and not report['findings'] and not report['question'].strip() and report['checks'] and all(c.strip() for c in report['checks'])
+            if passing and job.get('bundle'):
+                try: mac_bundle.validate_report(report, job['bundle'])
+                except AppError: passing=False
             if passing:
-                job.update(state='reviewing',phase='reviewing',summary=report['summary'],task_index=1,built_tasks=[node['id']])
+                job.update(state='reviewing',phase='reviewing',summary=report['summary'],task_index=len(items),built_tasks=[n['id'] for n in items])
             elif report and report['status']=='needs_user':
                 # A successful provider exit is not a successful implementation.
                 # Preserve the exact question without spending another model call.
@@ -298,8 +303,9 @@ class Pipeline:
             actor=receipt['provider_evidence']; sid=actor.get('session_id')
             require(isinstance(sid,str) and sid and sid not in identities and actor['provider']==request['profile']['provider'] and
                 actor['harness']==agents.CATALOG[actor['provider']]['harness'] and actor['model_requested']==request['profile']['model'] and
-                report['status']=='complete' and report['reviewed_head']==job['head'] and report['covered_tasks']==[job['plan']['tasks'][0]['id']] and
+                report['status']=='complete' and report['reviewed_head']==job['head'] and report['covered_tasks']==[n['id'] for n in job['plan']['tasks']] and
                 report['checks'] and all(c.strip() for c in report['checks']) and not report['findings'] and not report['question'].strip(),'MAC_HOST_INDEPENDENT_REVIEW_REQUIRED')
+            mac_bundle.validate_report(report, job.get('bundle'))
             identities.add(sid)
         require(bool(writers),'MAC_HOST_BUILDER_IDENTITY_REQUIRED')
 

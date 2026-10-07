@@ -547,6 +547,22 @@ new signature or protected Linux identity. No new credential/scope, Linux
 protected file change, manual ledger rewrite or fresh product builder is granted.
 See [the Mac GLM product audit contract](docs/MAC_GLM_PRODUCT_AUDIT_KO.md).
 
+
+User decision [D-2026-10-07-MAC-KIX-BUNDLE](https://github.com/SUNBURN-Golden/ai-ops-control-plane/pull/86#issuecomment-6032181179)
+approves a Mac-only KIX Protocol future builder override and new grouped productization
+candidate. [Exact relayed User question/answer](docs/MAC_KIX_BUNDLE_DECISION_20261007.md)
+and [account/body metadata](docs/MAC_KIX_BUNDLE_DECISION_20261007_RECORD.json) are retained.
+This permits a new canonical deliverable comprising pinned original nodes, one writer
+and one branch/PR, while preserving each spec, internal/external dependencies,
+independent review, aggregate A3 (RELEASE retained), exact-HEAD CI and User merge.
+All member ownership is checked; a bundle cannot acknowledge or terminate SDK UNKNOWN.
+Existing jobs, original node completion, PR121 and receipts remain unchanged. The
+PR121-specific MAC_GLM53 exception does not extend to new product bundles. Live
+unchanged account approval is required for bundle admission and revalidation; this
+is the existing trusted-account/host boundary, not a signature or cross-host lock.
+See [Mac KIX bundle contract](mac_app/MAC_KIX_BUNDLE_KO.md). Source repair approval
+is distinct from actual product execution and from external source-audit transfer.
+
 User decision [D-2026-10-07-MAC-EMPTY-ATTEMPT-RECOVERY](https://github.com/SUNBURN-Golden/ai-ops-control-plane/pull/85#issuecomment-6032340624)
 approves only a reversible, evidence-preserving quarantine of empty Mac attempt
 `d8d194e55af64b0b8a44a487bd41fd94` under existing job `20531604498943e1`.

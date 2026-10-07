@@ -25,7 +25,7 @@ def unsupported(message):
                     '기존 프로그램 범위를 확인해야 합니다. ' + message)
 
 
-def load_scope(raw, repository, blob):
+def load_scope(raw, repository, blob, *, bundle_repository_alias=False):
     """Validate and retain exact local nodes at a known Git blob.
 
     Missing optional fields remain missing. Cross-repository dependencies and
@@ -52,7 +52,10 @@ def load_scope(raw, repository, blob):
     except AppError as exc:
         raise unsupported('대상 레포와 기준 문서·결정 포인터를 확인해 주세요.') from exc
     if target.lower() != expected.lower():
-        raise unsupported('프로그램이 다른 레포를 가리킵니다: ' + target)
+        from repository_identity import same_repository
+        if not (bundle_repository_alias and expected.lower() == 'sunburn-golden/kix-protocol' and
+                same_repository(expected,target)):
+            raise unsupported('프로그램이 다른 레포를 가리킵니다: ' + target)
     if not isinstance(data['program'], str) or not IDENTIFIER.fullmatch(data['program']):
         raise unsupported('프로그램 ID 형식을 확인해 주세요.')
     if any(marker in data['approval_pointer'].upper() for marker in
@@ -110,7 +113,8 @@ def load_scope(raw, repository, blob):
             visited.add(key)
             del graph[key]
     return {'path': PATH, 'blob': blob, 'program': data['program'],
-            'repository': data['repository'], 'approval_pointer': data['approval_pointer'],
+            'repository': expected if bundle_repository_alias else data['repository'],
+            **({'source_repository':data['repository']} if bundle_repository_alias else {}), 'approval_pointer': data['approval_pointer'],
             'authoritative_doc_pointers': data['authoritative_doc_pointers'],
             'nodes': nodes, 'node_ids': ids, 'count': len(nodes)}
 

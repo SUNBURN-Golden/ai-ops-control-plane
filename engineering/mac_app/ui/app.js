@@ -102,9 +102,12 @@ function renderDetail(scroll){
   else if(['paused','waiting_provider'].includes(job.state))buttons.append(actionButton('이어서 진행 ↗',()=>action(job,'resume'),'primary'));
   else if(!['unknown','accepted','cancelled'].includes(job.state))buttons.append(actionButton(job.pause_requested?'일시정지 요청됨':'일시정지',()=>action(job,'pause')));
   if(!job.attempt&&['paused','needs_user','waiting_provider'].includes(job.state))buttons.append(actionButton('작업 취소',()=>action(job,'cancel')));
-  if(!job.attempt&&['paused','needs_user','waiting_provider'].includes(job.state)&&JSON.stringify(job.settings.roles)!==JSON.stringify(state.settings.roles))buttons.append(actionButton('새 모델 설정 적용',()=>action(job,'reconfigure')));
+  const availableRoles={...state.settings.roles};
+  const productBuilder=state.settings.product_builders?.[job.repository.toLowerCase()];
+  if(productBuilder)availableRoles.builder=productBuilder;
+  if(!job.attempt&&['paused','needs_user','waiting_provider'].includes(job.state)&&JSON.stringify(job.settings.roles)!==JSON.stringify(availableRoles))buttons.append(actionButton('새 모델 설정 적용',()=>action(job,'reconfigure')));
   detail.append(buttons);
-  const team=Object.entries(job.settings.roles).map(([role,config])=>roleInfo[role][0]+': '+(providerInfo(config.provider)?.name||config.provider)+(config.model?' / '+config.model:' / CLI 기본값')).join(' · ');
+  const team=Object.entries(job.settings.roles).map(([role,config])=>roleInfo[role][0]+': '+(providerInfo(config.provider)?.name||config.provider)+(config.model?' / '+config.model:' / CLI 기본값')+(config.reasoning_effort?' / '+config.reasoning_effort:'')+(config.service_tier?' / '+config.service_tier:'')).join(' · ');
   detail.append(el('div','detail-meta',team));
   if(job.head)detail.append(el('div','detail-meta',`검토 대상 ${job.head.slice(0,12)} · 실행 요청 ${job.calls}회`));
   const events=el('details','events');events.open=wasOpen;events.append(el('summary','','작업 기록 보기'));const log=el('div');events.append(log);detail.append(events);
@@ -126,6 +129,7 @@ function renderModels(){
     provider.addEventListener('change',()=>{model.value='';explain();});explain();
     providerWrap.append(label,provider);modelWrap.append(ml,model);fields.append(providerWrap,modelWrap);card.append(fields,hint);root.append(card);
   }
+  if(state.settings.product_builders?.['sunburn-golden/kix-protocol'])root.append(el('p','provider-hint','KIX Protocol의 신규 개발 작업: Astra · high · Fast. 기존 작업과 다른 제품에는 소급 적용하지 않습니다.'));
   $('#session-minutes').value=state.settings.session_minutes;$('#max-calls').value=state.settings.max_agent_calls;$('#keep-awake').checked=state.settings.keep_awake;$('#publish-pr').checked=state.settings.publish_pr;
 }
 function shellQuote(value){return "'"+value.replaceAll("'","'\\''")+"'";}
