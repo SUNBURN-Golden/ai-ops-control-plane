@@ -162,3 +162,14 @@ gate가 미확인으로 막힐 수 있다. 영구 hold를 새로 쓰지 않아�
 감사 대기, 감리와 inspect·사용자 merge의 gate를 회귀검증한다. 이 테스트는 실제 Linux
 감사 실행, Mac 설치, 인증 provider/제품/VM 실행의 qualification 증거가 아니다.
 실제 설치·A3 실행·병합은 각 단계의 사용자 승인과 정확 증거를 별도로 확인한다.
+
+## 2026-10-07 별도 Mac GLM 생산자 예외
+
+[User 결정6031603785](https://github.com/SUNBURN-Golden/ai-ops-control-plane/pull/84#issuecomment-6031603785)는
+기존 KIX job20531604498943e1 / PR121의 ARCHITECTURE/A3에 한해 독립 Mac `glm-5.3`
+생산자를 추가한다. 위의 Linux 단독 생산자 설명은 이 새 명시적 예외 범위에서만 개정된다.
+기존 Fable 형식/생산자/요청 바이트와 기존 hold는 바꾸지 않는다. 새 생산자는 `MAC_GLM53`이며
+원래 `requested_auditor=ASTRA_FABLE` 요청의 SHA에 별도 실행·승인 기록으로 연결한다.
+GitHub 댓글만으로는 부족하며 실제 private CLI 실행·모델·세션·독립성·정확 요청·HEAD·판정과
+댓글 본문 해시·actor·시각의 재검증이 모두 필요하다. 한 생산자의 부정 증거·변조·삭제는 다른
+생산자의 PASS로 우회할 수 없다. [Mac GLM 계약](../docs/MAC_GLM_PRODUCT_AUDIT_KO.md)을 따른다.

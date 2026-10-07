@@ -402,6 +402,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     server = sub.add_parser('serve'); server.add_argument('--port', type=int, default=8765)
     sub.add_parser('open'); sub.add_parser('list'); sub.add_parser('mcp'); sub.add_parser('doctor')
+    sub.add_parser('audit', help='중지된 서비스의 기존 KIX 작업에 독립 Mac GLM 감사를 한 번 실행/수집; builder 실행 없음').add_argument('job_id')
     start = sub.add_parser('start'); start.add_argument('--repo', required=True); start.add_argument('--goal', default=''); start.add_argument('--request-id', default=None)
     for name in ('status', 'pause'):
         one = sub.add_parser(name); one.add_argument('job_id')
@@ -452,6 +453,9 @@ def main(argv=None):
             if not 1024 <= args.port <= 65535: raise AppError('INVALID_PORT')
             serve(args.data_dir, args.port); return 0
         if args.command == 'mcp': mcp(args.data_dir); return 0
+        if args.command == 'audit':
+            import mac_glm_runner
+            print(encoded(mac_glm_runner.command(args.data_dir,args.job_id))); return 0
         if args.command == 'doctor': result = agents.availability()
         elif args.command == 'open':
             client(args.data_dir, '/api/state', owner=True)
