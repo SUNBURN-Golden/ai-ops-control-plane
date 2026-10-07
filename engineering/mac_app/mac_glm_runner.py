@@ -79,6 +79,8 @@ def packet(pipeline, job, requirement, evidence, excluded):
             audit.require(observed.returncode==0 and len(raw)==size and b'\0' not in raw and
                           hashlib.sha1(b'blob '+str(size).encode()+b'\0'+raw).hexdigest()==oid)
             output[name]={'text':raw.decode('utf-8'),'blob':oid,'sha256':hashlib.sha256(raw).hexdigest(),'mode':mode}
+            if output is base_files and output[name]==files[name]:
+                output[name]={'same_blob_as_head':True,'blob':oid,'sha256':files[name]['sha256'],'mode':mode}
     audit.require(decision_verified())
     original_approval=handoff.api('repos/BeautifulMind-JT/kix-protocol/issues/comments/'+str(APPROVAL['comment_id']))
     audit.require(isinstance(original_approval.get('body'),str) and
@@ -160,8 +162,11 @@ def publish(journal, pipeline, job, requirement, run, *, recovering=False):
     else:
         target=transport(repo)
         path=journal.folder(requirement)/'comment.txt'
-        fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-        with os.fdopen(fd,'w') as stream:stream.write(body)
+        if path.exists():audit.require(audit.private_bytes(path)==body.encode())
+        else:
+            fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            with os.fdopen(fd,'w') as stream:
+                stream.write(body);stream.flush();os.fsync(stream.fileno())
         journal.save(requirement,'PUBLISHING',run)
         comment=parse_json(github(['gh','api','--method','POST',f'repos/{target}/issues/{number}/comments',
                                   '-F','body=@'+str(path)],github_access='WRITE'))
@@ -180,6 +185,7 @@ def produce(pipeline, job):
     if state=='PUBLISHED':return journal.consume(requirement)
     if state in ('RESULT','PUBLISHING'):
         return publish(journal,pipeline,job,requirement,run,recovering=state=='PUBLISHING')
+    audit.require(state!='FAILED','MAC_HOST_GLM_AUDIT_FAILED')
     audit.require(state is None,'MAC_HOST_GLM_AUDIT_PENDING');journal.check_hold(requirement)
     evidence=preflight(pipeline,job,requirement)
     original=pipeline.astra.request(requirement)
@@ -200,7 +206,8 @@ def produce(pipeline, job):
         journal.db.execute('INSERT INTO mac_glm_runs VALUES (?,?,?,?)',
                            (requirement['request_sha256'],audit.scope(requirement),'RUNNING',encoded(run)))
     try:execute(run,folder)
-    except BaseException:
+    except BaseException as exc:
+        run['error']=exc.code if isinstance(exc,AppError) else type(exc).__name__
         journal.save(requirement,'FAILED' if run.get('process_group_quiescent') else 'RUNNING',run)
         raise
     journal.save(requirement,'RESULT',run)

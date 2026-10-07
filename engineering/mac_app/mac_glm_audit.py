@@ -26,6 +26,7 @@ PRODUCER = 'MAC_GLM53'
 MODEL = 'glm-5.3'
 MARK = '<!-- aiops-mac-glm-audit-v1 -->'
 DECISION = {'comment_id': 6031603785, 'created_at': '2026-10-07T05:27:40Z',
+            'url': 'https://github.com/SUNBURN-Golden/ai-ops-control-plane/pull/84#issuecomment-6031603785',
             'body_sha256': '8bb3a81d2cfd90d229f4c33d92f4ce74785df9225fd445321a460986bae1ce4f'}
 JOB = '20531604498943e1'
 ERROR = 'MAC_HOST_GLM_AUDIT_UNVERIFIED'
@@ -211,6 +212,7 @@ class Journal:
         self.check_hold(requirement)
         state,run=self.get(requirement)
         require(state is not None,'MAC_HOST_ASTRA_AUDIT_REQUIRED')
+        require(state!='FAILED','MAC_HOST_GLM_AUDIT_FAILED')
         require(state=='PUBLISHED', 'MAC_HOST_GLM_AUDIT_PENDING')
         approval(); fable.live_pr(requirement)
         try:
@@ -248,10 +250,13 @@ class Journal:
         require(run['finished']-30<=posted<=time.time()+30)
 
 
-def existing_receipt(store, requirement):
+def existing_receipt(store, requirement, *, expected=None):
     if not supported(requirement): return None
     journal=Journal(store);journal.check_hold(requirement);journal.check_related(requirement)
     state,_=journal.get(requirement)
+    if (expected and expected.get('source')=='AUTHENTICATED_MAC_GLM_AUDIT_COMMENT' and
+            expected.get('request_sha256')==requirement['request_sha256'] and state is None):
+        journal.hold(requirement)
     return journal.consume(requirement) if state is not None else None
 
 

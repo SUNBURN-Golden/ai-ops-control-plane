@@ -4,7 +4,7 @@
 독립 `glm-5.3`을 추가로 허용한다. 원래 ASTRA_FABLE 생산자는 유지한다. 원문 질문·답변과
 relay 출처는 `MAC_GLM_PRODUCT_AUDIT_DECISION_20261007.md` 및 RECORD.json에 보존한다.
 
-## 후보 구현 계약
+## 실행 및 검증 계약
 
 - 기존 canonical 감사 요청, requested_auditor 값 및 request digest는 바꾸지 않는다.
   별도 `MAC_GLM53` 실행·승인·댓글 기록을 기존 요청 SHA에 묶는다. 이 예외는 기존 KIX
@@ -28,3 +28,22 @@ relay 출처는 `MAC_GLM_PRODUCT_AUDIT_DECISION_20261007.md` 및 RECORD.json에 
 
 Mac host 계정과 그 private 실행 파일은 신뢰 경계다. 새 서명키나 보호 Linux 증명을
 주장하지 않는다. 기존 계정/credential/endpoint를 변경하지 않으며 Linux 보호 경로는 범위 밖이다.
+
+## 지원 명령과 회복
+
+기존 서비스가 정상 종료되고 진행 중인 provider가 없는 상태에서 기존 제품 담당자가
+설치된 앱의 CLI로 `aiops.py audit 20531604498943e1`을 호출한다. `--data-dir`는 기존
+AIOPS 디렉터리를 그대로 사용한다. 이 명령은 새 credential을 만들지 않으며 service lock을
+얻지 못하면 실행하지 않는다. 검증·감사·댓글 게시·수집 후에도 제품 job을 자동 재개하지 않는다.
+성공하면 기존 job의 정상 resume으로 최종 감리를 이어간다.
+
+이미 게시된 동일 요청은 새 모델/댓글 없이 재검증한다. 실제 실행이 끝난 RESULT는 보존된
+실행 증거로 게시할 수 있다. 게시 결과가 불명확한 PUBLISHING은 같은 명령에서 댓글을
+읽어 정확히 하나의 일치만 회복하며, 0개/중복이면 재게시하지 않고 fence를 유지한다.
+RUNNING/FAILED는 새 모델을 자동 호출하지 않는다. 실행 종료·증거가 불명확하면 차단
+원인을 보존하여 기존 담당자에게 보고한다. 다른 요청으로 같은 HEAD의 fence를 우회할 수 없다.
+
+실제 모델 입력은 고정 Git object의 AGENTS.md와 원래 .aiops/program.json, 전체 해당 diff,
+검증한 원래 권한 수정 승인과 신규 생산자 승인, 필요한 요청·독립 검토·live CI 근거다.
+저장소의 다른 자료집/검증 transaction 파일, runtime 원장 및 원시 worker 로그는 보내지 않는다.
+기존 Z.AI route가 아니거나 요구 문맥을 제공할 수 없으면 실행/판정을 통과시키지 않는다.

@@ -185,11 +185,15 @@ class Pipeline:
         # Check both producers: a Mac negative/deletion cannot be bypassed by a
         # Fable PASS, and a Fable negative cannot be bypassed by a Mac PASS.
         import mac_glm_audit
-        mac_receipt=mac_glm_audit.existing_receipt(self.store,requirement)
+        mac_receipt=mac_glm_audit.existing_receipt(self.store,requirement,
+                                                expected=recorded.get('audit_receipt') if isinstance(recorded,dict) else None)
         try: receipt=self.astra.consume(requirement)
         except AppError as exc:
             if exc.code!='MAC_HOST_ASTRA_AUDIT_REQUIRED' or mac_receipt is None: raise
             receipt=mac_receipt
+        if (mac_receipt is not None and isinstance(recorded,dict) and
+                (recorded.get('audit_receipt') or {}).get('source')=='AUTHENTICATED_MAC_GLM_AUDIT_COMMENT'):
+            receipt=mac_receipt  # keep an already consumed receipt stable; both channels were checked
         require(receipt['comment']['auditor_session'] not in
                 self.writer_sessions(job)+[job['review']['provider_evidence']['session_id']],
                 'MAC_HOST_INDEPENDENT_REVIEW_REQUIRED')

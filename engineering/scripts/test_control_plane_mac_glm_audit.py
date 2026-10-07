@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -28,7 +29,7 @@ def requirement():
         'canonical_binding':{'authority_kind':'MAC_LOCAL','program':'kix','node':'agents-scope-sync',
             'plan_commit':'7481b0e16ce9b903abbffa62249bb91cd9e63cfe','plan_blob':'ff0f39a8129ca8b8d30818cce35c3d4e588872fc',
             'task_id':'EXISTING','task_revision':'d'*64}}
-    return {'required':True,'request_binding':request,'request_sha256':common.digest(request)}
+    return {'required':True,'audit_receipt':None,'request_binding':request,'request_sha256':common.digest(request)}
 
 
 def events(run):
@@ -102,6 +103,12 @@ class GlmReceiptTests(unittest.TestCase):
         self.journal.db.execute('DELETE FROM mac_glm_runs')
         with self.assertRaisesRegex(common.AppError,'ASTRA_AUDIT_REQUIRED'):self.journal.consume(self.req)
         self.assertIsNone(audit.existing_receipt(self.store,self.req))
+
+    def test_loss_of_previously_consumed_private_record_is_not_absence_of_audit(self):
+        expected=self.journal.consume(self.req)
+        self.journal.db.execute('DELETE FROM mac_glm_runs')
+        with self.assertRaises(common.AppError):audit.existing_receipt(self.store,self.req,expected=expected)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM mac_glm_holds').fetchone()[0],1)
 
     def test_modified_or_deleted_local_execution_creates_durable_hold(self):
         (self.journal.folder(self.req)/'stdout.jsonl').write_text('forged PASS')
@@ -213,6 +220,13 @@ class GlmReceiptTests(unittest.TestCase):
         pipeline,job=self.pipeline()
         with self.assertRaisesRegex(common.AppError,'AUDIT_CONFLICT'):pipeline.validate_audit(job)
 
+    def test_later_fable_pass_does_not_replace_already_consumed_mac_receipt(self):
+        pipeline,job=self.pipeline();first=pipeline.validate_audit(job)
+        other={'source':'AUTHENTICATED_GITHUB_AUDIT_COMMENT','comment':{'auditor_session':'fresh-fable-session'}}
+        with patch.object(pipeline.astra,'consume',return_value=other) as fable_read:
+            self.assertEqual(pipeline.validate_audit(job),first)
+            fable_read.assert_called_once()
+
     def test_mac_hold_still_blocks_a_fable_pass(self):
         from test_control_plane_mac_astra_receipt import audit_comment
         self.pages[0].append(audit_comment(self.req,cid=124))
@@ -264,6 +278,39 @@ for event in [dict(type='system',subtype='init',model=model,session_id=session,t
             self.assertEqual(run['exit_code'],0);self.assertTrue(run['process_group_quiescent'])
             self.assertEqual(run['verdict']['head'],req['request_binding']['head'])
             self.assertEqual(set(run['files']),{'packet.json','stdout.jsonl','stderr.txt'})
+
+
+class GlmPacketTests(unittest.TestCase):
+    def test_export_preserves_exact_blobs_and_never_includes_unrelated_tracked_data(self):
+        from mac_authority_checkpoint import ACTOR,APPROVAL
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            def git(*args):
+                return subprocess.check_output(['git','-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false',
+                    '-c','user.name=Fixture','-c','user.email=fixture@example.invalid',*args],cwd=root,text=True).strip()
+            git('init','-b','main');(root/'.aiops').mkdir()
+            (root/'.aiops/program.json').write_bytes(b'{"fixture":true}\n\n')
+            (root/'AGENTS.md').write_bytes(b'Original authority\n\n')
+            (root/'private-transactions.json').write_text('PRIVATE_UNRELATED_DATA_MUST_NOT_BE_SENT')
+            git('add','.');git('commit','-m','fixture base');base=git('rev-parse','HEAD')
+            after=b'\tApproved fixture change\n\n';(root/'AGENTS.md').write_bytes(after)
+            git('add','AGENTS.md');git('commit','-m','fixture change');head=git('rev-parse','HEAD')
+            req=requirement();req['request_binding']['head']=head;req['request_sha256']=common.digest(req['request_binding'])
+            job={'base_sha':base,'head':head,'plan':{'sources':['.aiops/program.json']},
+                 'review':{'head':head,'report':{'summary':'synthetic'},'provider_evidence':{'session_id':'reviewer'}}}
+            pipeline=SimpleNamespace(repos=SimpleNamespace(path=lambda _:root))
+            body=(Path(__file__).resolve().parents[1]/'docs/MAC_AGENTS_SCOPE_APPROVAL_6018278031.md').read_text()
+            approved={'body':body,'user':ACTOR,'created_at':APPROVAL['created_at'],'updated_at':APPROVAL['created_at']}
+            with patch('mac_authority_checkpoint.decision_verified',return_value=True),\
+                    patch.object(handoff,'api',return_value=approved),patch.object(audit,'approval',return_value=audit.DECISION):
+                value=runner.packet(pipeline,job,req,{'fixture':'CI'},['writer','reviewer'])
+                self.assertEqual(value['files']['AGENTS.md']['text'].encode(),after)
+                self.assertTrue(value['base_files']['.aiops/program.json']['same_blob_as_head'])
+                self.assertEqual(set(value['files']),{'AGENTS.md','.aiops/program.json'})
+                self.assertNotIn('PRIVATE_UNRELATED_DATA_MUST_NOT_BE_SENT',common.encoded(value))
+                (root/'private-transactions.json').write_text('changed unrelated private data')
+                git('add','.');git('commit','-m','out of scope fixture');job['head']=git('rev-parse','HEAD')
+                with self.assertRaises(common.AppError):runner.packet(pipeline,job,req,{},[])
 
 
 class GlmApprovalTests(unittest.TestCase):
