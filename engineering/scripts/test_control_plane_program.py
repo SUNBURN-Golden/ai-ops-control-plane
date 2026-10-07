@@ -1157,7 +1157,7 @@ class ProgramModeTests(unittest.TestCase):
 
     def test_kix_premerge_kernel_gate_remains_separate_from_post_merge_profile(self):
         profiles = json.loads((cp.ROOT / ".github/control-plane/projects.json").read_text())
-        kix = profiles["BeautifulMind-JT/kix-protocol"]
+        kix = profiles["SUNBURN-Golden/kix-protocol"]
         self.assertEqual(kix["program_required_checks"], ["protocol", "kernel"])
         self.assertEqual(kix["program_post_merge_required_checks"], ["protocol"])
         cfg, _, merge = self.kix_post_merge_fixture()
@@ -1177,6 +1177,17 @@ class ProgramModeTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"],
                                  "MERGED_POST_VERIFY")
+
+    def test_transferred_kix_keeps_post_merge_ci_and_locked_blob_gates(self):
+        cfg, pin, merge = self.kix_post_merge_fixture()
+        cfg["repository"] = "SUNBURN-Golden/kix-protocol"
+        self.gh.pulls[pin["pr"]]["head"]["repo"]["full_name"] = cfg["repository"]
+        self.gh.workflows[0]["status"] = "in_progress"
+        self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "MERGED_POST_VERIFY")
+        self.gh.workflows[0]["status"] = "completed"
+        path = next(iter(cfg["program_post_merge_locked_blobs"]))
+        self.gh.file_contents[(path, merge)]["sha"] = "b" * 40
+        self.assertEqual(prog.delivery_completion(self.gh, cfg, pin, "ZARI-N1")["status"], "POST_MERGE_FAILED")
 
     def test_kix_locked_blob_changed_or_forged_metadata_is_post_merge_failure(self):
         for mode in ("sha-metadata", "content"):

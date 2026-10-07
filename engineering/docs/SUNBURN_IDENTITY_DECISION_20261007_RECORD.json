@@ -1,0 +1,28 @@
+{
+  "comment_id": 6029021289,
+  "url": "https://github.com/SUNBURN-Golden/ai-ops-control-plane/pull/83#issuecomment-6029021289",
+  "actor_id": 263336091,
+  "actor": "BeautifulMind-JT",
+  "actor_type": "User",
+  "created_at": "2026-10-07T01:38:22Z",
+  "updated_at": "2026-10-07T01:38:22Z",
+  "body_utf8_bytes": 3082,
+  "body_sha256": "046ec5ad2b3a5e3072fc1942fad99e7f8a6b9f6d66766421f4d05c6a7bb4ad16",
+  "provenance": "USER_DIRECT_APPROVAL_RELAYED_FROM_SOURCE_THREAD",
+  "source_thread_id": "01a0f57c-0df9-72ce-bb48-d1aaf753d004",
+  "user_message_id": "Sentinel_e7564964233081918ed2d78f908f3712",
+  "source_main": "77327d3a5f177aca81952ca8e24b5c695f086a23",
+  "analysis_source_head": "7e8bb71f1ea2581fcb493ce7d990534980436c8b",
+  "scope_repository_ids": [
+    1373567344,
+    1365416872,
+    1388268331,
+    1373217962,
+    1365377662
+  ],
+  "old_owner_id": 263336091,
+  "new_owner_id": 338877516,
+  "historical_receipts_rewritten": false,
+  "runtime_resume_authorized": false,
+  "copy_is_live_runtime_proof": false
+}

@@ -10,7 +10,7 @@ NO SECOND SEMANTIC REASONING PASS.
 
 ## 1. Project map
 
-Shared source owner: BeautifulMind-JT/ai-ops-control-plane.
+Shared source owner: SUNBURN-Golden/ai-ops-control-plane.
 Resolve the exact target repository in `.github/control-plane/projects.json`.
 Project-specific task/verification rules are in `projects/<repository-name>.md`.
 Peer targets KIX, ZARI, FILM UNIT and MAEUM_GYEOL have deployment_enabled=true.

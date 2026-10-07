@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "project": "CONTROL_PLANE",
-  "repository": "BeautifulMind-JT/ai-ops-control-plane",
+  "repository": "SUNBURN-Golden/ai-ops-control-plane",
   "runner_labels": [
     "self-hosted",
     "astra-control-plane"
@@ -29,5 +29,9 @@
   "enabled_builders": [
     "DEVIN"
   ],
-  "control_repository": "BeautifulMind-JT/ai-ops-control-plane"
+  "control_repository": "SUNBURN-Golden/ai-ops-control-plane",
+  "repository_id": 1373567344,
+  "repository_owner_id": 338877516,
+  "control_repository_id": 1373567344,
+  "control_repository_owner_id": 338877516
 }

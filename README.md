@@ -96,4 +96,4 @@ Absolute **READ ONLY** for every bot/worker/routine. Document only; never mutate
 
 ---
 
-*Owner: JunTae Park · Repo: BeautifulMind-JT/ai-ops-control-plane*
+*Owner: JunTae Park · Repo: SUNBURN-Golden/ai-ops-control-plane*

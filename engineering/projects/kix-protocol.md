@@ -5,7 +5,7 @@ Central dispatch target. deployment_enabled=true as of 2026-09-27. Merge and pro
 
 
 PROJECT: KIX
-REPO: `BeautifulMind-JT/kix-protocol`
+REPO: `SUNBURN-Golden/kix-protocol`
 DEFAULT_BRANCH: `main`
 SLACK_PROJECT: `#kix`
 SLACK_CONTROL: `#ai-control`

@@ -19,12 +19,17 @@ import time
 import urllib.error
 import urllib.request
 
-CONTROL_REPO = "BeautifulMind-JT/ai-ops-control-plane"
+CONTROL_REPO = "SUNBURN-Golden/ai-ops-control-plane"
 WORKFLOW = "control-plane-runtime.yml"
 API = "https://api.github.com/repos/" + CONTROL_REPO
 WEB = "https://github.com/" + CONTROL_REPO
-TARGETS = frozenset("BeautifulMind-JT/" + name for name in
-                    ("kix-protocol", "kix-commerce-apps", "ZARI", "film-unit-mv-studio", "maeum-gyeol"))
+TARGETS = frozenset("SUNBURN-Golden/" + name for name in
+                    ("kix-protocol", "kix-commerce-apps", "ZARI", "film-unit-mv-studio")) | {"BeautifulMind-JT/maeum-gyeol"}
+# Preserve the original canonical request envelope for existing one-shot relay
+# journals. This is transport-only: the central profile/subject admission still
+# rejects an old target unless its qualified historical path accepts it.
+TARGETS |= frozenset("BeautifulMind-JT/" + name for name in
+                     ("kix-protocol", "kix-commerce-apps", "ZARI", "film-unit-mv-studio"))
 LANES = frozenset(("ALL", "DEVIN", "GROK_BUILD", "GLM", "CURSOR"))
 ARGUMENTS = {
     "lanes": ({}, {}),

@@ -87,8 +87,9 @@ class ObservationTests(unittest.TestCase):
 
     def test_registry_routes_case_insensitively_and_does_not_read_host_backups(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(gitops, 'execute') as run:
-            result = gitops.Repositories(d).execution_admission({'repository': 'beautifulmind-jt/KIX-PROTOCOL'})
-            self.assertEqual(result['reason'], 'registered_project'); run.assert_not_called()
+            for repository in ('beautifulmind-jt/KIX-PROTOCOL', 'sunburn-golden/KIX-PROTOCOL'):
+                result = gitops.Repositories(d).execution_admission({'repository': repository})
+                self.assertEqual(result['reason'], 'registered_project'); run.assert_not_called()
 
     def test_older_prepared_job_still_checks_its_pinned_manifest(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(gitops, 'execute') as run:

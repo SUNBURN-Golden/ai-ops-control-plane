@@ -30,7 +30,7 @@ relay, host = module('relay'), module('host')
 
 def request(operation='lanes', **fields):
     return dict(schema_version=1, request_id='request-1',
-                repository='BeautifulMind-JT/ZARI', operation=operation, **fields)
+                repository='SUNBURN-Golden/ZARI', operation=operation, **fields)
 
 
 class FakeGitHub:
@@ -73,7 +73,7 @@ class RelaySchemaTests(unittest.TestCase):
 
     def test_rejects_ambiguous_or_injected_requests(self):
         base = request()
-        for changes in ({'runner_name': 'x\n$(id)'}, {'repository': []}, {'operation': 'merge'},
+        for changes in ({'runner_name': 'x\n$(id)'}, {'repository': []}, {'repository': 'SUNBURN-Golden/foreign'}, {'operation': 'merge'},
                         {'operation': 'shell'}, {'schema_version': True}, {'request_id': '../x'},
                         {'token': 'secret'}, {'args': {'shell': 'whoami'}}, {'issue_number': 1}):
             with self.subTest(changes=changes), self.assertRaises(relay.RelayError):

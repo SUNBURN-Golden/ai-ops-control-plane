@@ -22,7 +22,7 @@ class CentralRoutesTests(unittest.TestCase):
                       task_pointer=f"https://github.com/{self.repo}/issues/53",
                       pr_pointer=f"https://github.com/{self.repo}/pull/54",
                       builder_id="DEVIN", issue_body_sha256="e" * 64)
-        self.policy = dict(enabled=True, control_repository="BeautifulMind-JT/ai-ops-control-plane",
+        self.policy = dict(enabled=True, control_repository="SUNBURN-Golden/ai-ops-control-plane",
                            runtime_workflow="control-plane-runtime.yml", runtime_workflow_ref="main",
                            repositories=[self.repo], projection_actor="control-bot",
                            registrations={f"{self.repo}#53": {"task_id": "T1"}},
@@ -62,7 +62,7 @@ class CentralRoutesTests(unittest.TestCase):
         receipt = self.ports.route(action)
         method, path, packet = self.api.call.call_args.args
         self.assertEqual(method, "POST")
-        self.assertEqual(path, "repos/BeautifulMind-JT/ai-ops-control-plane/actions/workflows/control-plane-runtime.yml/dispatches")
+        self.assertEqual(path, "repos/SUNBURN-Golden/ai-ops-control-plane/actions/workflows/control-plane-runtime.yml/dispatches")
         self.assertEqual(packet["ref"], "main")
         self.assertEqual(packet["inputs"], dict(operation="dispatch", target_repository=self.repo,
             issue_number="53", expected_task_id="T1", expected_task_revision="3", expected_builder_id="DEVIN",
@@ -71,6 +71,7 @@ class CentralRoutesTests(unittest.TestCase):
 
     def test_dispatch_missing_or_untrusted_central_route_never_falls_back(self):
         for key, value in (("control_repository", None), ("control_repository", self.repo),
+                           ("control_repository", "BeautifulMind-JT/ai-ops-control-plane"),
                            ("runtime_workflow", None), ("runtime_workflow", "anything.yml"),
                            ("runtime_workflow_ref", None), ("runtime_workflow_ref", "unreviewed-branch"),
                            ("repositories", [])):
