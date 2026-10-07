@@ -94,7 +94,8 @@ class NativeWorker:
     def prepare(self, value, work, request_id, attempt_id):
         require(work.get('task_id') == value['task_id'] and work.get('task_revision') == value['task_revision'] and
                 work.get('plan_commit') == value['plan_commit'], 'NATIVE_SCOPE_MISMATCH')
-        profile = self.settings()['roles']['builder']
+        from product_builder import resolve
+        profile = resolve(self.settings(), value['repository'])['roles']['builder']
         require(profile == work.get('profile') and profile['provider'] == PROVIDERS[value['owner_lane']], 'NATIVE_OWNER_PROFILE_MISMATCH')
         native=private_directory(self.directory / 'native')
         request_folder=private_directory(native / request_id)
@@ -325,6 +326,8 @@ class Controller:
             require((isinstance(report, dict) and error is None) or (isinstance(error, str) and report is None), 'NATIVE_TERMINAL_RESULT_INVALID')
             evidence = receipt.get('provider_evidence') or {}
             if report is not None:
+                from product_builder import matches
+                require(matches(attempt['profile'], evidence), 'NATIVE_PROVIDER_BINDING_MISMATCH')
                 agents.validate_report(report)
                 require(receipt['exit_code'] == 0 and evidence.get('provider') == attempt['profile']['provider'] and
                         evidence.get('model_requested') == attempt['profile']['model'] and

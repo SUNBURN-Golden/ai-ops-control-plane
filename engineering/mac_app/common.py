@@ -10,7 +10,7 @@ import stat
 import tempfile
 from provider_catalog import CATALOG
 
-VERSION = '0.3.22'
+VERSION = '0.3.23'
 REPORT_LIMIT = 2 * 1024 * 1024
 JOB_RECORD_LIMIT = 16 * 1024 * 1024
 JOB_CONTROL_RESERVE = 1024 * 1024
@@ -99,8 +99,11 @@ def repository(value):
 
 
 def validate_profile(config):
-    if not isinstance(config, dict) or set(config) != {'provider', 'model'}:
+    if not isinstance(config, dict) or set(config) not in ({'provider', 'model'}, {'provider', 'model', 'reasoning_effort', 'service_tier'}):
         raise AppError('INVALID_MODEL_PROFILE')
+    if 'reasoning_effort' in config:
+        from product_builder import options
+        options(config)
     provider, model = config['provider'], config['model']
     if not isinstance(provider, str) or provider not in PROVIDERS or not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9_.:/-]{0,120}', model) or model.startswith('-'):
         raise AppError('INVALID_MODEL', '지원하는 실행 도구와 올바른 모델 ID를 지정해 주세요.')
@@ -112,11 +115,16 @@ def validate_profile(config):
 
 
 def validate_settings(value):
-    if not isinstance(value, dict) or set(value) != set(DEFAULTS) or type(value.get('schema_version')) is not int or value['schema_version'] != 1:
+    if not isinstance(value, dict) or set(value) not in (set(DEFAULTS), set(DEFAULTS) | {'product_builders'}) or type(value.get('schema_version')) is not int or value['schema_version'] != 1:
         raise AppError('INVALID_SETTINGS')
     if not isinstance(value['roles'], dict) or set(value['roles']) != set(ROLES):
         raise AppError('INVALID_ROLES')
+    if 'product_builders' in value:
+        from product_builder import validate
+        validate(value['product_builders'])
     for role in ROLES:
+        if set(value['roles'][role]) != {'provider', 'model'}:
+            raise AppError('PRODUCT_PROFILE_REQUIRES_REPOSITORY')
         validate_profile(value['roles'][role])
     if type(value['session_minutes']) is not int or not 5 <= value['session_minutes'] <= 720:
         raise AppError('INVALID_SESSION_LIMIT')

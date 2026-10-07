@@ -38,8 +38,15 @@ def audit_requirement(job, scope):
     nodes = scope.get('nodes')
     require(isinstance(nodes, list))
     matches = [node for node in nodes if isinstance(node, dict) and node.get('id') == bound.get('node')]
-    require(len(matches) == 1)
-    node = matches[0]
+    if job.get('bundle'):
+        from mac_bundle import aggregate
+        packet=job['bundle']
+        node, expected=aggregate(scope, {'id':packet['id'],'title':packet['title'],
+                                       'nodes':[n['id'] for n in packet['nodes']]})
+        require(packet==expected and node['id']==bound['node'])
+    else:
+        require(len(matches) == 1)
+        node = matches[0]
     floor, gate = node.get('audit_floor', 'A1'), node.get('astra_gate', 'NONE')
     require(floor in ('A0', 'A1', 'A2', 'A3') and gate in ('NONE', 'MILESTONE', 'ARCHITECTURE', 'RELEASE'))
     if floor == 'A3' and gate != 'RELEASE':

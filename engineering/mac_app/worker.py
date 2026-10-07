@@ -141,6 +141,10 @@ def run(folder):
                         proof.get('loaded_policy_verified') is not True or not adapter_shutdown or proof.get('error')):
                     raise AppError('MAC_CODEX_PROFILE_UNVERIFIED')
             elif child.returncode != 0: raise AppError(failure_code(folder, child.returncode))
+        from product_builder import options
+        if native_codex and options(request['profile']):
+            if proof.get('builder_options_verified') != options(request['profile']):
+                raise AppError('MAC_CODEX_PROFILE_UNVERIFIED')
         completed = agents.completion(request['profile'], folder)
         if native_codex:
             completed.update(transport=proof['transport'],profile_id=proof['profile_id'],profile_sha256=proof['profile_sha256'],
