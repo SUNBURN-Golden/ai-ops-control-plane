@@ -100,7 +100,7 @@ Mac 전원과 네트워크는 유지합니다. 작업 중에는 전원이 연결
 
 ```bash
 python3 engineering/mac_app/aiops.py start \
-  --repo BeautifulMind-JT/ZARI \
+  --repo SUNBURN-Golden/ZARI \
   --goal '레포의 산출물을 완성하고 최종 검수할 수 있게 해 줘' \
   --request-id zari-delivery-001
 

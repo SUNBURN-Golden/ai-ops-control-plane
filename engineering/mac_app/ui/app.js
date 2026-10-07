@@ -139,7 +139,7 @@ function renderConnections(){
     const info=providerInfo(key);if(info){const help=el('p','connection-help');help.append(el('code','',info.login_command),document.createTextNode(' · '));const link=el('a','','설치 안내 ↗');link.href=info.docs_url;link.target='_blank';link.rel='noopener noreferrer';help.append(link);body.append(help);}list.append(row);
   }
   const prefix=shellQuote(state.python_path)+' '+shellQuote(state.cli_path)+' --data-dir '+shellQuote(state.data_directory);
-  $('#cli-example').textContent=prefix+" start \\\n  --repo BeautifulMind-JT/ZARI \\\n  --goal '레포에 명시된 산출물을 완성하고 결과를 검수할 수 있게 해 줘' \\\n  --request-id zari-delivery-001";
+  $('#cli-example').textContent=prefix+" start \\\n  --repo SUNBURN-Golden/ZARI \\\n  --goal '레포에 명시된 산출물을 완성하고 결과를 검수할 수 있게 해 줘' \\\n  --request-id zari-delivery-001";
   $('#mcp-example').textContent=JSON.stringify({mcpServers:{aiops:{command:state.python_path,args:[state.cli_path,'--data-dir',state.data_directory,'mcp']}}},null,2);
 }
 async function refresh(){
