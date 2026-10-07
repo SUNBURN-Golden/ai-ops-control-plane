@@ -704,7 +704,7 @@ def delivery_completion(api: cp.GithubApi, cfg: Dict[str, Any], pin: Optional[Di
               "merge_commit": merge_sha, "reasons": reasons}
     if reasons:
         return result  # an already merged task must not be redispatched either
-    if cfg["repository"] != "BeautifulMind-JT/kix-protocol":
+    if cfg["repository"] not in ("SUNBURN-Golden/kix-protocol", "BeautifulMind-JT/kix-protocol"):
         return {**result, "status": "DONE"}  # no required post-merge phase for these products
     checks = latest_check_runs(all_check_runs(api, merge_sha))
     statuses = api._request("GET", f"/commits/{merge_sha}/status") or {}

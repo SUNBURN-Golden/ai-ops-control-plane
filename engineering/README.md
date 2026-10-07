@@ -1,6 +1,6 @@
 # Shared engineering control plane
 
-Owner: BeautifulMind-JT/ai-ops-control-plane. Root non-engineering policies remain authoritative.
+Owner: SUNBURN-Golden/ai-ops-control-plane. Root non-engineering policies remain authoritative.
 Product contracts, code, task specifications and product CI stay in their repositories.
 SOULBOUND is excluded. All four peer targets retain deployment eligibility.
 
@@ -26,7 +26,7 @@ One task has one writer. Independent review is read-only. User authorizes merge.
 
 Offline checks from repository root:
 - python3 -m unittest discover -s tests
-- ASTRA_TARGET_REPOSITORY=BeautifulMind-JT/kix-protocol python3 -m unittest discover -s engineering/scripts -p 'test_control_plane*.py'
+- ASTRA_TARGET_REPOSITORY=SUNBURN-Golden/kix-protocol python3 -m unittest discover -s engineering/scripts -p 'test_control_plane*.py'
 - bash -n engineering/scripts/control_plane_boundary_hook.sh
 - bash -n engineering/scripts/control_plane_boundary_probe.sh
 

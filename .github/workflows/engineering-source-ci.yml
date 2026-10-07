@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      ASTRA_TARGET_REPOSITORY: BeautifulMind-JT/kix-protocol
+      ASTRA_TARGET_REPOSITORY: SUNBURN-Golden/kix-protocol
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

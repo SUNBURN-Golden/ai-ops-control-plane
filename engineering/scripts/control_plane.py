@@ -51,6 +51,16 @@ ALLOWED_LAUNCH_STATES = (
 )
 HOST_COMMAND = ("/usr/bin/sudo", "-n", "-u", "astra-control", "/opt/astra/bin/astra-host-control")
 STATUS_PROBE_REQUEST = "0" * 24  # never produced by stable_id's sha256 prefix in practice
+CONTROL_REPOSITORY = "SUNBURN-Golden/ai-ops-control-plane"
+MIGRATED_REPOSITORY_IDS = {
+    CONTROL_REPOSITORY: 1373567344,
+    "SUNBURN-Golden/kix-protocol": 1365416872,
+    "SUNBURN-Golden/kix-commerce-apps": 1388268331,
+    "SUNBURN-Golden/ZARI": 1373217962,
+    "SUNBURN-Golden/film-unit-mv-studio": 1365377662,
+}
+MIGRATED_OWNER_ID = 338877516
+LEGACY_CENTRAL_TARGET = "BeautifulMind-JT/maeum-gyeol"
 LAUNCH_IDENTITY = ("repository", "task_id", "task_revision", "builder_id", "launch_request_id", "attempt_id")
 RUNTIME_PATHS = (
     "scripts/control_plane_graph_slack.py", "scripts/test_control_plane_graph_slack.py",
@@ -132,8 +142,9 @@ def load_config() -> Dict[str, Any]:
     cfg = load_json(CONFIG_PATH)
     if "control_repository" in cfg:
         control = cfg["control_repository"]
-        if control != "BeautifulMind-JT/ai-ops-control-plane":
+        if control != CONTROL_REPOSITORY:
             raise ControlPlaneError("unrecognized control repository")
+        validate_current_identity(cfg)
         target = os.environ.get("ASTRA_TARGET_REPOSITORY")
         profiles = load_json(CONFIG_PATH.with_name("projects.json"))
         if target not in profiles:
@@ -144,7 +155,33 @@ def load_config() -> Dict[str, Any]:
     return validate_profile(cfg)
 
 
+def validate_current_identity(cfg: Dict[str, Any]) -> None:
+    """Static adopted pins; live API identity is a separate transport gate.
+
+    Actor logins and original task/receipt identities are not owner aliases.
+    The existing maeum-gyeol target retains its original target boundary; its
+    control pointer follows the same transferred AIOPS repository ID.
+    """
+    if cfg.get("control_repository") != CONTROL_REPOSITORY:
+        raise ControlPlaneError("unrecognized control repository")
+    expected = {"control_repository_id": 1373567344,
+                "control_repository_owner_id": MIGRATED_OWNER_ID}
+    target = cfg.get("repository")
+    if not isinstance(target, str):
+        raise ControlPlaneError("repository identity must be text")
+    if target in MIGRATED_REPOSITORY_IDS:
+        expected.update(repository_id=MIGRATED_REPOSITORY_IDS[target],
+                        repository_owner_id=MIGRATED_OWNER_ID)
+    elif target != LEGACY_CENTRAL_TARGET:
+        raise ControlPlaneError("repository identity is outside adopted migration scope")
+    for field, value in expected.items():
+        if type(cfg.get(field)) is not int or cfg[field] != value:
+            raise ControlPlaneError(f"repository identity pin mismatch: {field}")
+
+
 def validate_profile(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    if "control_repository" in cfg:
+        validate_current_identity(cfg)
     required = {
         "schema_version",
         "project",
@@ -204,6 +241,7 @@ def validate_central_profiles() -> None:
     base = load_json(CONFIG_PATH)
     if "control_repository" not in base:
         return
+    validate_current_identity(base)
     profiles = load_json(CONFIG_PATH.with_name("projects.json"))
     if not profiles:
         raise ControlPlaneError("projects.json must register at least one target")

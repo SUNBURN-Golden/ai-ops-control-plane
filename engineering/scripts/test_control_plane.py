@@ -345,7 +345,7 @@ class RuntimeEnabledGateTests(unittest.TestCase):
         with patch.object(cp, "ACTIVATION_PATH", Path(handle.name)):
             doc = cp.load_activation()
         self.assertTrue(doc["runtime_enabled"])
-        env = {"GITHUB_REPOSITORY": "BeautifulMind-JT/ai-ops-control-plane"}
+        env = {"GITHUB_REPOSITORY": "SUNBURN-Golden/ai-ops-control-plane"}
         with patch.object(cp, "load_activation", return_value=doc), \
              patch.object(cp, "validate_repo"), \
              patch.object(cp.subprocess, "run") as run:
@@ -359,7 +359,7 @@ class RuntimeEnabledGateTests(unittest.TestCase):
 
     def test_validate_repo_enabled_requires_sha_and_pointers(self):
         enabled = activation_doc(runtime_enabled=True, activated_runtime_sha="b" * 40)
-        env = {"GITHUB_REPOSITORY": "BeautifulMind-JT/ai-ops-control-plane"}
+        env = {"GITHUB_REPOSITORY": "SUNBURN-Golden/ai-ops-control-plane"}
         for field, bad in (("activated_runtime_sha", "PENDING"),
                            ("activated_runtime_sha", ""),
                            ("activated_runtime_sha", None),
@@ -374,7 +374,7 @@ class RuntimeEnabledGateTests(unittest.TestCase):
                         cp.validate_repo()
 
     def test_validate_repo_succeeds_while_disabled(self):
-        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "BeautifulMind-JT/ai-ops-control-plane"}):
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "SUNBURN-Golden/ai-ops-control-plane"}):
             cp.validate_repo()
 
 
@@ -695,6 +695,28 @@ class CentralProfileTests(unittest.TestCase):
         self.assertEqual(len(actors), 1)
         cp.validate_central_profiles()
 
+    def test_migration_pins_reject_foreign_repository_owner_and_boolean_ids(self):
+        profile = cp.load_json(cp.CONFIG_PATH.with_name("projects.json"))["SUNBURN-Golden/kix-protocol"]
+        for field in ("repository_id", "repository_owner_id", "control_repository_id", "control_repository_owner_id"):
+            for value in (1, True, None, "338877516"):
+                with self.subTest(field=field, value=value), self.assertRaises(cp.ControlPlaneError):
+                    cp.validate_profile({**profile, field: value})
+
+    def test_migration_does_not_add_other_targets_or_old_name_admission(self):
+        profile = cp.load_json(cp.CONFIG_PATH.with_name("projects.json"))["SUNBURN-Golden/kix-protocol"]
+        for target in ("SUNBURN-Golden/extra", "BeautifulMind-JT/kix-protocol"):
+            with self.subTest(target=target), self.assertRaises(cp.ControlPlaneError):
+                cp.validate_profile({**profile, "repository": target})
+
+    def test_maeum_target_and_personal_actor_keep_existing_boundary(self):
+        profiles = cp.load_json(cp.CONFIG_PATH.with_name("projects.json"))
+        self.assertIn("BeautifulMind-JT/maeum-gyeol", profiles)
+        self.assertNotIn("SUNBURN-Golden/maeum-gyeol", profiles)
+        for profile in profiles.values():
+            self.assertEqual(profile["control_record_actor"], "BeautifulMind-JT")
+            self.assertEqual(profile["allowed_task_actors"], ["BeautifulMind-JT"])
+            self.assertEqual(profile["allowed_dispatch_actors"], ["BeautifulMind-JT"])
+
     def write_profiles(self, mutate):
         directory = tempfile.TemporaryDirectory(dir=cp.ROOT)
         self.addCleanup(directory.cleanup)
@@ -707,7 +729,7 @@ class CentralProfileTests(unittest.TestCase):
 
     def test_divergent_record_actor_is_rejected(self):
         def diverge(profiles):
-            profiles["BeautifulMind-JT/ZARI"]["control_record_actor"] = "github-actions[bot]"
+            profiles["SUNBURN-Golden/ZARI"]["control_record_actor"] = "github-actions[bot]"
         with patch.object(cp, "CONFIG_PATH", self.write_profiles(diverge)):
             with self.assertRaisesRegex(cp.ControlPlaneError, "control_record_actor must match"):
                 cp.validate_central_profiles()

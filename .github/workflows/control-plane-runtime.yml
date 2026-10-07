@@ -37,11 +37,11 @@ on:
         required: true
         type: choice
         options:
-          - BeautifulMind-JT/kix-protocol
-          - BeautifulMind-JT/ZARI
-          - BeautifulMind-JT/film-unit-mv-studio
+          - SUNBURN-Golden/kix-protocol
+          - SUNBURN-Golden/ZARI
+          - SUNBURN-Golden/film-unit-mv-studio
           - BeautifulMind-JT/maeum-gyeol
-          - BeautifulMind-JT/kix-commerce-apps
+          - SUNBURN-Golden/kix-commerce-apps
       issue_number:
         description: "Canonical GitHub task issue number (required for dispatch)"
         required: false

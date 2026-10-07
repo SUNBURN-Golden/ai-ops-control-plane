@@ -1,8 +1,8 @@
 {
-  "BeautifulMind-JT/kix-protocol": {
+  "SUNBURN-Golden/kix-protocol": {
     "schema_version": 1,
     "project": "KIX",
-    "repository": "BeautifulMind-JT/kix-protocol",
+    "repository": "SUNBURN-Golden/kix-protocol",
     "runner_labels": [
       "self-hosted",
       "astra-control-plane"
@@ -33,7 +33,7 @@
       "GLM",
       "CURSOR"
     ],
-    "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
+    "control_repository": "SUNBURN-Golden/ai-ops-control-plane",
     "deployment_enabled": true,
     "program_merge_policy": "STANDARD",
     "program_required_checks": [
@@ -47,12 +47,16 @@
       "runtime/crates/kix-kernel/src/lib.rs": "69564b166f0c27f9af5d8422f0a466b18d74c20f",
       "runtime/crates/kix-kernel/tests/quarantine_capacity.rs": "b607996c83a119c349f1cc90469ac1ba82764e20"
     },
-    "program_post_merge_lock_authority": "https://github.com/BeautifulMind-JT/kix-protocol/blob/78b78b1b4a4ffe92de461edd351235ce858b335a/AGENTS.md"
+    "program_post_merge_lock_authority": "https://github.com/BeautifulMind-JT/kix-protocol/blob/78b78b1b4a4ffe92de461edd351235ce858b335a/AGENTS.md",
+    "control_repository_id": 1373567344,
+    "control_repository_owner_id": 338877516,
+    "repository_id": 1365416872,
+    "repository_owner_id": 338877516
   },
-  "BeautifulMind-JT/ZARI": {
+  "SUNBURN-Golden/ZARI": {
     "schema_version": 1,
     "project": "ZARI",
-    "repository": "BeautifulMind-JT/ZARI",
+    "repository": "SUNBURN-Golden/ZARI",
     "runner_labels": [
       "self-hosted",
       "astra-control-plane"
@@ -83,17 +87,21 @@
       "GLM",
       "CURSOR"
     ],
-    "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
+    "control_repository": "SUNBURN-Golden/ai-ops-control-plane",
     "deployment_enabled": true,
     "program_merge_policy": "STANDARD",
     "program_required_checks": [
       "bridge"
-    ]
+    ],
+    "control_repository_id": 1373567344,
+    "control_repository_owner_id": 338877516,
+    "repository_id": 1373217962,
+    "repository_owner_id": 338877516
   },
-  "BeautifulMind-JT/film-unit-mv-studio": {
+  "SUNBURN-Golden/film-unit-mv-studio": {
     "schema_version": 1,
     "project": "FILM_UNIT",
-    "repository": "BeautifulMind-JT/film-unit-mv-studio",
+    "repository": "SUNBURN-Golden/film-unit-mv-studio",
     "runner_labels": [
       "self-hosted",
       "astra-control-plane"
@@ -124,13 +132,17 @@
       "GLM",
       "CURSOR"
     ],
-    "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
+    "control_repository": "SUNBURN-Golden/ai-ops-control-plane",
     "deployment_enabled": true,
     "program_merge_policy": "STANDARD",
     "program_required_checks": [
       "Python 3.11 / FFmpeg",
       "Python 3.12 / FFmpeg"
-    ]
+    ],
+    "control_repository_id": 1373567344,
+    "control_repository_owner_id": 338877516,
+    "repository_id": 1365377662,
+    "repository_owner_id": 338877516
   },
   "BeautifulMind-JT/maeum-gyeol": {
     "schema_version": 1,
@@ -163,13 +175,15 @@
     "enabled_builders": [
       "DEVIN"
     ],
-    "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
-    "deployment_enabled": true
+    "control_repository": "SUNBURN-Golden/ai-ops-control-plane",
+    "deployment_enabled": true,
+    "control_repository_id": 1373567344,
+    "control_repository_owner_id": 338877516
   },
-  "BeautifulMind-JT/kix-commerce-apps": {
+  "SUNBURN-Golden/kix-commerce-apps": {
     "schema_version": 1,
     "project": "KIX_COMMERCE",
-    "repository": "BeautifulMind-JT/kix-commerce-apps",
+    "repository": "SUNBURN-Golden/kix-commerce-apps",
     "runner_labels": [
       "self-hosted",
       "astra-control-plane"
@@ -200,11 +214,15 @@
       "GLM",
       "CURSOR"
     ],
-    "control_repository": "BeautifulMind-JT/ai-ops-control-plane",
+    "control_repository": "SUNBURN-Golden/ai-ops-control-plane",
     "deployment_enabled": true,
     "program_merge_policy": "STANDARD",
     "program_required_checks": [
       "Typecheck, build, and test (stub)"
-    ]
+    ],
+    "control_repository_id": 1373567344,
+    "control_repository_owner_id": 338877516,
+    "repository_id": 1388268331,
+    "repository_owner_id": 338877516
   }
 }
