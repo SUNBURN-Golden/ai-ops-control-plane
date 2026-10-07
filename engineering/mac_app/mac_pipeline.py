@@ -181,7 +181,15 @@ class Pipeline:
             # dependency proofs bind its complete private document digest.
             if not isinstance(recorded,dict) or {**recorded,'audit_receipt':None}!=requirement:
                 self.store.update(job['id'],audit_requirement=requirement)
-        receipt=self.astra.consume(requirement)
+        # A scoped Mac run is separate from the immutable original Fable request.
+        # Check both producers: a Mac negative/deletion cannot be bypassed by a
+        # Fable PASS, and a Fable negative cannot be bypassed by a Mac PASS.
+        import mac_glm_audit
+        mac_receipt=mac_glm_audit.existing_receipt(self.store,requirement)
+        try: receipt=self.astra.consume(requirement)
+        except AppError as exc:
+            if exc.code!='MAC_HOST_ASTRA_AUDIT_REQUIRED' or mac_receipt is None: raise
+            receipt=mac_receipt
         require(receipt['comment']['auditor_session'] not in
                 self.writer_sessions(job)+[job['review']['provider_evidence']['session_id']],
                 'MAC_HOST_INDEPENDENT_REVIEW_REQUIRED')

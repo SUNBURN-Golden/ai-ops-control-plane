@@ -528,3 +528,21 @@ task throughput, per-builder cost, Astra usage, Grok usage, User interventions,
 review findings and rework separately; do not claim savings without observations.
 
 ---
+
+User decision [D-2026-10-07-MAC-GLM-PRODUCT-AUDIT](https://github.com/SUNBURN-Golden/ai-ops-control-plane/pull/84#issuecomment-6031603785)
+authorizes a distinct independent `MAC_GLM53` / actual `glm-5.3` product auditor
+for existing KIX job `20531604498943e1`, PR121, ARCHITECTURE/A3. The earlier Mac
+Fable-only producer limitation is amended only for this scoped alternative;
+Linux protected aiops-fable and the original Fable channel remain unchanged.
+The [original User question/reply and relay provenance](docs/MAC_GLM_PRODUCT_AUDIT_DECISION_20261007.md)
+are pinned to comment6031603785, actor263336091/BeautifulMind-JT/User,
+created=updated2026-10-07T05:27:40Z, body SHA256
+`8bb3a81d2cfd90d229f4c33d92f4ce74785df9225fd445321a460986bae1ce4f`.
+Original canonical requests/digests, writer, completed builder,29-line result,
+independent reviews, live exact-HEAD CI, negative holds and User merge remain.
+A new producer record binds the original request to actual private Mac execution
+and an unchanged authenticated GitHub comment. Text-only PASS is not proof.
+The existing Mac host account and private execution records are trusted, not a
+new signature or protected Linux identity. No new credential/scope, Linux
+protected file change, manual ledger rewrite or fresh product builder is granted.
+See [the Mac GLM product audit contract](docs/MAC_GLM_PRODUCT_AUDIT_KO.md).

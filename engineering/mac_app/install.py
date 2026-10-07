@@ -437,6 +437,8 @@ def install(destination=None, data=None, *, update=False):
 
 
 def install_locked(app, state, agents, plist, *, update):
+    import mac_glm_audit
+    mac_glm_audit.require_idle(state)
     if app in state.parents or state in app.parents or app == state: raise AppError('UNSAFE_INSTALL_PATH')
     if app.exists() and not update: raise AppError('ALREADY_INSTALLED', '이미 설치되어 있습니다. 작업을 마친 뒤 --update로 업데이트해 주세요.')
     if update and not app.exists(): raise AppError('NOT_INSTALLED')
@@ -458,6 +460,7 @@ def install_locked(app, state, agents, plist, *, update):
         if was_loaded:
             launchctl('bootout', domain + '/' + LABEL); stopped = True
         fd = fence(state, wait=stopped)
+        mac_glm_audit.require_idle(state)
         idle_database(state)
         service_logs(state, create=True)
         app.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
