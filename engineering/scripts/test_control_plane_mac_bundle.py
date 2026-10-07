@@ -105,6 +105,13 @@ class BundleTests(unittest.TestCase):
     def test_existing_single_generation_blocks_bundle(self):
         v=self.value(node='sdk');v.pop('bundle');self.source.generation(v)
         with self.assertRaisesRegex(common.AppError,'ALREADY_OWNED'):self.adopt(generation_id='2'*32)
+    def test_candidate_defers_dependency_audit_observations_to_admission(self):
+        value=self.candidate();value['bundle']['nodes']=['catalogue','examples']
+        before=list(self.store.db.iterdump())
+        with patch('mac_generation.dependency_evidence',side_effect=AssertionError('read-only candidate cannot consume audit')):
+            candidate=mac_bundle.prepare(self.source,value)
+        self.assertIn({'node':'sdk','code':'MAC_BUNDLE_DEPENDENCY_REVALIDATION_REQUIRED'},candidate['blockers'])
+        self.assertEqual(before,list(self.store.db.iterdump()))
     def test_external_dependency_is_not_silently_internalized(self):
         with self.assertRaisesRegex(common.AppError,'DEPENDENCY_GATE_REQUIRED'):
             self.adopt(bundle={**self.spec,'nodes':['catalogue','examples']})

@@ -26,7 +26,8 @@ plan_commit, plan_blob, bundle이다. bundle은 id(`bundle-…`), title, 위상 
 원본 manifest의 이전 저장소 이름은 이 bundle reader에 한해 기존 live 동일 numeric ID/owner 및
 이전 URL 승인 검증을 거쳐 읽는다. source_repository와 원래 bytes/blob를 보존하며 다른 제품과
 일반 신규 admission의 이전 이름 금지는 유지한다. CANDIDATE_ONLY는 실행 승인이 아니다. 열린 원본 소유권, opaque UNKNOWN scope, 겹치는 Mac
-작업, 미완료 외부 의존성을 blockers에 표시한다. 기존 원장을 변경하지 않는다.
+작업, 외부 의존성의 재검증 필요를 blockers에 표시한다. 외부 ACCEPTED 검증은 감사 관측을
+기록할 수 있으므로 후보 준비에서는 소비하지 않고 실제 채택 시 다시 수행한다. 기존 원장을 변경하지 않는다.
 
 채택은 기존 `host generation`의 정확한 plan pin·새 generation-id·기존 host decision에
 `--node bundle-… --bundle bundle.json`을 더한다. 별도 start 명령 전까지 모델 실행은 없다.

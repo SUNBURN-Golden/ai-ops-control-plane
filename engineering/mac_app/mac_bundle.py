@@ -1,6 +1,7 @@
 """A new KIX deliverable with immutable original members, never legacy completion."""
 import copy
 import re
+import handoff
 
 from common import AppError, digest, encoded
 from mac_authority import require, original_task_key
@@ -110,6 +111,7 @@ def check_receipts(source, scope, selected):
                      record['task_id'].upper() in task_keys | {'*'}), 'MAC_BUNDLE_OWNER_UNRESOLVED')
 
 
+@handoff.bounded_api_reads
 def prepare(source, value):
     """Read-only candidate; no task reservation, writer or execution authority."""
     import handoff
@@ -137,8 +139,11 @@ def prepare(source, value):
             bound, work = parse_json(row['binding']), parse_json(row['work'], 1024*1024)
             if selected & keys(bound['program'], work):
                 blockers.append({'code': 'MAC_GENERATION_ORIGINAL_TASK_ALREADY_OWNED', 'task': bound['task_id']})
-    try: mac_generation.dependency_evidence(source, scope, task, original['head'])
-    except AppError as exc: blockers.append({'code': exc.code})
+    # Accepted-dependency validation can record durable audit observations.
+    # Candidate preparation is strictly read-only: leave that fresh gate to
+    # adoption rather than consuming or changing an existing audit journal.
+    for node in packet['external_dependencies']:
+        blockers.append({'node':node,'code':'MAC_BUNDLE_DEPENDENCY_REVALIDATION_REQUIRED'})
     return {'status': 'CANDIDATE_ONLY', 'execution_authorized': False, 'request': copy.deepcopy(value),
             'candidate_sha256': digest(value), 'bundle': packet, 'task': task,
             'blockers': blockers, 'completion': 'NOT_EXECUTED',
