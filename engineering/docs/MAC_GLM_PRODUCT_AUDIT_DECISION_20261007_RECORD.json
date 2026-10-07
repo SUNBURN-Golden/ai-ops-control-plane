@@ -1,0 +1,16 @@
+{
+  "id": 6031603785,
+  "html_url": "https://github.com/SUNBURN-Golden/ai-ops-control-plane/pull/84#issuecomment-6031603785",
+  "issue_url": "https://api.github.com/repos/SUNBURN-Golden/ai-ops-control-plane/issues/84",
+  "created_at": "2026-10-07T05:27:40Z",
+  "updated_at": "2026-10-07T05:27:40Z",
+  "actor": {
+    "id": 263336091,
+    "login": "BeautifulMind-JT",
+    "type": "User"
+  },
+  "body_sha256": "8bb3a81d2cfd90d229f4c33d92f4ce74785df9225fd445321a460986bae1ce4f",
+  "body_utf8_bytes": 2928,
+  "provenance": "USER_DIRECT_APPROVAL_RELAYED_FROM_SOURCE_THREAD",
+  "source_thread": "01a0f57c-0df9-72ce-bb48-d1aaf753d004"
+}
