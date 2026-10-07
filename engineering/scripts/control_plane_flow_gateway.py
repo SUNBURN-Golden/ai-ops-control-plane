@@ -330,7 +330,7 @@ PASS text. Shared author/reviewer GitHub identities are conservatively rejected.
             control = self.policy.get("control_repository")
             workflow = self.policy.get("runtime_workflow")
             ref = self.policy.get("runtime_workflow_ref")
-            flow.require(control == "BeautifulMind-JT/ai-ops-control-plane" and
+            flow.require(control == "SUNBURN-Golden/ai-ops-control-plane" and
                          workflow == "control-plane-runtime.yml" and ref == "main",
                          "trusted central runtime route not configured")
             flow.require(repo in self.policy.get("repositories", []), "target repository not configured")

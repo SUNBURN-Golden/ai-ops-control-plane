@@ -148,17 +148,31 @@ class HostHandoffTests(unittest.TestCase):
         with self.assertRaisesRegex(common.AppError, 'HANDOFF_TASK_HISTORY_INCOMPLETE'):
             self.assess(record=record)
 
-    def test_case_alias_collection_reaches_exact_protected_host_repository(self):
+    def test_transferred_old_case_alias_requires_subject_before_host_collection(self):
+        with mock.patch.object(handoff, 'execute') as read:
+            with self.assertRaisesRegex(common.AppError, 'REPOSITORY_IDENTITY_MIGRATION_SUBJECT_REQUIRED'):
+                handoff.inspect_repository(program_fixture.REPO.lower())
+            read.assert_not_called()
+
+    def test_current_case_alias_collection_verifies_metadata_and_preserves_snapshot(self):
         import test_control_plane_mac_handoff as collection_fixture
-        values = collection_fixture.responses(data=program_fixture.plan())
-        values[0]['full_name'] = program_fixture.REPO
+        repo = 'SUNBURN-Golden/ZARI'
+        plan = dict(program_fixture.plan(), repository=repo)
+        values = collection_fixture.responses(data=plan)
+        values[0].update(full_name=repo, id=1373217962, private=True, fork=False,
+                         owner=dict(id=338877516, login='SUNBURN-Golden', type='Organization'))
         values[1]['sha'] = program_fixture.PLAN1
-        values[3] = [[self.f.gh.issues[self.issue]]]
-        with mock.patch.object(handoff, 'execute', side_effect=[json.dumps(x) for x in values]):
-            snap = handoff.inspect_repository(program_fixture.REPO.lower())
-        record = self.record(); record.update(repository=snap['repository'], snapshot=snap,
-                                              snapshot_sha256=common.digest(snap), blockers=snap['blockers'])
-        self.assertEqual(self.assess(record=record)['observations_consistent'], True)
+        issue = dict(self.f.gh.issues[self.issue], html_url=f'https://github.com/{repo}/issues/{self.issue}')
+        issue['body'] = issue['body'].replace(program_fixture.REPO, repo)
+        values[3] = [[issue]]
+        responses = [values[0], values[0], values[1], values[0], values[2], values[0], values[3]]
+        with mock.patch.object(handoff, 'execute', side_effect=[json.dumps(x) for x in responses]) as read:
+            snap = handoff.inspect_repository(repo.lower())
+        self.assertEqual(snap['repository'], repo)
+        self.assertEqual(snap['source']['head'], program_fixture.PLAN1)
+        self.assertEqual(snap['tasks'][0]['number'], self.issue)
+        self.assertEqual(snap['task_scope'], 'all')
+        self.assertEqual(read.call_args_list[0].args[0][-1], 'repos/' + repo)
 
     def test_first_writer_owner_is_retained_after_verified_release(self):
         self.f.released_writer(self.issue)

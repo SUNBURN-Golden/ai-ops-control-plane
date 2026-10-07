@@ -154,7 +154,8 @@ class Repositories:
         if not registry.is_file(): raise AppError('ADMISSION_REGISTRY_UNAVAILABLE')
         projects = read_json(registry)
         if not isinstance(projects, dict): raise AppError('ADMISSION_REGISTRY_UNAVAILABLE')
-        managed = any(name.lower() == job['repository'].lower() for name in projects)
+        from repository_identity import current_name
+        managed = any(name.lower() == current_name(job['repository']).lower() for name in projects)
         # Older prepared jobs may predate persisted program_scope. Re-read the
         # pinned manifest rather than inferring authority from a missing field.
         if not job.get('program_scope') and job.get('base_sha'):

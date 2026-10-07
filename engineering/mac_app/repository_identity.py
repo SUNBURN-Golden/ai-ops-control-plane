@@ -19,22 +19,23 @@ OWNER_ID = 338877516
 
 def current_name(repository):
     """Lookup shared constraints; this does not grant old-name admission."""
-    if repository.startswith('BeautifulMind-JT/'):
-        candidate = 'SUNBURN-Golden/' + repository.split('/', 1)[1]
-        if candidate in PINS:
-            return candidate
+    for name in PINS:
+        old_name = 'BeautifulMind-JT/' + name.split('/', 1)[1]
+        if repository.lower() in (name.lower(), old_name.lower()):
+            return name
     return repository
 
 
 def reject_old_admission(repository):
-    old_names = {'BeautifulMind-JT/' + name.split('/', 1)[1] for name in PINS}
-    if repository in old_names:
+    old_names = {'beautifulmind-jt/' + name.split('/', 1)[1].lower() for name in PINS}
+    if repository.lower() in old_names:
         raise AppError('REPOSITORY_IDENTITY_MIGRATION_SUBJECT_REQUIRED')
 
 
 def current_pin(repository):
-    if repository in PINS:
-        return PINS[repository]
+    for name, pin in PINS.items():
+        if repository.lower() == name.lower():
+            return pin
     if repository.lower().startswith('sunburn-golden/'):
         raise AppError('REPOSITORY_IDENTITY_SCOPE_REQUIRED')
     return None
@@ -46,7 +47,7 @@ def verify(repository, metadata):
         return metadata
     owner = metadata.get('owner') if isinstance(metadata, dict) else None
     if (not isinstance(metadata, dict) or type(metadata.get('id')) is not int
-            or metadata['id'] != expected or metadata.get('full_name') != repository
+            or metadata['id'] != expected or metadata.get('full_name') != current_name(repository)
             or metadata.get('fork') is not False or metadata.get('private') is not True
             or metadata.get('archived') is not False or not isinstance(owner, dict)
             or type(owner.get('id')) is not int or owner['id'] != OWNER_ID
@@ -58,4 +59,4 @@ def verify(repository, metadata):
 def observe(repository, authenticated_read):
     if current_pin(repository) is None:
         return None
-    return verify(repository, authenticated_read('repos/' + repository))
+    return verify(repository, authenticated_read('repos/' + current_name(repository)))

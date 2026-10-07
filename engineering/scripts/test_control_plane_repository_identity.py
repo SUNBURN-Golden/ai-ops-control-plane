@@ -41,8 +41,9 @@ class RepositoryIdentityTests(unittest.TestCase):
 
     def test_mac_old_alias_does_not_create_new_admission_or_read_foreign_namespace(self):
         with patch.object(handoff,'api') as read:
-            with self.assertRaises(AppError):
-                handoff.inspect_repository('BeautifulMind-JT/kix-protocol')
+            for repository in ('BeautifulMind-JT/kix-protocol', 'beautifulmind-jt/KIX-PROTOCOL'):
+                with self.subTest(repository=repository), self.assertRaises(AppError):
+                    handoff.inspect_repository(repository)
             read.assert_not_called()
 
     def test_api_verifies_identity_before_any_mutation(self):
