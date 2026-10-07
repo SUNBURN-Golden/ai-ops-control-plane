@@ -16,6 +16,7 @@ from common import TERMINAL, digest, encoded, parse_json, repository
 from mac_authority import require, original_task_key
 from program_scope import load_scope
 import handoff
+from repository_identity import url_matches, same_repository, canonical_url
 import transport_guard
 
 
@@ -84,8 +85,8 @@ def decision_evidence(pointer):
     require(pointer == HOST_DECISION['url'], 'MAC_GENERATION_DURABLE_DECISION_REQUIRED')
     comment = handoff.api(DECISION_API)
     require(isinstance(comment, dict) and comment.get('id') == HOST_DECISION['comment_id'] and
-            comment.get('html_url') == pointer and
-            comment.get('issue_url') == 'https://api.github.com/repos/BeautifulMind-JT/ai-ops-control-plane/issues/77' and
+            url_matches(pointer, comment.get('html_url')) and
+            url_matches('https://api.github.com/repos/BeautifulMind-JT/ai-ops-control-plane/issues/77', comment.get('issue_url')) and
             isinstance(comment.get('user'), dict) and
             comment['user'].get('id') == HOST_DECISION['actor_id'] and
             comment['user'].get('login') == HOST_DECISION['actor_login'] and

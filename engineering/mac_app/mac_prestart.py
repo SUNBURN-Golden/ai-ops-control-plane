@@ -14,6 +14,7 @@ import re
 from common import parse_json
 from mac_authority import require
 import handoff
+from repository_identity import url_matches, same_repository, canonical_url
 
 REPOSITORY = 'BeautifulMind-JT/kix-protocol'
 ISSUE = 92
@@ -42,8 +43,8 @@ def evidence():
 
 def pinned_comment(comment, pin):
     require(isinstance(comment, dict) and comment.get('id') == pin['comment_id'] and
-            comment.get('html_url') == pin['url'] and
-            comment.get('issue_url') == 'https://api.github.com/repos/' + REPOSITORY + '/issues/92' and
+            url_matches(pin['url'], comment.get('html_url')) and
+            url_matches('https://api.github.com/repos/' + REPOSITORY + '/issues/92', comment.get('issue_url')) and
             isinstance(comment.get('user'), dict) and
             all(comment['user'].get(k) == v for k, v in ACTOR.items()) and
             isinstance(comment.get('body'), str) and
@@ -68,7 +69,7 @@ def verify(repo, task, program, node):
     root = 'repos/' + REPOSITORY + '/issues/92'
     issue = handoff.api(root)
     require(isinstance(issue, dict) and issue.get('number') == ISSUE and issue.get('state') == 'open' and
-            issue.get('html_url') == ISSUE_URL and isinstance(issue.get('body'), str) and
+            url_matches(ISSUE_URL, issue.get('html_url')) and isinstance(issue.get('body'), str) and
             hashlib.sha256(issue['body'].encode()).hexdigest() == task.get('body_sha256'), CODE)
     body = issue['body']
     require(handoff.TASK_KEY.findall(body) == [('kix', 'agents-scope-sync', MATERIALIZATION)], CODE)

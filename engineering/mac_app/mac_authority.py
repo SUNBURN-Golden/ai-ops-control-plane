@@ -176,11 +176,11 @@ class LocalSource:
     def preflight(self,bound,*,allow_base_advance=False):
         # Fresh read-only projections add barriers only. They never release an
         # external owner, infer terminal execution or advance the pinned plan.
-        snapshot=handoff.inspect_repository(bound['repository'])
         import mac_astra_receipt
         with self.store.lock:
             task=self._task(self.store.db,bound)
             node=parse_json(task['work'],1024*1024)['task']
+        snapshot=handoff.inspect_repository(bound['repository'], existing_subject=True)
         mac_astra_receipt.admission(node)
         if 'generation_id' in bound:
             import mac_generation
@@ -330,10 +330,15 @@ class LocalSource:
         require(isinstance(value,dict) and set(value)=={'repository','decision'} and
                 isinstance(value['decision'],str) and 1<=len(value['decision'])<=2000,'MAC_HOST_REQUEST_INVALID')
         repo=repository(value['repository']).lower()
-        snapshot=handoff.inspect_repository(repo)
         with self.store.lock:
             previous=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',(repo,)).fetchone()
             require(previous is not None,'MAC_HOST_PROGRAM_NOT_FOUND')
+            original=previous[0]
+        canonical_repository=parse_json(original)['scope']['repository']
+        snapshot=handoff.inspect_repository(canonical_repository, existing_subject=True)
+        with self.store.lock:
+            previous=self.store.db.execute('SELECT document FROM mac_host_programs WHERE repository=?',(repo,)).fetchone()
+            require(previous is not None and previous[0]==original,'MAC_HOST_PROGRAM_REVISION_CHANGED')
             program=parse_json(previous[0])
             require(snapshot['source']['blob']==program['scope']['blob'] and snapshot['source']['branch']==program['branch'],
                     'MAC_HOST_PROGRAM_REVISION_CHANGED')

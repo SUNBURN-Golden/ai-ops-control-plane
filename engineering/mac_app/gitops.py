@@ -12,6 +12,7 @@ import agents
 import admission
 from common import AppError, digest, encoded, parse_json, read_json
 from program_scope import load_scope
+from repository_identity import current_name, transport, same_repository, url_matches, canonical_url, repository_object_matches
 
 # The original roadmap-sync explicitly names this status header. These pins
 # permit exactly its reviewed two-line alignment, retaining every body byte.
@@ -72,12 +73,18 @@ def execute(argv, cwd=None, timeout=120, allowed=(0,), *, github_access=None, li
 
 
 def git(checkout, *args, **kwargs):
+    if args and args[0] in ('fetch', 'push') and 'origin' in args and checkout is not None:
+        origin = git(checkout, 'remote', 'get-url', 'origin')
+        match = re.fullmatch(r'https://github\.com/([^/]+/[^/]+)\.git', origin)
+        if match and current_name(match[1]) != match[1]:
+            args = ('-c', 'remote.origin.url=https://github.com/' + transport(match[1]) + '.git', *args)
     return execute(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
                     '-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential',
                     *args], cwd=checkout, **kwargs)
 
 
 def gh(repo, *args, github_access=None, **kwargs):
+    repo = transport(repo)
     if args[:2] == ('repo', 'view'):
         return execute(['gh', 'repo', 'view', repo, *args[2:]], github_access=github_access, **kwargs)
     return execute(['gh', *args, '--repo', repo], github_access=github_access, **kwargs)
@@ -285,9 +292,10 @@ class Repositories:
         if self.head(job) != job['head'] or not self.clean(job): raise AppError('STALE_PUBLISH_HEAD')
         if job.get('native_lineage'):
             metadata=parse_json(gh(job['repository'],'repo','view','--json','nameWithOwner,isPrivate',github_access='READ'))
-            if not isinstance(metadata,dict) or metadata.get('nameWithOwner','').lower()!=job['repository'].lower() or metadata.get('isPrivate') is not True:
+            if not isinstance(metadata,dict) or not same_repository(job['repository'], metadata.get('nameWithOwner','')) or metadata.get('isPrivate') is not True:
                 raise AppError('MAC_HOST_CANDIDATE_PUBLICATION_SCOPE_REQUIRED')
         checkout = self.path(job)
+        remote_url = 'https://github.com/' + transport(job['repository']) + '.git'
         # The bounded authority approval is the last pre-push network read.
         from mac_authority_checkpoint import PINS, approved, committed_matches
         push_source = 'HEAD'
@@ -297,7 +305,7 @@ class Repositories:
             if not committed_matches(self, job, job['head']): raise AppError('STALE_PUBLISH_HEAD')
             # A concurrent ref move must never substitute an unreviewed commit.
             push_source = job['head']
-        git(checkout, 'push', '--porcelain', 'origin', push_source + ':refs/heads/' + job['branch'], timeout=180)
+        git(checkout, '-c', 'remote.origin.url=' + remote_url, 'push', '--porcelain', 'origin', push_source + ':refs/heads/' + job['branch'], timeout=180)
         fields='url,state,headRefOid'+(',isDraft,autoMergeRequest' if generation else '')
         prior = parse_json(gh(job['repository'], 'pr', 'list', '--head', job['branch'], '--state', 'all',
                               '--json', fields, '--limit', '10',github_access='READ'))
@@ -326,7 +334,7 @@ class Repositories:
         path.write_text(body, encoding='utf-8')
         url = gh(job['repository'], 'pr', 'create', '--draft', '--base', job['base_branch'],
                  '--head', job['branch'], '--title', 'AIOPS: ' + job['goal'].split('\n')[0][:120], '--body-file', str(path),github_access='WRITE')
-        if not re.fullmatch(r'https://github\.com/' + re.escape(job['repository']) + r'/pull/[0-9]+', url):
+        if not re.fullmatch(r'https://github\.com/' + re.escape(job['repository']) + r'/pull/[0-9]+', canonical_url(job['repository'], url)):
             raise AppError('PUBLISH_RECEIPT_UNKNOWN')
         return url
 
@@ -384,7 +392,7 @@ class Repositories:
         if workflow not in self.candidate_workflows(job): raise AppError('MAC_HOST_DRAFT_CI_ROUTE_REQUIRED')
         self.assert_binding(job)
         if self.head(job)!=job['head'] or not self.clean(job): raise AppError('STALE_PUBLISH_HEAD')
-        repo=job['repository']; match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/pull/([0-9]+)',job['pr_url'] or '')
+        repo=job['repository']; match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/pull/([0-9]+)',canonical_url(job['repository'], job['pr_url']) if job['pr_url'] else '')
         if not match: raise AppError('MAC_HOST_CANDIDATE_BINDING_UNVERIFIED')
         pull=api('repos/'+repo+'/pulls/'+match.group(1))
         ref=api('repos/'+repo+'/git/ref/heads/'+job['branch'])
@@ -394,7 +402,7 @@ class Repositories:
                 pull.get('base',{}).get('ref')==job['base_branch'] and ref.get('object',{}).get('sha')==job['head'] and
                 target.get('path')=='.github/workflows/'+workflow and target.get('state')=='active'):
             raise AppError('MAC_HOST_CANDIDATE_BINDING_UNVERIFIED')
-        execute(['gh','api','--method','POST','repos/'+repo+'/actions/workflows/'+workflow+'/dispatches',
+        execute(['gh','api','--method','POST','repos/'+transport(repo)+'/actions/workflows/'+workflow+'/dispatches',
                  '-f','ref='+job['branch']],github_access='WRITE')
 
     def hosted_checks(self,job,head,*,post_merge=False):
@@ -408,12 +416,12 @@ class Repositories:
         for check in data['check_runs']:
             if check.get('head_sha')!=head: raise AppError('MAC_HOST_CI_OBSERVATION_UNVERIFIED')
             if (check.get('app') or {}).get('slug')!='github-actions': continue
-            match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/actions/runs/([0-9]+)(?:/job/[0-9]+)?',check.get('details_url') or '')
+            match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/actions/runs/([0-9]+)(?:/job/[0-9]+)?',canonical_url(repo, check['details_url']) if check.get('details_url') else '')
             if not match: raise AppError('MAC_HOST_CI_OBSERVATION_UNVERIFIED')
             run_id=match.group(1)
             if run_id not in runs: runs[run_id]=api('repos/'+repo+'/actions/runs/'+run_id)
             run=runs[run_id]
-            if run.get('head_sha')!=head or (run.get('repository') or {}).get('full_name','').lower()!=repo.lower():
+            if run.get('head_sha')!=head or not repository_object_matches(repo, run.get('repository')):
                 raise AppError('MAC_HOST_CI_OBSERVATION_UNVERIFIED')
             status=check.get('conclusion') if check.get('status')=='completed' else check.get('status')
             # A Draft's skipped PR checks are not passes or code failures. The
@@ -427,7 +435,7 @@ class Repositories:
                            'run_conclusion':run.get('conclusion')})
         registry=Path(__file__).with_name('projects.json')
         if not registry.exists(): registry=Path(__file__).parent.parent / '.github/control-plane/projects.json'
-        config=read_json(registry).get(repo,{}) if registry.exists() else {}
+        config=read_json(registry).get(current_name(repo),{}) if registry.exists() else {}
         key='program_post_merge_required_checks' if post_merge else 'program_required_checks'
         for required in config.get(key,[]):
             matches=[c for c in checks if c['name']==required]
@@ -445,12 +453,12 @@ class Repositories:
         def require(value):
             if not value: raise AppError('MAC_HOST_LIVE_CI_REQUIRED')
         repo,head=job['repository'],job['head']
-        match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/pull/([0-9]+)',job.get('pr_url') or '')
+        match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/pull/([0-9]+)',canonical_url(repo, job['pr_url']) if job.get('pr_url') else '')
         require(job.get('native_lineage') and match and job.get('candidate_published_head')==head)
         paths={'.github/workflows/'+name for name in self.candidate_workflows(job)}
         def pull():
             value=api('repos/'+repo+'/pulls/'+match.group(1))
-            require(value.get('html_url')==job['pr_url'] and value.get('state')=='open' and
+            require(url_matches(job['pr_url'], value.get('html_url')) and value.get('state')=='open' and
                     value.get('draft') is True and value.get('auto_merge') is None and
                     value.get('head',{}).get('sha')==head and value['head'].get('ref')==job['branch'] and
                     value.get('base',{}).get('ref')==job['base_branch'])
@@ -465,9 +473,9 @@ class Repositories:
             run_id=check.get('run_id'); require(type(run_id) is int and run_id>0)
             seen.add(run_id);run=api('repos/'+repo+'/actions/runs/'+str(run_id))
             require(run.get('head_sha')==head and run.get('head_branch')==job['branch'] and
-                    run.get('repository',{}).get('full_name','').lower()==repo.lower() and run.get('path') in paths and
+                    repository_object_matches(repo, run.get('repository')) and run.get('path') in paths and
                     run.get('status')=='completed' and run.get('conclusion')=='success' and
-                    run.get('html_url')=='https://github.com/'+repo+'/actions/runs/'+str(run_id))
+                    url_matches('https://github.com/'+repo+'/actions/runs/'+str(run_id), run.get('html_url')))
             response=api('repos/'+repo+'/actions/runs/'+str(run_id)+'/jobs?per_page=100')
             jobs=response.get('jobs');require(isinstance(jobs,list) and type(response.get('total_count')) is int and
                 0<len(jobs)==response['total_count']<=100)
@@ -494,7 +502,7 @@ class Repositories:
 
     def merge_candidate(self,job):
         from handoff import api
-        match=re.fullmatch(r'https://github\.com/'+re.escape(job['repository'])+r'/pull/([0-9]+)',job['pr_url'] or '')
+        match=re.fullmatch(r'https://github\.com/'+re.escape(job['repository'])+r'/pull/([0-9]+)',canonical_url(job['repository'], job['pr_url']) if job['pr_url'] else '')
         if not match: raise AppError('USER_MERGE_BINDING_UNVERIFIED')
         pull=api('repos/'+job['repository']+'/pulls/'+match.group(1))
         if not (pull.get('head',{}).get('sha')==job['head'] and pull.get('head',{}).get('ref')==job['branch'] and
@@ -516,7 +524,7 @@ class Repositories:
         if pull['merged']: return pull
         if pull['draft']: raise AppError('USER_READY_REQUIRED')
         result=parse_json(execute(['gh','api','--method','PUT',
-            'repos/'+job['repository']+'/pulls/'+str(pull['number'])+'/merge',
+            'repos/'+transport(job['repository'])+'/pulls/'+str(pull['number'])+'/merge',
             '-f','sha='+job['head'],'-f','merge_method=merge'],github_access='WRITE'))
         if result.get('merged') is not True: raise AppError('USER_MERGE_OUTCOME_UNKNOWN')
         observed=self.merge_candidate(job)
@@ -526,7 +534,7 @@ class Repositories:
 
     def merged(self,job):
         from handoff import api
-        repo=job['repository']; match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/pull/([0-9]+)',job['pr_url'] or '')
+        repo=job['repository']; match=re.fullmatch(r'https://github\.com/'+re.escape(repo)+r'/pull/([0-9]+)',canonical_url(job['repository'], job['pr_url']) if job['pr_url'] else '')
         if not match: raise AppError('MAC_HOST_MERGE_BINDING_UNVERIFIED')
         pull=api('repos/'+repo+'/pulls/'+match.group(1)); merge=pull.get('merge_commit_sha')
         if not (pull.get('merged') is True and pull.get('state')=='closed' and pull.get('head',{}).get('sha')==job['head'] and
@@ -539,7 +547,7 @@ class Repositories:
             raise AppError('MAC_HOST_MERGE_BINDING_UNVERIFIED')
         registry=Path(__file__).with_name('projects.json')
         if not registry.exists(): registry=Path(__file__).parent.parent/'.github/control-plane/projects.json'
-        config=read_json(registry).get(repo,{}) if registry.exists() else {}
+        config=read_json(registry).get(current_name(repo),{}) if registry.exists() else {}
         for path,blob in config.get('program_post_merge_locked_blobs',{}).items():
             if git(self.path(job),'rev-parse',merge+':'+path)!=blob: raise AppError('MAC_HOST_POST_MERGE_LOCK_CHANGED')
         ci=self.hosted_checks(job,merge,post_merge=True)
@@ -564,7 +572,7 @@ class Repositories:
         recorded=job['ci']; runs=[]
         registry=Path(__file__).with_name('projects.json')
         if not registry.exists(): registry=Path(__file__).parent.parent/'.github/control-plane/projects.json'
-        config=read_json(registry).get(job['repository'],{}) if registry.exists() else {}
+        config=read_json(registry).get(current_name(job['repository']),{}) if registry.exists() else {}
         passed={c.get('name') for c in recorded['checks'] if c.get('status')=='SUCCESS'}
         if not (recorded.get('state')=='passed' and recorded.get('head')==job['head'] and
                 recorded.get('source')=='GITHUB_ACTIONS_API' and
@@ -574,7 +582,7 @@ class Repositories:
             if check.get('status')!='SUCCESS': continue
             url=check.get('url') or ''
             match=re.fullmatch(r'https://github\.com/'+re.escape(job['repository'])+
-                               r'/actions/runs/([0-9]+)(?:/job/([0-9]+))?',url)
+                               r'/actions/runs/([0-9]+)(?:/job/([0-9]+))?',canonical_url(job['repository'],url))
             if not match or check.get('run_id')!=int(match.group(1)):
                 raise AppError('MAC_HOST_DEPENDENCY_CI_UNVERIFIED')
             prefix='repos/'+job['repository']+'/actions/'
@@ -590,7 +598,7 @@ class Repositories:
                 selected=matches[0]
             steps=selected.get('steps')
             if not (run.get('id')==check['run_id'] and run.get('head_sha')==job['head'] and
-                    (run.get('repository') or {}).get('full_name','').lower()==job['repository'].lower() and
+                    repository_object_matches(job['repository'], run.get('repository')) and
                     run.get('status')=='completed' and run.get('conclusion')=='success' and
                     run.get('event')==check.get('event') and run.get('name')==check.get('workflow_name') and
                     selected.get('run_id')==run['id'] and

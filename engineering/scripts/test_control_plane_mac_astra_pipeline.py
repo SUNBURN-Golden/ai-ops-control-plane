@@ -31,7 +31,7 @@ class AstraPipelineTests(unittest.TestCase):
         self.latest=authority.snapshot(nodes=[{'id':'P-SDK-0','title':'Original node','spec':'Original unchanged scope',
                                               'audit_floor':'A3','astra_gate':'NONE'}])
         self.addCleanup(patch.stopall)
-        patch('mac_authority.handoff.inspect_repository',side_effect=lambda repo:copy.deepcopy(self.latest)).start()
+        patch('mac_authority.handoff.inspect_repository',side_effect=lambda repo, **kwargs:copy.deepcopy(self.latest)).start()
         patch('mac_astra_receipt.decision_evidence',return_value=copy.deepcopy(receipts.DECISION)).start()
         self.source.initialize({'mode':'MAC','decision':'Synthetic fixture authority'});self.source.register(self.latest)
         self.repos=delivery.FixtureRepositories(self.store.directory/'workspaces')

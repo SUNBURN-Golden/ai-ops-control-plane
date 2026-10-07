@@ -26,6 +26,15 @@ def blob(data):
 class AuthorityCheckpointTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        from test_control_plane_mac_url_compat import metadata, decision, CENTRAL
+        def identity_read(path, paginate=False):
+            if path == f'repos/{CENTRAL}/issues/comments/6030780072': return decision()
+            if path.startswith('repos/') and path.count('/') == 2: return metadata(path[6:])
+            raise AssertionError(path)
+        identity_patch = patch('handoff._raw_api', side_effect=identity_read)
+        identity_patch.start(); self.addCleanup(identity_patch.stop)
+        self.transport_overrides = []
+
         self.checkout = Path(self.temp.name); self.target = self.checkout / 'AGENTS.md'
         self.before = b'Original authority\n## 5. Scope\nOriginal pointers\n## 6. Unchanged locks\n'
         self.after = self.before.replace(b'Original pointers', b'Original pointers\nApproved bounded pointer')
@@ -46,6 +55,9 @@ class AuthorityCheckpointTests(unittest.TestCase):
         self.repos.head = lambda job: 'c'*40; self.repos.clean = lambda job: True
         self.names = 'AGENTS.md\0'; self.old_blob = self.pin['before_blob']; self.calls = []
         def git(checkout, *args, **kwargs):
+            if args[:1] == ('-c',):
+                self.assertEqual(args[1], 'remote.origin.url=https://github.com/SUNBURN-Golden/kix-protocol.git')
+                self.transport_overrides.append(args[1]); args = args[2:]
             self.calls.append(args)
             if args[:1] == ('--no-replace-objects',): args = args[1:]
             if args == ('rev-parse', self.pin['plan_commit'] + ':.aiops/program.json'): return self.pin['plan_blob']
@@ -168,6 +180,9 @@ class CommittedPublicationTests(unittest.TestCase):
         env_patch.start(); self.addCleanup(env_patch.stop)
         self.push_hook = None
         def real_git(checkout, *args, **kwargs):
+            if args[:1] == ('-c',):
+                self.assertEqual(args[1], 'remote.origin.url=https://github.com/SUNBURN-Golden/kix-protocol.git')
+                self.transport_overrides.append(args[1]); args = args[2:]
             self.calls.append(args)
             if args[:1] == ('push',):
                 if self.push_hook: self.push_hook()
@@ -222,6 +237,7 @@ class CommittedPublicationTests(unittest.TestCase):
         with patch('gitops.gh', side_effect=self.remote): self.repos.publish(self.job)
         pushes = [c for c in self.calls if c[0] == 'push']
         self.assertEqual(pushes, [('push', '--porcelain', 'origin', head + ':refs/heads/' + self.pin['branch'])])
+        self.assertEqual(self.transport_overrides, ['remote.origin.url=https://github.com/SUNBURN-Golden/kix-protocol.git'])
 
     def test_head_move_during_approval_or_repository_read_refuses_before_push(self):
         head = self.checkpoint()
