@@ -562,3 +562,19 @@ unchanged account approval is required for bundle admission and revalidation; th
 is the existing trusted-account/host boundary, not a signature or cross-host lock.
 See [Mac KIX bundle contract](mac_app/MAC_KIX_BUNDLE_KO.md). Source repair approval
 is distinct from actual product execution and from external source-audit transfer.
+
+User decision [D-2026-10-07-MAC-EMPTY-ATTEMPT-RECOVERY](https://github.com/SUNBURN-Golden/ai-ops-control-plane/pull/85#issuecomment-6032340624)
+approves only a reversible, evidence-preserving quarantine of empty Mac attempt
+`d8d194e55af64b0b8a44a487bd41fd94` under existing job `20531604498943e1`.
+The [direct approval relay](docs/MAC_EMPTY_ATTEMPT_DECISION_20261007.md) has actor
+263336091/BeautifulMind-JT/User, created=updated2026-10-07T06:28:48Z and SHA256
+`60fda2c6fc6c8e99c118b6d05e6a09adc3e30388f2d4c6580d74b8256c255699`.
+The supported command rechecks live approval, stopped service, original job and
+completed receipts, all admitted executions terminal, empty private directory
+metadata and absence of UUID references in both ledgers under installer/service
+locks. It preserves path/metadata/evidence and atomically moves without replacing
+any destination. Existing installer guards and ledger/calls remain unchanged;
+a failed post-move normal idle check rolls back. The causal link to MISSING_PROVIDER
+is an inference from combined observations, not a UUID-bearing runtime event.
+Other folders, deletion, new builders, credentials and protected Linux files are
+outside this exception. See [the recovery contract](docs/MAC_EMPTY_ATTEMPT_RECOVERY_KO.md).
