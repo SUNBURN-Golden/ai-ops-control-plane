@@ -66,7 +66,7 @@ class MacAuthorityTests(unittest.TestCase):
         self.worker=FixtureWorker(self.store)
         self.controller=native_transfer.Controller(self.store,self.source,self.worker)
         self.latest=snapshot()
-        self.observer=patch('mac_authority.handoff.inspect_repository',side_effect=lambda repo:copy.deepcopy(self.latest))
+        self.observer=patch('mac_authority.handoff.inspect_repository',side_effect=lambda repo, **kwargs:copy.deepcopy(self.latest))
         self.observer.start(); self.addCleanup(self.observer.stop)
     def configure(self):
         self.source.initialize({'mode':'MAC','decision':'Explicit user fixture decision, not production qualification'})

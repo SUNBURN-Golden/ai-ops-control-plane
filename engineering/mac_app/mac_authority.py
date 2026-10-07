@@ -176,11 +176,11 @@ class LocalSource:
     def preflight(self,bound,*,allow_base_advance=False):
         # Fresh read-only projections add barriers only. They never release an
         # external owner, infer terminal execution or advance the pinned plan.
-        snapshot=handoff.inspect_repository(bound['repository'])
         import mac_astra_receipt
         with self.store.lock:
             task=self._task(self.store.db,bound)
             node=parse_json(task['work'],1024*1024)['task']
+        snapshot=handoff.inspect_repository(bound['repository'], existing_subject=True)
         mac_astra_receipt.admission(node)
         if 'generation_id' in bound:
             import mac_generation

@@ -15,6 +15,7 @@ import stat
 
 from common import AppError, digest, encoded, parse_json, repository
 import handoff
+from repository_identity import url_matches, same_repository, canonical_url, repository_object_matches
 
 MARK = '<!-- aiops-fable-audit -->'
 DEPTHS = ('A0', 'A1', 'A2', 'A3')
@@ -57,8 +58,8 @@ def body_hash(body):
 def decision_evidence():
     comment = api('repos/BeautifulMind-JT/ai-ops-control-plane/issues/comments/' + str(DECISION['comment_id']))
     require(trusted_actor(comment) and comment.get('id') == DECISION['comment_id'] and
-            comment.get('html_url') == DECISION['url'] and
-            comment.get('issue_url') == 'https://api.github.com/repos/BeautifulMind-JT/ai-ops-control-plane/issues/78' and
+            url_matches(DECISION['url'], comment.get('html_url')) and
+            url_matches('https://api.github.com/repos/BeautifulMind-JT/ai-ops-control-plane/issues/78', comment.get('issue_url')) and
             comment.get('created_at') == comment.get('updated_at') == DECISION['created_at'] and
             isinstance(comment.get('body'), str) and body_hash(comment['body']) == DECISION['body_sha256'],
             'MAC_HOST_ASTRA_DECISION_UNVERIFIED')
@@ -74,7 +75,7 @@ def context(requirement):
     require(match is not None)
     try:
         repo = repository(request.get('repository'))
-        require(repository(match[1]).lower() == repo.lower())
+        require(same_repository(repo, repository(match[1])))
     except AppError:
         raise AppError('MAC_HOST_ASTRA_RECEIPT_UNVERIFIED') from None
     require(isinstance(request.get('head'), str) and re.fullmatch(r'[0-9a-f]{40}', request['head']) and
@@ -87,12 +88,12 @@ def live_pr(requirement):
     repo, number, request = context(requirement)
     pull = api('repos/' + repo + '/pulls/' + str(number))
     require(isinstance(pull, dict) and pull.get('number') == number and
-            pull.get('html_url', '').lower() == request['pr_url'].lower() and
+            url_matches(request['pr_url'], pull.get('html_url', '')) and
             isinstance(pull.get('head'), dict) and pull['head'].get('sha') == request['head'] and
             isinstance(pull.get('base'), dict) and isinstance(pull['base'].get('repo'), dict) and
-            str(pull['base']['repo'].get('full_name', '')).lower() == repo.lower() and
+            repository_object_matches(repo, pull['base']['repo']) and
             isinstance(pull['head'].get('repo'), dict) and
-            str(pull['head']['repo'].get('full_name', '')).lower() == repo.lower() and
+            repository_object_matches(repo, pull['head']['repo']) and
             (not request.get('branch') or pull['head'].get('ref') == request['branch']))
     return pull
 
@@ -126,7 +127,7 @@ def relevant(comment,requirement):
     require(int(header[1])==number)
     if header[2]!=request['head'] or DEPTHS.index(header[4])<DEPTHS.index(request['requested_depth']):return False
     scoped=scope(comment['body'])
-    require(scoped[0].lower()==repo.lower() and scoped[1]==number)
+    require(same_repository(repo, scoped[0]) and scoped[1]==number)
     return scoped[2]==request['gate']
 
 
@@ -142,7 +143,7 @@ def parse_comment(comment, requirement):
                        comment.get('html_url', ''))
     issue = re.fullmatch(r'https://api\.github\.com/repos/([^/]+/[^/]+)/issues/([1-9][0-9]*)',
                          comment.get('issue_url', ''))
-    require(url and issue and url[1].lower() == issue[1].lower() == repo.lower() and
+    require(url and issue and same_repository(repo, url[1]) and same_repository(repo, issue[1]) and
             int(url[2]) == int(issue[2]) == number and int(url[3]) == comment['id'])
     body = comment['body']; lines = body.splitlines()
     require(len(lines) >= 2 and lines[0] == MARK)
@@ -164,7 +165,7 @@ def parse_comment(comment, requirement):
         except ValueError:raise AppError('MAC_HOST_ASTRA_RECEIPT_UNVERIFIED') from None
     contract = field(body, 'VERIFIED_CONTRACT_CHANGE_REQUIRED',optional=result in ('FAIL','DECISION_REQUIRED')) or 'NO'
     require(contract in ('NO', 'YES'))
-    return {'schema': 'ASTRA_AUDIT_V1', 'comment_id': comment['id'], 'comment_url': comment['html_url'],
+    return {'schema': 'ASTRA_AUDIT_V1', 'comment_id': comment['id'], 'comment_url': canonical_url(repo, comment['html_url']),
             'body_sha256': body_hash(body), 'created_at': comment['created_at'], 'updated_at': comment['updated_at'],
             'repository': repo, 'pr': number, 'head': head, 'result': result, 'depth': depth,
             'auditor_identity': 'ASTRA_FABLE', 'auditor_session': session,

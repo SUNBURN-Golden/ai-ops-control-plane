@@ -27,6 +27,8 @@ TASK_KEY = re.compile(r'^<!-- ASTRA_TASK_KEY_V1 program=(' + IDENTIFIER +
 UNRESOLVED = {'NOT_STARTED', 'SUBMITTING', 'CONFIRMED', 'UNKNOWN'}
 API_READ_SECONDS = 30
 _API_DEADLINE = ContextVar('mac_api_read_deadline', default=None)
+_COMPAT_VERIFIED = ContextVar('mac_url_compat_decision', default=False)
+_IDENTITY_VERIFIED = ContextVar('mac_verified_repository_ids', default=frozenset())
 
 
 @contextmanager
@@ -35,9 +37,13 @@ def api_read_budget():
     deadline = time.monotonic() + API_READ_SECONDS
     previous = _API_DEADLINE.get()
     token = _API_DEADLINE.set(min(previous, deadline) if previous is not None else deadline)
+    approval = _COMPAT_VERIFIED.set(False) if previous is None else None
+    identities = _IDENTITY_VERIFIED.set(frozenset()) if previous is None else None
     try:
         yield
     finally:
+        if approval is not None: _COMPAT_VERIFIED.reset(approval)
+        if identities is not None: _IDENTITY_VERIFIED.reset(identities)
         _API_DEADLINE.reset(token)
 
 
@@ -82,12 +88,12 @@ def handoff_id(value, code='INVALID_HANDOFF_ID'):
 def api(path, paginate=False):
     parts = path.split('/')
     if len(parts) >= 3 and parts[0] == 'repos':
-        from repository_identity import current_pin, observe
+        from repository_identity import current_name, current_pin, historical, transport
         target = '/'.join(parts[1:3])
-        if current_pin(target) is not None:
-            metadata = observe(target, _raw_api)
-            if len(parts) == 3 and not paginate:
-                return metadata
+        if current_pin(current_name(target)) is not None:
+            current, observation = transport(target, metadata=True)
+            if len(parts) == 3 and not paginate: return observation
+            path = 'repos/' + current + ('/' + '/'.join(parts[3:]) if len(parts) > 3 else '')
     return _raw_api(path, paginate)
 
 
@@ -104,16 +110,18 @@ def _raw_api(path, paginate=False):
 
 
 @bounded_api_reads
-def inspect_repository(value):
+def inspect_repository(value, *, existing_subject=False):
     repo = repository(value)
     from repository_identity import reject_old_admission
-    reject_old_admission(repo)
+    if not existing_subject: reject_old_admission(repo)
     root = 'repos/' + repo
     metadata = api(root)
+    from repository_identity import same_repository, historical
     if (not isinstance(metadata, dict) or not isinstance(metadata.get('full_name'), str) or
-            metadata['full_name'].lower() != repo.lower()):
+            not same_repository(repo, metadata['full_name'])):
         raise AppError('HANDOFF_REPOSITORY_MISMATCH')
-    repo = repository(metadata['full_name'])
+    if not (existing_subject and historical(repo)):
+        repo = repository(metadata['full_name'])
     root = 'repos/' + repo
     if metadata.get('archived') is not False: raise AppError('ARCHIVED_REPOSITORY')
     branch = metadata.get('default_branch')

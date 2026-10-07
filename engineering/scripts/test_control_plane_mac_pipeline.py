@@ -183,7 +183,7 @@ class MacPipelineTests(unittest.TestCase):
         self.source=mac_authority.LocalSource(self.store); self.worker=fixtures.FixtureWorker(self.store)
         self.controller=native_transfer.Controller(self.store,self.source,self.worker)
         self.latest=fixtures.snapshot()
-        self.reader=patch('mac_authority.handoff.inspect_repository',side_effect=lambda repo:copy.deepcopy(self.latest))
+        self.reader=patch('mac_authority.handoff.inspect_repository',side_effect=lambda repo, **kwargs:copy.deepcopy(self.latest))
         self.reader.start(); self.addCleanup(self.reader.stop)
         self.source.initialize({'mode':'MAC','decision':'fixture-only explicit owner mode'})
         self.source.register(self.latest)

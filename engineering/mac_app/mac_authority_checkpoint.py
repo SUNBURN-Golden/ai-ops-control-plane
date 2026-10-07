@@ -7,6 +7,7 @@ import stat
 
 from common import AppError
 import handoff
+from repository_identity import url_matches, same_repository, canonical_url
 
 PINS = {
     'repository': 'BeautifulMind-JT/kix-protocol', 'node': 'agents-scope-sync',
@@ -35,9 +36,9 @@ def decision_verified():
     root = 'repos/' + PINS['repository'] + '/issues/comments/' + str(pin['comment_id'])
     comment = handoff.api(root)
     return (isinstance(comment, dict) and comment.get('id') == pin['comment_id'] and
-            comment.get('html_url') == 'https://github.com/' + PINS['repository'] +
-                '/issues/92#issuecomment-' + str(pin['comment_id']) and
-            comment.get('issue_url') == 'https://api.github.com/repos/' + PINS['repository'] + '/issues/92' and
+            url_matches('https://github.com/' + PINS['repository'] +
+                '/issues/92#issuecomment-' + str(pin['comment_id']), comment.get('html_url')) and
+            url_matches('https://api.github.com/repos/' + PINS['repository'] + '/issues/92', comment.get('issue_url')) and
             isinstance(comment.get('user'), dict) and all(comment['user'].get(k) == v for k, v in ACTOR.items()) and
             comment.get('created_at') == pin['created_at'] and comment.get('updated_at') == pin['updated_at'] and
             isinstance(comment.get('body'), str) and

@@ -55,7 +55,7 @@ class PrestartAdmissionTests(unittest.TestCase):
                               ('mac_prestart.CONFIRMATION', self.confirmation_pin)]:
             p = patch(target, value); p.start(); self.addCleanup(p.stop)
         p = patch('handoff.api', side_effect=self.api); p.start(); self.addCleanup(p.stop)
-        p = patch('handoff.inspect_repository', side_effect=lambda repo: copy.deepcopy(self.latest))
+        p = patch('handoff.inspect_repository', side_effect=lambda repo, **kwargs: copy.deepcopy(self.latest))
         p.start(); self.addCleanup(p.stop)
         self.source.initialize({'mode': 'MAC', 'decision': 'Explicit isolated fixture only'})
 

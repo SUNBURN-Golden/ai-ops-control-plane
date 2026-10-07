@@ -46,7 +46,7 @@ class MacGenerationTests(unittest.TestCase):
                             'declared_owners':['CURSOR'],'body_sha256':'c'*64}],
             nodes=[{'id':'CONFORMANCE','title':'Local conformance','spec':'Exact original technical spec; do not alter',
                     'audit_floor':'A2','astra_gate':'NONE','astra_auto_merge':True}])
-        self.reader=patch('mac_authority.handoff.inspect_repository',side_effect=lambda repo:copy.deepcopy(self.latest))
+        self.reader=patch('mac_authority.handoff.inspect_repository',side_effect=lambda repo, **kwargs:copy.deepcopy(self.latest))
         self.reader.start();self.addCleanup(self.reader.stop)
         self.decision_reader=patch('handoff.api',return_value=decision_fixture())
         self.decision_reader.start();self.addCleanup(self.decision_reader.stop)
