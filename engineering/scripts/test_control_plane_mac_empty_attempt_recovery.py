@@ -85,6 +85,25 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(self.target.exists());self.assertFalse(self.original.exists())
         self.assertEqual(self.call()['result'],'QUARANTINED')
 
+    def prepared_after_move(self):
+        real=recovery.atomic_json
+        def crash(path,value):
+            if value['state']=='QUARANTINED':raise OSError('crash before commit')
+            return real(path,value)
+        with mock.patch.object(recovery,'atomic_json',side_effect=crash):
+            with self.assertRaises(OSError):self.call()
+
+    def test_recovered_pending_move_guard_failure_restores_original(self):
+        self.prepared_after_move();self.guard.side_effect=AppError('UPDATE_BUSY')
+        with self.assertRaisesRegex(AppError,'UPDATE_BUSY'):self.call()
+        self.assertTrue(self.original.exists());self.assertFalse(self.target.exists())
+        self.assertEqual(json.loads((self.archive/'evidence.json').read_text())['state'],'PREPARED')
+
+    def test_explicit_restore_recovers_prepared_after_move(self):
+        self.prepared_after_move()
+        self.assertEqual(self.call('restore')['result'],'RESTORED')
+        self.assertTrue(self.original.exists());self.assertFalse(self.target.exists())
+
     def test_changed_ledger_or_receipt_blocks_retry_and_restore(self):
         self.call();new=copy.deepcopy(self.proof);new['job_sha256']='changed'
         with mock.patch.object(recovery,'context',return_value=new):
@@ -209,5 +228,22 @@ class ContextTests(unittest.TestCase):
         with self.assertRaises(AppError):recovery.context(self.state)
         with sqlite3.connect(self.db) as d:d.execute('INSERT INTO jobs VALUES (?)',(json.dumps({'id':'other','attempt':{'id':'x'}}),))
         with self.assertRaises(AppError):recovery.context(self.state)
+
+class ApprovalTests(unittest.TestCase):
+    def setUp(self):
+        root=Path(__file__).resolve().parents[1]/'docs'
+        record=json.loads((root/'MAC_EMPTY_ATTEMPT_DECISION_20261007_RECORD.json').read_text())
+        self.value={k:record[k] for k in ('id','created_at','updated_at','html_url','issue_url')}
+        self.value.update(user=record['actor'],body=(root/'MAC_EMPTY_ATTEMPT_DECISION_20261007.md').read_text())
+
+    def test_pinned_original_decision_is_accepted(self):
+        with mock.patch.object(recovery.handoff,'api',return_value=self.value):recovery.approval()
+
+    def test_changed_body_actor_time_or_subject_is_rejected(self):
+        changes=[('body',self.value['body']+' '),('updated_at','later'),('issue_url','https://api.github.com/repos/other/issues/85'),('id',1),('user',{'id':263336091,'login':'other','type':'User'})]
+        for key,value in changes:
+            with self.subTest(key=key),mock.patch.object(recovery.handoff,'api',return_value=dict(self.value,**{key:value})):
+                with self.assertRaises(AppError):recovery.approval()
+
 
 if __name__=='__main__':unittest.main()

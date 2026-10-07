@@ -38,12 +38,16 @@ QUARANTINED가 된다. 검사 실패 시 원위치 복원을 시도하며 오류
 PREPARED 후 이동 여부가 불명확하면 같은 명령이 정확한 한 경로와 동일 inode/증거를
 읽어 확인한다. unknown archive, 양쪽 경로 존재, 내용·원장·영수증·메타데이터 변화는
 자동 정리하지 않는다. 기록 전 crash 등 증명이 부족한 상태는 차단 보고한다.
-성공한 격리를 되돌릴 때만 명시적으로 restore를 사용한다. 원래 경로가 비어 있고
+성공한 격리 또는 PREPARED 후 이동이 입증된 상태를 되돌릴 때 명시적으로 restore를 사용한다. 원래 경로가 비어 있고
 원장·영수증·대상 inode가 보존돼야 하며, 복원하면 원래 installer UPDATE_BUSY도 돌아온다.
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 engineering/mac_app/mac_empty_attempt_recovery.py restore
 ```
+
+restore 이동 직후 기록 저장 전에 중단되면 원래 폴더는 보존되지만 QUARANTINED 기록이
+남을 수 있다. 이후 명령은 자동 정리하지 않고 차단한다. 이 운영상 한계를 보고하고
+별도 승인 없이 증거를 수정하지 않는다.
 
 원장/calls/installerguard 변경, 삭제, 다른 폴더 정리, 새 제품 builder는 없다.
 기존 Mac 계정과 private 파일 신뢰 경계를 유지하며 새 서명/권한을 만들지 않는다.

@@ -184,25 +184,25 @@ def recover_locked(state, operation):
     require(empty_metadata(present) == evidence['metadata'])
     if operation == 'inspect': return {'result':evidence['state'],'evidence':evidence}
     if operation == 'restore':
-        require(evidence['state'] == 'QUARANTINED' and present == target)
+        require(evidence['state'] in ('PREPARED','QUARANTINED') and present == target)
         move_exclusive(target, original)
         sync_directory(original.parent); sync_directory(archive)
         evidence['state'] = 'RESTORED'; atomic_json(evidence_path, evidence); sync_directory(archive)
         return {'result':'RESTORED','original_path':str(original),'evidence_path':str(evidence_path)}
     require(operation == 'quarantine' and evidence['state'] != 'RESTORED')
-    moved = False
+    pending = evidence['state'] == 'PREPARED'
     try:
         if present == original:
             require(evidence['state'] == 'PREPARED')
             require(not target.exists() and not target.is_symlink())
-            move_exclusive(original, target); moved = True
+            move_exclusive(original, target)
             sync_directory(original.parent); sync_directory(archive)
         require(empty_metadata(target) == evidence['metadata'])
         require(context(state) == current)
         # The original installer guard is authoritative and is never relaxed.
         install.idle_database(state)
     except BaseException:
-        if moved and not original.exists() and empty_metadata(target) == evidence['metadata']:
+        if pending and not original.exists() and empty_metadata(target) == evidence['metadata']:
             move_exclusive(target, original); sync_directory(original.parent); sync_directory(archive)
         raise
     evidence['state'] = 'QUARANTINED'; atomic_json(evidence_path, evidence); sync_directory(archive)
