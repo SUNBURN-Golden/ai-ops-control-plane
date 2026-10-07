@@ -125,6 +125,7 @@ def preflight(source, bound, snapshot):
     for node in nodes: proofs.extend(require_unowned_original(snapshot, bound['program'], node))
     require(proofs == value.get('failed_prestart_evidence', []), 'MAC_GENERATION_LINUX_OWNER_UNRESOLVED')
     if 'bundle' in value['request']:
+        require(mac_bundle.decision()==value['bundle_decision'], 'MAC_BUNDLE_DECISION_UNVERIFIED')
         mac_bundle.check_receipts(source, value['program']['scope'], nodes)
 
 
@@ -151,6 +152,7 @@ def record(source, bound):
             (bound['repository'].lower(), bound['task_id'])).fetchone()
         require(row is not None, 'MAC_BUNDLE_BINDING_INVALID')
         work = parse_json(row[0], 1024*1024)
+        require(value.get('bundle_decision')==mac_bundle.DECISION, 'MAC_BUNDLE_DECISION_UNVERIFIED')
         require(work.get('task') == task and work.get('bundle') == packet and digest(work) == bound['work_sha256'],
                 'MAC_BUNDLE_BINDING_INVALID')
     import mac_prestart
@@ -178,16 +180,17 @@ def adopt(source, value):
             require(old['request'] == request, 'MAC_GENERATION_IMMUTABLE')
             record(source, old['binding'])
             return copy.deepcopy(old['binding'])
-    snapshot = handoff.inspect_repository(repo)
+    snapshot = handoff.inspect_repository(repo, **({'bundle_candidate':True} if 'bundle' in value else {}))
     require(snapshot.get('task_scope') == 'all' and isinstance(snapshot.get('tasks'), list),
             'MAC_HOST_HISTORY_INCOMPLETE')
     original = snapshot['source']; raw = original['raw_program']; data = raw.encode()
     require(original['head'] == value['plan_commit'] and original['blob'] == value['plan_blob'] and
             hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == original['blob'],
             'MAC_HOST_PROGRAM_REVISION_CHANGED')
-    scope = load_scope(raw, snapshot['repository'], original['blob'])
+    scope = load_scope(raw, snapshot['repository'], original['blob'],bundle_repository_alias='bundle' in value)
     bundle = None
     if 'bundle' in value:
+        bundle_approval = mac_bundle.decision()
         bundle_task, bundle = mac_bundle.aggregate(scope, value['bundle'])
         require(value['node'] == bundle_task['id'], 'MAC_BUNDLE_INVALID')
         prestart = []
@@ -272,6 +275,7 @@ def adopt(source, value):
                             'SELECT id FROM mac_host_external WHERE repository=?',(repo,))}),
                         'legacy_receipts': copy.deepcopy(receipts),
                         'adopted_at': time.time()}
+            if bundle: document['bundle_decision']=bundle_approval
             db.execute('UPDATE mac_host_tasks SET binding=? WHERE id=?', (encoded(bound), cursor.lastrowid))
             db.execute('INSERT INTO mac_host_generations VALUES (?,?,?)', (value['generation_id'], repo, encoded(document)))
             for item in legacy:

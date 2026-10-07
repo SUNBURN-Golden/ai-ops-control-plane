@@ -8,6 +8,26 @@ from product_builder import REPOSITORY
 from repository_identity import current_name
 
 
+DECISION = {'comment_id':6032181179, 'created_at':'2026-10-07T06:15:52Z',
+            'body_sha256':'12959f3f8ed316762a7761775fbf76db937494d98057090f2e9990ec6ed8c869'}
+
+
+def decision():
+    import handoff
+    import hashlib
+    repo='SUNBURN-Golden/ai-ops-control-plane'
+    value=handoff.api(f'repos/{repo}/issues/comments/{DECISION["comment_id"]}')
+    actor=value.get('user',{}) if isinstance(value,dict) else {}
+    require(isinstance(value,dict) and value.get('id')==DECISION['comment_id'] and
+            actor.get('id')==263336091 and actor.get('login')=='BeautifulMind-JT' and actor.get('type')=='User' and
+            value.get('created_at')==value.get('updated_at')==DECISION['created_at'] and
+            value.get('html_url')==f'https://github.com/{repo}/pull/86#issuecomment-{DECISION["comment_id"]}' and
+            value.get('issue_url')==f'https://api.github.com/repos/{repo}/issues/86' and
+            isinstance(value.get('body'),str) and hashlib.sha256(value['body'].encode()).hexdigest()==DECISION['body_sha256'],
+            'MAC_BUNDLE_DECISION_UNVERIFIED')
+    return copy.deepcopy(DECISION)
+
+
 def aggregate(scope, value):
     require(scope['repository'].lower() == REPOSITORY and scope['program'].lower() == 'kix',
             'MAC_BUNDLE_KIX_ONLY')
@@ -98,11 +118,11 @@ def prepare(source, value):
     import mac_generation
     require(isinstance(value, dict) and set(value) == {'repository', 'bundle', 'plan_commit', 'plan_blob'},
             'MAC_BUNDLE_REQUEST_INVALID')
-    snapshot = handoff.inspect_repository(repository(value['repository']))
+    snapshot = handoff.inspect_repository(repository(value['repository']),bundle_candidate=True)
     original = snapshot['source']
     require((original['head'], original['blob']) == (value['plan_commit'], value['plan_blob']),
             'MAC_HOST_PROGRAM_REVISION_CHANGED')
-    scope = load_scope(original['raw_program'], snapshot['repository'], original['blob'])
+    scope = load_scope(original['raw_program'], snapshot['repository'], original['blob'],bundle_repository_alias=True)
     task, packet = aggregate(scope, value['bundle'])
     blockers = []
     for node in packet['nodes']:

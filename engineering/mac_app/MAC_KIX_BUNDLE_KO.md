@@ -23,12 +23,15 @@ owner CLI의 `host product-builder --input profile.json`에 다음을 전달한�
 `host bundle-prepare --input candidate.json`은 read-only 후보를 반환한다. 입력은 repository,
 plan_commit, plan_blob, bundle이다. bundle은 id(`bundle-…`), title, 위상 순서의 nodes 배열이다.
 정확한 live program에서 원본 명세를 가져오므로 입력으로 spec이나 dependency를 덮어쓸 수 없다.
-CANDIDATE_ONLY는 실행 승인이 아니다. 열린 원본 소유권, opaque UNKNOWN scope, 겹치는 Mac
+원본 manifest의 이전 저장소 이름은 이 bundle reader에 한해 기존 live 동일 numeric ID/owner 및
+이전 URL 승인 검증을 거쳐 읽는다. source_repository와 원래 bytes/blob를 보존하며 다른 제품과
+일반 신규 admission의 이전 이름 금지는 유지한다. CANDIDATE_ONLY는 실행 승인이 아니다. 열린 원본 소유권, opaque UNKNOWN scope, 겹치는 Mac
 작업, 미완료 외부 의존성을 blockers에 표시한다. 기존 원장을 변경하지 않는다.
 
 채택은 기존 `host generation`의 정확한 plan pin·새 generation-id·기존 host decision에
 `--node bundle-… --bundle bundle.json`을 더한다. 별도 start 명령 전까지 모델 실행은 없다.
-채택과 start는 모든 원본 노드의 현재 소유권을 다시 검사한다. 새로운 bundle 이름으로
+채택과 start는 모든 원본 노드의 현재 소유권과 별도 사용자 결정6032181179의 정확한
+계정·본문 hash·시각·PR를 live API로 다시 검사한다. 새로운 bundle 이름으로
 UNKNOWN을 인정하거나 예외 처리하지 않는다. 원래 SDK 요청은 기존 담당자의 정상 소유권
 확인 전까지 계속 차단된다. PR121/job20531604498943e1의29줄 결과는 이 묶음에 포함되지 않는다.
 

@@ -106,7 +106,11 @@ class Store:
 
     def set_settings(self, value):
         value = validate_settings(value)
-        with self.lock: self.db.execute('UPDATE settings SET value=? WHERE id=1', (encoded(value),))
+        with self.lock:
+            previous = self.settings()
+            if 'product_builders' not in value and 'product_builders' in previous:
+                value['product_builders'] = copy.deepcopy(previous['product_builders'])
+            self.db.execute('UPDATE settings SET value=? WHERE id=1', (encoded(value),))
         return value
 
     def product_builder(self, value):
@@ -299,7 +303,8 @@ class Store:
             elif action == 'reconfigure':
                 if job['state'] not in ('paused', 'needs_user', 'waiting_provider') or job['attempt']:
                     raise AppError('PAUSE_BEFORE_MODEL_CHANGE')
-                settings = self.settings()
+                from product_builder import resolve
+                settings = resolve(self.settings(),job['repository'])
                 if job.get('native_lineage') and settings['roles']['builder']!=job['settings']['roles']['builder']:
                     raise AppError('MAC_HOST_OWNER_PROFILE_IMMUTABLE')
                 phase = 'reviewing' if job['phase'] in ('reviewing', 'supervising', 'publishing', 'verifying') else job['phase']

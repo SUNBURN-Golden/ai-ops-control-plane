@@ -181,8 +181,9 @@ class LocalSource:
         import mac_astra_receipt
         with self.store.lock:
             task=self._task(self.store.db,bound)
-            node=parse_json(task['work'],1024*1024)['task']
-        snapshot=handoff.inspect_repository(bound['repository'], existing_subject=True)
+            work=parse_json(task['work'],1024*1024);node=work['task']
+        snapshot=handoff.inspect_repository(bound['repository'], existing_subject=True,
+                    **({'bundle_candidate':True} if 'bundle' in work else {}))
         mac_astra_receipt.admission(node)
         if 'generation_id' in bound:
             import mac_generation

@@ -110,7 +110,7 @@ def _raw_api(path, paginate=False):
 
 
 @bounded_api_reads
-def inspect_repository(value, *, existing_subject=False):
+def inspect_repository(value, *, existing_subject=False, bundle_candidate=False):
     repo = repository(value)
     from repository_identity import reject_old_admission
     if not existing_subject: reject_old_admission(repo)
@@ -141,7 +141,9 @@ def inspect_repository(value, *, existing_subject=False):
         raise AppError('HANDOFF_PROGRAM_UNRESOLVED') from exc
     blob = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
     if content.get('sha') != blob: raise AppError('HANDOFF_PROGRAM_BLOB_MISMATCH')
-    scope = load_scope(program, repo, blob)
+    if bundle_candidate and repo.lower() != 'sunburn-golden/kix-protocol':
+        raise AppError('MAC_BUNDLE_KIX_ONLY')
+    scope = load_scope(program, repo, blob, bundle_repository_alias=bundle_candidate)
     pages = api(root + '/issues?state=all&labels=aiops-task&per_page=100', paginate=True)
     if not isinstance(pages, list) or not pages or any(not isinstance(page, list) for page in pages):
         raise AppError('HANDOFF_TASKS_UNRESOLVED')
