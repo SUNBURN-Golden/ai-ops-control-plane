@@ -258,8 +258,8 @@ bots:
     name: "KIX"
     parent: 개발총괄
     domain: DEV
-    repo: "https://github.com/BeautifulMind-JT/kix-protocol"
-    extra_repos: ["https://github.com/BeautifulMind-JT/kix-commerce-apps"]
+    repo: "https://github.com/SUNBURN-Golden/kix-protocol"
+    extra_repos: ["https://github.com/SUNBURN-Golden/kix-commerce-apps"]
     status: ACTIVE
     audit: 정상
     last_audited: "2026-09-17"
@@ -282,7 +282,7 @@ bots:
     name: "ZARI"
     parent: 개발총괄
     domain: DEV
-    repo: "https://github.com/BeautifulMind-JT/ZARI"
+    repo: "https://github.com/SUNBURN-Golden/ZARI"
     status: ACTIVE
     audit: 정상
     last_audited: "2026-09-17"
@@ -304,7 +304,7 @@ bots:
     name: "MVCompiler"
     parent: 개발총괄
     domain: DEV
-    repo: "https://github.com/BeautifulMind-JT/film-unit-mv-studio"
+    repo: "https://github.com/SUNBURN-Golden/film-unit-mv-studio"
     status: ACTIVE
     audit: 정상
     last_audited: "2026-09-17"

@@ -51,7 +51,7 @@ export GH_TOKEN
 import base64, hashlib, json, os, pathlib, re, stat, urllib.error, urllib.parse, urllib.request
 
 SOURCE_COMMIT = os.environ['AIOPS_BOOTSTRAP_COMMIT']
-REPOSITORY = 'BeautifulMind-JT/ai-ops-control-plane'
+REPOSITORY = 'SUNBURN-Golden/ai-ops-control-plane'
 PINNED_SHA256 = {
  "engineering/recovery/aiops-fable": "e59e29e068978b6e901653d40cdbd00f463c8b52ba44827d057c8a81f7579b97",
  "engineering/recovery/aiops-recover": "30cd439ab638631a475db6d4dbfb9ef4b1c2b3b08a0ce763a035ef8d26c30a29",

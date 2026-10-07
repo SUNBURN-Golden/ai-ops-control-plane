@@ -121,6 +121,9 @@ class Repositories:
         return self.directory / job['id']
 
     def prepare(self, job):
+        from repository_identity import observe
+        from handoff import api
+        observe(job['repository'], api)
         checkout = self.path(job)
         if checkout.exists():
             # A crash during read-only preparation may be resumed only after the
@@ -129,6 +132,8 @@ class Repositories:
             if not self.clean(job): raise AppError('PREPARATION_OUTCOME_UNKNOWN')
             branch = git(checkout, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD').removeprefix('origin/')
             return {'base_sha': self.head(job), 'base_branch': branch, 'head': self.head(job)}
+        from repository_identity import reject_old_admission
+        reject_old_admission(job['repository'])
         metadata = parse_json(gh(job['repository'], 'repo', 'view', '--json', 'defaultBranchRef,isArchived',github_access='READ'))
         if metadata.get('isArchived'): raise AppError('ARCHIVED_REPOSITORY')
         branch = (metadata.get('defaultBranchRef') or {}).get('name')
@@ -140,6 +145,7 @@ class Repositories:
         git(checkout, 'config', 'user.name', 'AIOPS Mac')
         git(checkout, 'config', 'user.email', 'aiops-mac@users.noreply.github.com')
         git(checkout, 'checkout', '-b', job['branch'])
+        observe(job['repository'], api)
         return {'base_sha': self.head(job), 'base_branch': branch, 'head': self.head(job)}
 
     def execution_admission(self, job):
@@ -343,7 +349,8 @@ class Repositories:
         registry = Path(__file__).with_name('projects.json')
         if not registry.exists(): registry = Path(__file__).parent.parent / '.github/control-plane/projects.json'
         from common import read_json
-        config = read_json(registry).get(job['repository'], {}) if registry.exists() else {}
+        from repository_identity import current_name
+        config = read_json(registry).get(current_name(job['repository']), {}) if registry.exists() else {}
         for required in config.get('program_required_checks', []):
             matches = [c for c in checks if c['name'] == required]
             if not matches: checks.append({'name': required, 'status': 'EXPECTED', 'url': None})
@@ -361,7 +368,7 @@ class Repositories:
 
     def candidate_workflows(self,job):
         """Bound product verification only; no control-plane/VM dispatch."""
-        if job['repository'].lower()!='beautifulmind-jt/kix-protocol':
+        if job['repository'].lower() not in ('beautifulmind-jt/kix-protocol','sunburn-golden/kix-protocol'):
             raise AppError('MAC_HOST_DRAFT_CI_ROUTE_REQUIRED')
         workflows=['ktx-kernel.yml','protocol.yml']
         for name in workflows:

@@ -21,7 +21,7 @@ class CentralIdentityTests(unittest.TestCase):
         # guard is tested whether or not the runtime is currently enabled.
         for repo in ["kix-protocol", "ZARI", "film-unit-mv-studio", "maeum-gyeol"]:
             with self.subTest(repo=repo), tempfile.TemporaryDirectory() as directory, patch.dict(
-                os.environ, {"ASTRA_TARGET_REPOSITORY": "BeautifulMind-JT/" + repo}
+                os.environ, {"ASTRA_TARGET_REPOSITORY": ("BeautifulMind-JT/" if repo == "maeum-gyeol" else "SUNBURN-Golden/") + repo}
             ), patch.object(cp, "ACTIVATION_PATH", Path(directory) / "activation.json"), patch.object(
                 cp, "GithubApi"
             ) as api, patch.object(cp, "host_call") as host:
@@ -32,7 +32,7 @@ class CentralIdentityTests(unittest.TestCase):
                 with self.assertRaisesRegex(cp.ControlPlaneError, "runtime_enabled=false"):
                     cp.prepare_dispatch(1, packet)
                 self.assertFalse(packet.exists())
-                identity = dict(repository="BeautifulMind-JT/" + repo, task_id="DIAG",
+                identity = dict(repository=("BeautifulMind-JT/" if repo == "maeum-gyeol" else "SUNBURN-Golden/") + repo, task_id="DIAG",
                     task_revision="1", builder_id="DEVIN", launch_request_id="r1", attempt_id=1)
                 packet.write_text(json.dumps(identity))
                 result = root / "result.json"
@@ -57,15 +57,15 @@ class CentralIdentityTests(unittest.TestCase):
             with self.assertRaises(cp.ControlPlaneError): cp.load_config()
     def test_profiles_are_peers_and_deployment_enabled(self):
         for repo in ["kix-protocol","ZARI","film-unit-mv-studio","maeum-gyeol"]:
-            with self.subTest(repo=repo), patch.dict(os.environ, {"ASTRA_TARGET_REPOSITORY":"BeautifulMind-JT/"+repo}):
+            with self.subTest(repo=repo), patch.dict(os.environ, {"ASTRA_TARGET_REPOSITORY":("BeautifulMind-JT/" if repo == "maeum-gyeol" else "SUNBURN-Golden/")+repo}):
                 cfg=cp.load_config()
-                self.assertEqual(cfg["repository"],"BeautifulMind-JT/"+repo)
-                self.assertEqual(cfg["control_repository"],"BeautifulMind-JT/ai-ops-control-plane")
+                self.assertEqual(cfg["repository"],("BeautifulMind-JT/" if repo == "maeum-gyeol" else "SUNBURN-Golden/")+repo)
+                self.assertEqual(cfg["control_repository"],"SUNBURN-Golden/ai-ops-control-plane")
                 self.assertIn(cfg["control_record_actor"],
                               ["github-actions[bot]", *cfg["allowed_task_actors"]])
                 self.assertIs(cfg["deployment_enabled"], True)
     def test_unapproved_target_blocks_even_if_global_gate_is_enabled(self):
-        blocked={"control_repository":"BeautifulMind-JT/ai-ops-control-plane","deployment_enabled":False}
+        blocked={"control_repository":"SUNBURN-Golden/ai-ops-control-plane","deployment_enabled":False}
         with patch.object(cp,"load_activation",return_value={"runtime_enabled":True}), patch.object(cp,"validate_repo"), patch.object(cp,"load_config",return_value=blocked), patch.object(cp.subprocess,"run") as run:
             with self.assertRaisesRegex(cp.ControlPlaneError,"target deployment not approved"):
                 cp.require_runtime_enabled()

@@ -1,7 +1,7 @@
 # CP-FLOW-002 — 이벤트 접수·review 배정·감사 전달·준비 판정
 
 역사적 출발점: KIX runtime PR #32, `843840b603b011a0f04517261188c322e36a3f85`, KIX issue #33.
-현재 정본: `BeautifulMind-JT/ai-ops-control-plane/engineering`. CP-OPT-002는 중앙 dispatch와
+현재 정본: `SUNBURN-Golden/ai-ops-control-plane/engineering`. CP-OPT-002는 중앙 dispatch와
 CURSOR 등록·직접 Astra 요청 전달을 추가한다. 과거 KIX 근거는 새 구현/설치 승인이 아니다.
 이 문서는 별도 승인된 governance를 대체하지 않는다.
 

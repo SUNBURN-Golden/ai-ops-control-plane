@@ -61,8 +61,15 @@ MIGRATED_REPOSITORY_IDS = {
 }
 MIGRATED_OWNER_ID = 338877516
 LEGACY_CENTRAL_TARGET = "BeautifulMind-JT/maeum-gyeol"
+MIGRATION_MARKER = "<!-- SUNBURN_IDENTITY_MIGRATION_V1 -->"
+MIGRATION_DECISION = {
+    "id": 6029332972, "actor_id": 263336091, "actor_login": "BeautifulMind-JT",
+    "created_at": "2026-10-07T02:04:31Z",
+    "sha256": "97f2efe3a404e99b501d9ded60c740ebf50dd555de6fe90128d242b24527534c",
+}
 LAUNCH_IDENTITY = ("repository", "task_id", "task_revision", "builder_id", "launch_request_id", "attempt_id")
 RUNTIME_PATHS = (
+    "mac_app/repository_identity.py",
     "scripts/control_plane_graph_slack.py", "scripts/test_control_plane_graph_slack.py",
     "scripts/control_plane_graph.py", "scripts/control_plane_graph_cli.py",
     "scripts/test_control_plane_graph.py", "docs/TASK_GRAPH.md",
@@ -416,6 +423,17 @@ class GithubApi:
         self.base = f"https://api.github.com/repos/{repository}"
 
     def _request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Any:
+        deadline = time.monotonic() + 30
+        if self.repository in MIGRATED_REPOSITORY_IDS:
+            metadata = self._raw_request("GET", "", deadline=deadline)
+            verify_current_repository(self.repository, metadata)
+            if method == "GET" and path == "":
+                return metadata
+        elif self.repository.lower().startswith("sunburn-golden/"):
+            raise ControlPlaneError("repository outside approved identity scope")
+        return self._raw_request(method, path, payload, deadline=deadline)
+
+    def _raw_request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None, *, deadline=None) -> Any:
         url = self.base + path
         data = None
         headers = {
@@ -429,8 +447,17 @@ class GithubApi:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                raw = response.read().decode()
+            # A redirect is not a repository-ID/owner proof. Preserve the old
+            # generic client seam while refusing redirects for the adopted IDs.
+            opener = urllib.request.build_opener(IdentityNoRedirect()).open if self.repository in MIGRATED_REPOSITORY_IDS else urllib.request.urlopen
+            remaining = 30 if deadline is None else deadline - time.monotonic()
+            if remaining <= 0:
+                raise ControlPlaneError("GitHub identity request deadline exceeded")
+            with opener(req, timeout=remaining) as response:
+                raw_bytes = response.read(8 * 1024 * 1024 + 1)
+                if len(raw_bytes) > 8 * 1024 * 1024:
+                    raise ControlPlaneError("GitHub API response too large")
+                raw = raw_bytes.decode()
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode(errors="replace")
             raise ControlPlaneError(f"GitHub API {method} {path} failed: {exc.code} {raw}") from exc
@@ -455,6 +482,8 @@ class GithubApi:
             if len(chunk) < 100:
                 break
             page += 1
+            if page > 20:
+                raise ControlPlaneError("GitHub comment pagination limit exceeded")
         return result
 
     def create_comment(self, number: int, body: str) -> Dict[str, Any]:
@@ -465,6 +494,90 @@ class GithubApi:
 
     def delete_comment(self, comment_id: int) -> None:
         self._request("DELETE", f"/issues/comments/{comment_id}")
+
+
+class IdentityNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise ControlPlaneError("repository identity redirects are not permitted")
+
+
+def verify_current_repository(repository: str, metadata: Any) -> None:
+    owner = metadata.get("owner") if isinstance(metadata, dict) else None
+    if (repository not in MIGRATED_REPOSITORY_IDS or not isinstance(metadata, dict)
+            or type(metadata.get("id")) is not int or metadata["id"] != MIGRATED_REPOSITORY_IDS[repository]
+            or metadata.get("full_name") != repository or metadata.get("fork") is not False
+            or metadata.get("private") is not True or metadata.get("archived") is not False
+            or not isinstance(owner, dict) or type(owner.get("id")) is not int
+            or owner["id"] != MIGRATED_OWNER_ID or owner.get("login") != "SUNBURN-Golden"
+            or owner.get("type") != "Organization"):
+        raise ControlPlaneError("authenticated repository identity mismatch")
+
+
+def historical_pointer_matches(original: str, current: str, repository: str, number: int) -> bool:
+    """Same type/number only within the adopted old/new names; no URL rewrite."""
+    if repository not in MIGRATED_REPOSITORY_IDS:
+        return original == current
+    old = "BeautifulMind-JT/" + repository.split("/", 1)[1]
+    return (original in (f"https://github.com/{old}/issues/{number}", f"https://github.com/{repository}/issues/{number}")
+            and current == f"https://github.com/{repository}/issues/{number}")
+
+
+def migration_decision_verified(token: str) -> None:
+    api = GithubApi(CONTROL_REPOSITORY, token)
+    comment = api._request("GET", f"/issues/comments/{MIGRATION_DECISION['id']}")
+    actor = comment.get("user") if isinstance(comment, dict) else None
+    if (not isinstance(comment, dict) or type(comment.get("id")) is not int
+            or comment["id"] != MIGRATION_DECISION["id"] or not isinstance(actor, dict)
+            or type(actor.get("id")) is not int or actor["id"] != MIGRATION_DECISION["actor_id"]
+            or actor.get("login") != MIGRATION_DECISION["actor_login"] or actor.get("type") != "User"
+            or comment.get("html_url") != f"https://github.com/{CONTROL_REPOSITORY}/pull/83#issuecomment-{MIGRATION_DECISION['id']}"
+            or comment.get("issue_url") != f"https://api.github.com/repos/{CONTROL_REPOSITORY}/issues/83"
+            or comment.get("created_at") != comment.get("updated_at")
+            or comment.get("created_at") != MIGRATION_DECISION["created_at"]
+            or not isinstance(comment.get("body"), str)
+            or hashlib.sha256(comment["body"].encode()).hexdigest() != MIGRATION_DECISION["sha256"]):
+        raise ControlPlaneError("immutable migration User decision unverified")
+
+
+def connect_historical_task(api: GithubApi, comments: list, record: dict, envelope: dict,
+                            number: int, token: str, transport: str, original_body: str) -> None:
+    """Append a separate scope projection; original envelope/record stay intact.
+
+    This record grants transport linkage only. Existing retry/owner/UNKNOWN,
+    provider, protected admission and current-head gates remain authoritative.
+    """
+    migration_decision_verified(token)
+    subject = {key: record.get(key) for key in (*LAUNCH_IDENTITY, "claim_id", "owner_lane", "owner_session_id")}
+    if (subject["repository"] != envelope["REPO"] or subject["task_id"] != envelope["TASK_ID"]
+            or subject["task_revision"] != envelope["TASK_REVISION"] or subject["builder_id"] != envelope["BUILDER_ID"]):
+        raise ControlPlaneError("historical migration subject mismatch")
+    source = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", source):
+        raise ControlPlaneError("migration source SHA unavailable")
+    subject_sha = hashlib.sha256(json.dumps(subject, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    projection = {"schema_version": 1, "kind": "TRANSPORT_LINK_ONLY", "execution_authorized": False,
+                  "canonical_repository": envelope["REPO"], "transport_repository": transport,
+                  "repository_id": MIGRATED_REPOSITORY_IDS[transport], "old_owner_id": 263336091,
+                  "new_owner_id": MIGRATED_OWNER_ID, "issue_number": number, "source_sha": source,
+                  "subject_sha256": subject_sha, "envelope_sha256": hashlib.sha256(original_body.encode()).hexdigest(),
+                  "decision_id": MIGRATION_DECISION["id"], "decision_sha256": MIGRATION_DECISION["sha256"]}
+    body = MIGRATION_MARKER + "\n```json\n" + json.dumps(projection, sort_keys=True, indent=2) + "\n```"
+    matches = [c for c in comments if MIGRATION_MARKER in (c.get("body") or "")]
+    for comment in matches:
+        actor = comment.get("user") or {}
+        if (actor.get("login") != MIGRATION_DECISION["actor_login"] or type(actor.get("id")) is not int
+                or actor["id"] != MIGRATION_DECISION["actor_id"] or actor.get("type") != "User"
+                or comment.get("created_at") != comment.get("updated_at")):
+            raise ControlPlaneError("foreign migration projection")
+        if comment.get("body") == body:
+            return
+    # No overwrite/delete: each new source/attempt adds its own exact subject.
+    created = api.create_comment(number, body)
+    actor = created.get("user") or {}
+    if (actor.get("login") != MIGRATION_DECISION["actor_login"] or type(actor.get("id")) is not int
+            or actor["id"] != MIGRATION_DECISION["actor_id"] or actor.get("type") != "User"
+            or created.get("created_at") != created.get("updated_at") or created.get("body") != body):
+        raise ControlPlaneError("migration projection author/body unverified")
 
 
 def find_control_comment(comments: list, expected_actor: str) -> Optional[Dict[str, Any]]:
@@ -748,21 +861,41 @@ def prepare_dispatch(issue_number: int, packet_path: Path, expected: Optional[Di
         raise ControlPlaneError(f"canonical task actor is not allowed: {issue_actor!r}")
 
     envelope = parse_task_envelope(issue.get("body") or "")
-    validate_task(envelope, cfg)
     verify_dispatch_binding(issue.get("body") or "", envelope, expected)
     issue_url = issue.get("html_url") or ""
-    if envelope["CANONICAL_TASK_POINTER"] != issue_url:
+    transport = cfg["repository"]
+    historical = (transport in MIGRATED_REPOSITORY_IDS and
+                  envelope["REPO"] == "BeautifulMind-JT/" + transport.split("/", 1)[1])
+    comments = api.comments(issue_number) if historical else None
+    comment = find_control_comment(comments, cfg["control_record_actor"]) if historical else None
+    if historical:
+        # An old-name envelope cannot allocate a fresh writer/task identity.
+        if not comment:
+            raise ControlPlaneError("historical pointer requires the existing canonical control record")
+        record = parse_control_record(comment.get("body") or "")
+        if (record.get("repository") != envelope["REPO"] or record.get("task_id") != envelope["TASK_ID"]
+                or record.get("task_revision") != envelope["TASK_REVISION"] or record.get("builder_id") != envelope["BUILDER_ID"]):
+            raise ControlPlaneError("historical migration subject mismatch")
+        verify_current_repository(transport, api._request("GET", ""))
+        migration_decision_verified(token)
+        cfg = {**cfg, "repository": envelope["REPO"]}  # preserve stable_id's original input
+    validate_task(envelope, cfg)
+    if not historical_pointer_matches(envelope["CANONICAL_TASK_POINTER"], issue_url, transport, issue_number):
         raise ControlPlaneError("CANONICAL_TASK_POINTER must equal the canonical issue URL")
-    if envelope["CONTROL_RECORD_POINTER"] != issue_url:
+    if not historical_pointer_matches(envelope["CONTROL_RECORD_POINTER"], issue_url, transport, issue_number):
         raise ControlPlaneError("CONTROL_RECORD_POINTER must equal the canonical issue URL for runtime v1")
 
     requested_attempt = expected_attempt_id()
-    comment = find_control_comment(api.comments(issue_number), cfg["control_record_actor"])
+    comment = comment if historical else find_control_comment(api.comments(issue_number), cfg["control_record_actor"])
     if comment:
         record = parse_control_record(comment.get("body") or "")
         current_attempt = record_attempt_id(record)
         if record.get("task_id") != envelope["TASK_ID"]:
             raise ControlPlaneError("existing control record identity does not match current task")
+        if historical:
+            if record["launch_state"] in {"SUBMITTING", "UNKNOWN"}:
+                raise ControlPlaneError(f"unresolved {record['launch_state']} launch blocks redispatch")
+            connect_historical_task(api, comments, record, envelope, issue_number, token, transport, issue.get("body") or "")
         if requested_attempt == current_attempt + 1:
             # Explicit retry event: the dispatcher pinned the next attempt number,
             # so a repeated retry dispatch resolves to the new attempt instead of

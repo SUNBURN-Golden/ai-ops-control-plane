@@ -80,6 +80,18 @@ def handoff_id(value, code='INVALID_HANDOFF_ID'):
 
 
 def api(path, paginate=False):
+    parts = path.split('/')
+    if len(parts) >= 3 and parts[0] == 'repos':
+        from repository_identity import current_pin, observe
+        target = '/'.join(parts[1:3])
+        if current_pin(target) is not None:
+            metadata = observe(target, _raw_api)
+            if len(parts) == 3 and not paginate:
+                return metadata
+    return _raw_api(path, paginate)
+
+
+def _raw_api(path, paginate=False):
     args = ['gh', 'api', '--method', 'GET']
     if paginate: args += ['--paginate', '--slurp']
     try:
@@ -94,6 +106,8 @@ def api(path, paginate=False):
 @bounded_api_reads
 def inspect_repository(value):
     repo = repository(value)
+    from repository_identity import reject_old_admission
+    reject_old_admission(repo)
     root = 'repos/' + repo
     metadata = api(root)
     if (not isinstance(metadata, dict) or not isinstance(metadata.get('full_name'), str) or

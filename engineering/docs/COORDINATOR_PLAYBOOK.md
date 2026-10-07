@@ -47,12 +47,12 @@ post `COORDINATOR_BLOCKED <reason>` and stop. Never invent another action.
 
 - **Programs:** every repository in `.github/control-plane/projects.json` whose default branch contains `.aiops/program.json`.
   - `plan_commit` is the latest default-branch commit that touched that file.
-- **Lane Board:** the `AIOPS Lane Board` issue in `BeautifulMind-JT/ai-ops-control-plane`, or a fresh `operation=lanes` run.
+- **Lane Board:** the `AIOPS Lane Board` issue in `SUNBURN-Golden/ai-ops-control-plane`, or a fresh `operation=lanes` run.
 - **Task issues:** label `aiops-task` in each product repository, open and closed. Take the canonical control-record comment from each one.
 
 ## 2. Operations
 
-Every operation is a `workflow_dispatch` of `control-plane-runtime.yml` on `main` of `BeautifulMind-JT/ai-ops-control-plane`, with:
+Every operation is a `workflow_dispatch` of `control-plane-runtime.yml` on `main` of `SUNBURN-Golden/ai-ops-control-plane`, with:
 - `target_repository` set to the product repository;
 - `issue_number` set to the task issue number, where the operation takes one;
 - `program_args` set to the JSON arguments.
